@@ -1,0 +1,35 @@
+server : 
+   
+   listen : 8080
+   httpsPort : 8443
+   workers : 4 
+
+   upstreams : 
+      - id : node1 
+        url : http://localhost:8001
+
+      - id : node2 
+        url : http://localhost:8002 
+  
+   paths : 
+      - path : /
+        upstream : 
+           - node1 
+           - node2 
+        rateLimit : 
+           windowMs: 60000
+           maxRequests: 10 
+        
+      - path : /admin
+        upstream : 
+           - node2 
+        rateLimit:
+           windowMs: 60000
+           maxRequests: 100
+
+   headers : 
+      - key: X-Forwarded-For
+        value: client_ip
+      - key: X-Real-IP
+        value: client_ip
+ 

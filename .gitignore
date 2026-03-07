@@ -1,0 +1,7 @@
+node_modules/
+dist/
+key.pem       
+cert.pem    
+logs/
+.env
+notes.t
