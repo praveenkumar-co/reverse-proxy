@@ -14,5 +14,5 @@ export const workerMessageReplySchema = z.object({
 });
 
 // making type of worker Message Schema and Reply Schema of Workers
-export type WorkerMessageType = z.infer<typeof workerMessageSchema>;
+export type  WorkerMessageType = z.infer<typeof workerMessageSchema>;
 export type WorkerReplyMessageType = z.infer<typeof workerMessageReplySchema>;
