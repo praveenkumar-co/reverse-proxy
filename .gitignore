@@ -5,3 +5,5 @@ cert.pem
 logs/
 .env
 notes.t
+result.t
+auto_scaling_flow.svg

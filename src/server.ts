@@ -1,210 +1,427 @@
 import http from "http";
-import https from 'https';
-import { readFileSync } from 'fs';
+import https from "https";
+import { readFileSync } from "fs";
 import type { ConfigSchemaType } from "./config-schema.js";
 import cluster, { Worker } from "node:cluster";
 import { rootConfigSchema } from "./config-schema.js";
-import type { WorkerMessageType } from "./server-schema.js";
-import { workerMessageSchema } from "./server-schema.js";
-import type { WorkerReplyMessageType } from "./server-schema.js";
-import { workerMessageReplySchema } from "./server-schema.js";
-import { initialHealthCheck, startHealthChecks } from "./health.js"; 
-import {RateLimiter} from './rate-limiter.js';
+import { AutoScaler } from "./auto-scaler.js";
 
-interface createServerConfig {
+import type {
+  WorkerMessageType,
+  WorkerReplyMessageType,
+} from "./server-schema.js";
+import {
+  workerMessageSchema,
+  workerMessageReplySchema,
+} from "./server-schema.js";
+
+import { initialHealthCheck, startHealthChecks } from "./health.js";
+import { RateLimiter } from "./rate-limiter.js";
+import { LoadBalancer } from "./loadBalancer.js";
+import { registry } from "./Serviceregistry.js";
+
+interface CreateServerConfig {
   port: number;
   workerCount: number;
   config: ConfigSchemaType;
 }
-export async function createServer(config: createServerConfig) {
-  const { port, workerCount } = config; 
+const MAX_RETRIES = 2;
+
+export async function createServer(config: CreateServerConfig) {
+  const { port, workerCount } = config;
   const WORKER_POOL: Worker[] = [];
+
   const HEALTHY_UPSTREAMS: Set<string> = new Set(
     config.config.server.upstreams.map((e) => e.id)
   );
-  // map of ratelimiters for every
-  if(cluster.isPrimary){
-    // these files are private to user  
-    const sslOptions = { 
-      key : readFileSync('key.pem'),
-      cert : readFileSync('cert.pem')
+  if (cluster.isPrimary) {
+    const sslOptions = {
+      key: readFileSync("key.pem"),
+      cert: readFileSync("cert.pem"),
     };
-    const rateLimiters = new Map<string,RateLimiter>();
-    // setting new ratelimiter for incoming new request 
-  config.config.server.paths.forEach((path) =>{
-     if(path.rateLimit){
-       rateLimiters.set(path.path,new RateLimiter({
-        windowMs: path.rateLimit.windowMs,
-        maxRequests : path.rateLimit.maxRequests  
-       }));
+    const rateLimiters = new Map<string, RateLimiter>();
+    config.config.server.paths.forEach((p) => {
+      if (p.rateLimit) {
+        rateLimiters.set(
+          p.path,
+          new RateLimiter({
+            windowMs: p.rateLimit.windowMs,
+            maxRequests: p.rateLimit.maxRequests,
+          })
+        );
       }
-  })
-    console.log("Master is running up");
-      // Event registration 
-    cluster.on("online", (worker) => {
-      console.log(`${worker.process.pid} is now online`);
     });
-    cluster.on("exit", (worker) => {
-      // removing dead worker to stop master processing crash 
-      console.log(`[Master] Worker PID ${worker.process.pid} died`);
-      const deadWorkerIndex = WORKER_POOL.indexOf(worker);
-      if (deadWorkerIndex !== -1) {
-        WORKER_POOL.splice(deadWorkerIndex, 1);
-        console.log(`[Master] Dead worker removed from pool`);
+    const lb = new LoadBalancer({
+      strategy: config.config.server.loadBalancing.strategy,
+      upstreamIds: config.config.server.upstreams.map((u) => u.id),
+      failureThreshold: config.config.server.loadBalancing.failureThreshold,
+      recoveryTimeMs: config.config.server.loadBalancing.recoveryTimeMs,
+    });
+    registry.onRegister((service) => {
+      HEALTHY_UPSTREAMS.add(service.id);
+      if (!lb.hasUpstream(service.id)) {
+        lb.addUpstream(service.id);
       }
-      // Replacement worker !
+      console.log(
+        `[Master] New service added to LB: ${service.id} → ${service.url}`
+      );
+    });
+    registry.onDeregister((service) => {
+      console.log(`[DEBUG] Deregistering: ${service.id}`);
+      if (service.status === "DOWN") {
+        HEALTHY_UPSTREAMS.delete(service.id);
+        lb.removeUpstream(service.id);
+        console.log(`[Master] Service removed from LB: ${service.id}`);
+      }
+    });
+    config.config.server.upstreams.forEach((u) => {
+      registry.register({ id: u.id, url: u.url });
+    });
+    console.log(
+      `[Master] Load balancing strategy: ${config.config.server.loadBalancing.strategy}`
+    );
+    cluster.on("online", (worker) => {
+      console.log(`[Master] Worker PID ${worker.process.pid} is online`);
+    });
+
+    cluster.on("exit", (worker) => {
+      console.log(
+        `[Master] Worker PID ${worker.process.pid} died — replacing...`
+      );
+      const idx = WORKER_POOL.indexOf(worker);
+      if (idx !== -1) WORKER_POOL.splice(idx, 1);
       const newWorker = cluster.fork({
         APP_CONFIG: JSON.stringify(config.config),
       });
       WORKER_POOL.push(newWorker);
     });
-    // Fork workers
+
     for (let i = 0; i < workerCount; i++) {
       const worker = cluster.fork({
         APP_CONFIG: JSON.stringify(config.config),
       });
       WORKER_POOL.push(worker);
     }
-     //  round robin Algorith
-    let currentWorkerIndex = 0;
-      // removing server and replacing to httpServer 
-    const httpServer = http.createServer((req, res) => {
-      const httpsUrl = `https://${req.headers.host?.replace('8080', '8443')}${req.url}`;
-      res.writeHead(301,{
-        'Location' : httpsUrl
-      });
-      res.end();
-    }); 
-    // making https server between client and reverse proxy 
-    const httpsServer = https.createServer(sslOptions,(req,res)=>{
-      const clientIP = req.socket.remoteAddress ?? 'unknown';
-      const routeLimiter = rateLimiters.get(req.url ?? "/");
-      // is client IP allowed
-      if(routeLimiter && !routeLimiter.isAllowed(clientIP)){
-           res.writeHead(429, {
-            'Content-Type': 'application/json', 
-            'Retry-After': Math.ceil((routeLimiter.getResetTime(clientIP) - Date.now()) / 1000).toString(),
-            'X-RateLimit-Remaining': '0',
-        });
-        res.end(JSON.stringify({
-          error : 'Too Many Requests!',
-           retryAfter: `${Math.ceil((routeLimiter.getResetTime(clientIP) - Date.now()) / 1000)} seconds try later!`
-        }));
-        return ; // stop right away  
+    function dispatchToWorker(
+      payload: WorkerMessageType,
+      clientIp: string,
+      res: http.ServerResponse,
+      attempt = 0
+    ) {
+      const upstreamId = lb.pick(HEALTHY_UPSTREAMS, clientIp);
+      if (!upstreamId) {
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "No healthy upstreams available" }));
+        return;
       }
-        if(routeLimiter){
-             res.setHeader('X-RateLimit-Remaining', 
-            routeLimiter.getRemainingRequests(clientIP).toString()
-        );
-        }
-        let body = '';
-        req.on('data',(chunk)=>{
-          body += chunk;
-        });
-        req.on('end',()=>{
-        // choosing random worker from pool
-      const worker = WORKER_POOL[currentWorkerIndex % WORKER_POOL.length];
-      currentWorkerIndex++;
+      const serviceInstance = registry.get(upstreamId);
+      if (!serviceInstance) {
+        res.writeHead(503);
+        res.end("Service not found in registry");
+        return;
+      }
+      const enrichedPayload: WorkerMessageType & {
+        upstreamId: string;
+        upstreamUrl: string;
+      } = {
+        ...payload,
+        upstreamId,
+        upstreamUrl: serviceInstance.url,
+      };
+
+      const worker = WORKER_POOL[attempt % WORKER_POOL.length];
       if (!worker) {
         res.writeHead(500);
-          res.end("No workers available");
-          return;
+        res.end("No worker available");
+        return;
       }
-        const payload: WorkerMessageType = {
-          requestType: (req.method ?? 'GET') as 'GET' || 'POST' || 'PUT' || 'PATCH' || 'DELETE' ,
-          headers: req.headers,
-          body: body || null ,
-          url: `${req.url}`,
-        };
-        worker.send(JSON.stringify(payload));
-        worker.once("message", async (workerReply: string) => {
-          const reply = await workerMessageReplySchema.parseAsync(
-            JSON.parse(workerReply)
-          );
+      worker.send(JSON.stringify(enrichedPayload));
+      worker.once("message", async (raw: string) => {
+        const reply = await workerMessageReplySchema.parseAsync(
+          JSON.parse(raw)
+        );
+
         if (reply.errorCode) {
-          res.writeHead(parseInt(reply.errorCode));
-          res.end(reply.error);
+          lb.recordFailure(upstreamId);
+          if (attempt < MAX_RETRIES) {
+            console.log(
+              `[Master] Upstream ${upstreamId} failed (attempt ${
+                attempt + 1
+              }) — retrying...`
+            );
+            dispatchToWorker(payload, clientIp, res, attempt + 1);
+          } else {
+            res.writeHead(parseInt(reply.errorCode));
+            res.end(reply.error);
+          }
         } else {
+          lb.recordSuccess(upstreamId);
           res.writeHead(200);
           res.end(reply.data);
         }
       });
+    }
+    // autoscaling group
+    const autoScaler = config.config.server.autoScaling.enabled
+      ? new AutoScaler(
+          {
+            minServers: config.config.server.autoScaling.minServers,
+            maxServers: config.config.server.autoScaling.maxServers,
+            scaleUpAt: config.config.server.autoScaling.scaleUpAt,
+            scaleDownAt: config.config.server.autoScaling.scaleDownAt,
+            cooldownMs: config.config.server.autoScaling.cooldownMs,
+            startPort: config.config.server.autoScaling.startPort,
+            proxyPort: config.config.server.autoScaling.proxyPort,
+          },
+          lb
+        )
+      : null;
+
+    const httpServer = http.createServer((req, res) => {
+      if (req.url?.startsWith("/__registry")) {
+        httpsServer.emit("request", req, res);
+        return;
+      }
+      const httpsUrl = `https://${req.headers.host?.replace(
+        String(port),
+        String(config.config.server.httpsPort ?? 8443)
+      )}${req.url}`;
+      res.writeHead(301, { Location: httpsUrl });
+      res.end();
     });
-  });
-    // intial health check 
+    const httpsServer = https.createServer(sslOptions, (req, res) => {
+      const clientIP =
+        (req.headers["x-forwarded-for"] as string) ??
+        req.socket.remoteAddress ??
+        "unknown";
+      if (req.url === "/__lb-stats") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify(
+            {
+              strategy: config.config.server.loadBalancing.strategy,
+              upstreams: lb.getStats(),
+              healthyUpstreams: [...HEALTHY_UPSTREAMS],
+            },
+            null,
+            2
+          )
+        );
+        return;
+      }
+      if (req.url === "/__autoscaler-stats") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify(autoScaler?.getStats() ?? { enabled: false }, null, 2)
+        );
+        return;
+      }
+      if (req.url === "/__registry") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(registry.getStats(), null, 2));
+        return;
+      }
+      if (req.url === "/__registry/register" && req.method === "POST") {
+        let body = "";
+        req.on("data", (chunk) => {
+          body += chunk;
+        });
+        req.on("end", () => {
+          try {
+            const { id, url, metadata } = JSON.parse(body);
+            if (!id || !url) {
+              res.writeHead(400);
+              res.end(JSON.stringify({ error: "id and url are required" }));
+              return;
+            }
+            const service = registry.register({ id, url, metadata });
+            res.writeHead(201, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify({ message: `Service ${id} registered!`, service })
+            );
+          } catch {
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: "Invalid JSON body" }));
+          }
+        });
+        return;
+      }
+      if (
+        req.url?.startsWith("/__registry/deregister/") &&
+        req.method === "DELETE"
+      ) {
+        const id = req.url.replace("/__registry/deregister/", "");
+        const success = registry.deregister(id);
+        if (success) {
+          res.writeHead(200);
+          res.end(JSON.stringify({ message: `Service ${id} deregistered!` }));
+        } else {
+          res.writeHead(404);
+          res.end(JSON.stringify({ error: `Service ${id} not found` }));
+        }
+        return;
+      }
+      if (
+        req.url?.startsWith("/__registry/heartbeat/") &&
+        req.method === "PUT"
+      ) {
+        const id = req.url.replace("/__registry/heartbeat/", "");
+        const success = registry.heartbeat(id);
+        res.writeHead(success ? 200 : 404);
+        res.end(JSON.stringify({ ok: success }));
+        return;
+      }
+      const url = new URL(req.url!, `https://${req.headers.host}`);
+      const path = url.pathname;
+      const routeLimiter = rateLimiters.get(path);
+      if (routeLimiter && !routeLimiter.isAllowed(clientIP)) {
+        const retryAfter = Math.ceil(
+          (routeLimiter.getResetTime(clientIP) - Date.now()) / 1000
+        );
+        res.writeHead(429, {
+          "Content-Type": "application/json",
+          "Retry-After": retryAfter.toString(),
+          "X-RateLimit-Remaining": "0",
+        });
+        res.end(
+          JSON.stringify({
+            error: "Too Many Requests",
+            retryAfter: `${retryAfter}s`,
+          })
+        );
+        return;
+      }
+
+      if (routeLimiter) {
+        res.setHeader(
+          "X-RateLimit-Remaining",
+          routeLimiter.getRemainingRequests(clientIP).toString()
+        );
+      }
+
+      let body = "";
+      req.on("data", (chunk) => {
+        body += chunk;
+      });
+      req.on("end", () => {
+        const payload: WorkerMessageType = {
+          requestType: (req.method ??
+            "GET") as WorkerMessageType["requestType"],
+          headers: req.headers,
+          body: body || null,
+          url: `${req.url}`,
+        };
+        dispatchToWorker(payload, clientIP, res);
+      });
+      if (req.url === "/__autoscaler-stats") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify(autoScaler?.getStats() ?? { enabled: false }, null, 2)
+        );
+        return;
+      }
+    });
+    let isShuttingDown = false;
+    function gracefulShutdown(signal: string) {
+      if (isShuttingDown) return;
+      isShuttingDown = true;
+      if (autoScaler) {
+        autoScaler.stop();
+      }
+      console.log(
+        `\n[Master] Received ${signal} — starting graceful shutdown...`
+      );
+      httpServer.close(() => console.log("[Master] HTTP server closed"));
+      httpsServer.close(() => {
+        console.log("[Master] HTTPS server closed — all connections drained");
+        process.exit(0);
+      });
+      setTimeout(() => {
+        console.error("[Master] Forced exit after timeout");
+        process.exit(1);
+      }, 10_000);
+    }
+    process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+    process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+    await new Promise((res) => setTimeout(res, 3000));
     await initialHealthCheck(config.config.server.upstreams, HEALTHY_UPSTREAMS);
-     httpServer.listen(port, () => {
-       console.log(`HTTP listening on PORT ${port} (redirects to HTTPS)`);
+
+    httpServer.listen(port, () => {
+      console.log(`[Master] HTTP on port ${port} → redirects to HTTPS`);
     });
-    // starting the HTTPS connection 
-    httpsServer.listen(8443, () => {
-      console.log(`HTTPS on PORT 8443`);
+    httpsServer.listen(config.config.server.httpsPort ?? 8443, () => {
+      console.log(
+        `[Master] HTTPS on port ${config.config.server.httpsPort ?? 8443}`
+      );
       startHealthChecks(config.config.server.upstreams, HEALTHY_UPSTREAMS);
-    });
-  }
-  else {
-    // if chance of worker instead of master 
-    console.log(`Worker ${process.pid} spinned UP`);
-    // process.env.APP_CONFIG refer 
+      if(autoScaler){
+        autoScaler.start();
+      }
+    });   
+  } else {
+    console.log(`[Worker ${process.pid}] Ready for work`);
     const workerConfig = await rootConfigSchema.parseAsync(
       JSON.parse(process.env.APP_CONFIG!)
     );
     process.on("message", async (message: string) => {
-      const messageValidated = await workerMessageSchema.parseAsync(
-        JSON.parse(message)
-      );
-      const requestUrl = messageValidated.url;
+      const msg = await workerMessageSchema.parseAsync(JSON.parse(message));
+      const raw = JSON.parse(message) as {
+        upstreamId?: string;
+        upstreamUrl?: string;
+      };
+      const upstreamUrl: string | undefined = raw.upstreamUrl;
+
+      const requestUrl = msg.url;
       const rule = workerConfig.server.paths.find((e) => e.path === requestUrl);
+
       if (!rule) {
         const reply: WorkerReplyMessageType = {
           errorCode: "404",
-          error: "Rule not found",
+          error: "Route not found",
           data: "",
         };
         if (process.send) process.send(JSON.stringify(reply));
         return;
       }
-      //Healthy upstream ! sending to backend server  
-      const upstreamID = rule.upstream.find((id) => HEALTHY_UPSTREAMS.has(id));
-      if (!upstreamID) {
-        const reply: WorkerReplyMessageType = {
-          errorCode: "500",
-          error: "No healthy upstreams available!",
-          data: "",
-        };
-        if (process.send) process.send(JSON.stringify(reply));
-        return;
+      let finalUpstreamUrl: URL;
+      if (upstreamUrl) {
+        finalUpstreamUrl = new URL(upstreamUrl);
+      } else {
+        const upstream = workerConfig.server.upstreams.find(
+          (e) => e.id === rule.upstream[0]
+        );
+        if (!upstream) {
+          const reply: WorkerReplyMessageType = {
+            errorCode: "500",
+            error: "Upstream not found",
+            data: "",
+          };
+          if (process.send) process.send(JSON.stringify(reply));
+          return;
+        }
+        finalUpstreamUrl = new URL(upstream.url);
       }
-      // after recieving the correct details from reverse Porxy 
-      const upstream = workerConfig.server.upstreams.find(
-        (e) => e.id === upstreamID
-      );
-      if (!upstream) {
-        const reply: WorkerReplyMessageType = {
-          errorCode: "500",
-          error: "Upstream not found",
-          data: "",
-        };
-        if (process.send) process.send(JSON.stringify(reply));
-        return;
-      }
-      const upstreamUrl = new URL(upstream.url);
+      const agent = new http.Agent({
+        keepAlive: true,
+        maxSockets: 1000,
+      });
       const proxyReq = http.request(
         {
-          host: upstreamUrl.hostname,
-          port: upstreamUrl.port,
+          host: finalUpstreamUrl.hostname,
+          port: finalUpstreamUrl.port,
           path: requestUrl,
-          method: messageValidated.requestType, // all type http request
+          method: msg.requestType,
+          agent: agent,
           headers: {
-            ...messageValidated.headers,
-            "X-Forwarded-For": "127.0.0.1",
+            ...msg.headers,
+            "X-Forwarded-For": msg.headers["x-forwarded-for"] || "unknown",
             "X-Real-IP": "127.0.0.1",
             "X-Proxy-By": "Ninja-Reverse-Proxy",
-            ...(messageValidated.body && {
-               'Content-Length' : Buffer.byteLength(messageValidated.body).toString()
-            })
+            ...(msg.body && {
+              "Content-Length": Buffer.byteLength(msg.body).toString(),
+            }),
           },
-        },  
+        },
         (upstreamRes) => {
           let body = "";
           const timeout = setTimeout(() => {
@@ -215,23 +432,27 @@ export async function createServer(config: createServerConfig) {
             };
             if (process.send) process.send(JSON.stringify(reply));
             proxyReq.destroy();
-          }, 5000);
-
+          },15000);
           upstreamRes.on("data", (chunk) => {
             body += chunk;
           });
           upstreamRes.on("end", () => {
             clearTimeout(timeout);
-            const reply: WorkerReplyMessageType = {
-              data: body,
-              error: "",
-            };
+            const reply: WorkerReplyMessageType = { data: body, error: "" };
             if (process.send) process.send(JSON.stringify(reply));
           });
-        });
-        if(messageValidated.body){
-          proxyReq.write(messageValidated.body);
         }
+      );
+      proxyReq.on("error", () => {
+        const reply: WorkerReplyMessageType = {
+          errorCode: "500",
+          error: "Upstream connection failed",
+          data: "",
+        };
+        if (process.send) process.send(JSON.stringify(reply));
+      });
+
+      if (msg.body) proxyReq.write(msg.body);
       proxyReq.end();
     });
   }

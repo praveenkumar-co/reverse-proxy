@@ -34,7 +34,7 @@ export class RateLimiter {
                 count: 1,
                 windowStart: now
             });
-            return true; 
+            return true;    
         }
         if (record.count >= this.maxRequests) {
             return false;

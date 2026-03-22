@@ -53,7 +53,7 @@ export async function startHealthChecks(
       const upstreamUrl = new URL(upstream.url); 
       const req = http.request(
         {
-          host: upstreamUrl.hostname,
+          host: upstreamUrl.hostname, 
           port: upstreamUrl.port,
           path: "/health",
           method: "GET",

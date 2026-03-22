@@ -1,31 +1,57 @@
 server : 
-   
+
    listen : 8080
    httpsPort : 8443
-   workers : 4 
+   workers : 6 
+
+   loadBalancing : 
+      strategy : round-robin 
+      failureThreshold : 3 
+      recoveryTimeMs : 15000
+      # recoveryTime is of 15 seconds
+
+   autoScaling:
+         enabled: true
+         minServers: 2
+         maxServers: 10
+         scaleUpAt: 3
+         scaleDownAt: 1
+         cooldownMs: 60000
+         startPort: 9000
+         proxyPort: 8080
 
    upstreams : 
       - id : node1 
-        url : http://localhost:8001
+        url : http://node1:8001
 
       - id : node2 
-        url : http://localhost:8002 
+        url : http://node2:8002 
+      
+      - id : node3 
+        url : http://node3:8003
+      
+      - id : node4
+        url : http://node4:8004
   
    paths : 
       - path : /
         upstream : 
            - node1 
            - node2 
+           - node3 
+           - node4 
         rateLimit : 
            windowMs: 60000
-           maxRequests: 10 
+           maxRequests: 1000000 
         
       - path : /admin
         upstream : 
            - node2 
+           - node3
+           - node4
         rateLimit:
            windowMs: 60000
-           maxRequests: 100
+           maxRequests: 1000000   
 
    headers : 
       - key: X-Forwarded-For
