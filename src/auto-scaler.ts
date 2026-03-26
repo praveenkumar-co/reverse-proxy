@@ -108,7 +108,7 @@ export class AutoScaler {
 
     console.log(`[AutoScaler] Spawning ${id} on port ${port}...`);
 
-    const child = spawn("node", [join(process.cwd(), "server-template.js")], {
+   const child = spawn("node", ["server-template.js"], {
       env: {
         ...process.env,
         SERVER_PORT: String(port),
@@ -177,3 +177,5 @@ export class AutoScaler {
     };
   }
 }
+
+

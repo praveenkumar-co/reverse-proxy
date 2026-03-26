@@ -19,6 +19,12 @@ server :
          cooldownMs: 60000
          startPort: 9000
          proxyPort: 8080
+   
+   cache :
+         enabled : true
+         host : redis
+         port : 6379
+         ttlSeconds : 60
 
    upstreams : 
       - id : node1 
@@ -58,4 +64,3 @@ server :
         value: client_ip
       - key: X-Real-IP
         value: client_ip
- 

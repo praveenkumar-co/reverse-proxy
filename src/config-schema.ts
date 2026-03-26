@@ -58,6 +58,18 @@ const autoScalingSchema = z.object({
     proxyPort : 8080
 });
 
+const cacheSchema = z.object({
+  enabled : z.boolean().default(false),
+  host : z.string().default("redis"),
+  port : z.number().default(6379),
+  ttlSeconds: z.number().default(60),
+}).default({
+  enabled : false ,
+  host : "redis",
+  port : 6379 ,
+  ttlSeconds : 60
+});
+
 const serverSchema = z.object({
   listen: z.number(),
   httpsPort: z.number().optional(),
@@ -67,6 +79,7 @@ const serverSchema = z.object({
   paths: z.array(pathRuleSchema),
   loadBalancing: loadBalancerSchema,
   autoScaling: autoScalingSchema,
+  cache : cacheSchema ,
 });
 
 export const rootConfigSchema = z.object({

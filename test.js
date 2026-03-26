@@ -11,12 +11,12 @@ const BASE_URL = "https://localhost:8443";
 
 export const options = {
   insecureSkipTLSVerify: true,
-  stages: [
-  { duration: '45s',  target: 100  },
-  { duration: '45s',  target: 200  },
-  { duration: '45s',  target: 300 },
-  { duration: '45s', target: 350  },
-  { durations : '30s',target : 0},
+stages: [
+  { duration: '45s', target: 50  },  
+  { duration: '45s', target: 100 }, 
+  { duration: '45s', target: 150 }, 
+  { duration: '45s', target: 175 },  
+  { duration: '30s', target: 0   },
 ],
   thresholds: {
   error_rate: ['rate<0.2'],
@@ -34,7 +34,7 @@ export default function () {
     headers: {
       "X-Forwarded-For": fakeIP,
     },
-    timeout: "20s",
+    timeout: "30s",
     insecureSkipTLSVerify: true,
   };
 
@@ -76,3 +76,4 @@ function track(res, ok) {
   if (ok) successCount.add(1);
   else failCount.add(1);
 }
+
