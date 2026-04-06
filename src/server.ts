@@ -100,7 +100,7 @@ export async function createServer(config: CreateServerConfig) {
       const idx = WORKER_POOL.indexOf(worker);
       if (idx !== -1) WORKER_POOL.splice(idx, 1);
       const newWorker = cluster.fork({
-        APP_CONFIG: JSON.stringify(config.config),
+        APP_CONFIG: JSON.stringify(config.config),  
       });
       WORKER_POOL.push(newWorker);
     });

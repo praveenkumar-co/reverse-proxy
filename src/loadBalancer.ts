@@ -41,7 +41,7 @@ export class LoadBalancer {
       });
     }
   }
-  addUpstream(id: string): void {
+  addUpstream(id: string): void { 
     if (this.states.has(id)) {
       return;
     }
