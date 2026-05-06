@@ -1,66 +1,75 @@
-server : 
+server:
+  listen: 8080
+  httpsPort: 8443
+  workers: 6
 
-   listen : 8080
-   httpsPort : 8443
-   workers : 6 
+  loadBalancing:
+    strategy: round-robin
+    failureThreshold: 3
+    recoveryTimeMs: 15000
 
-   loadBalancing : 
-      strategy : round-robin 
-      failureThreshold : 3 
-      recoveryTimeMs : 15000
-      # recoveryTime is of 15 seconds
+  autoScaling:
+    enabled: true
+    minServers: 2
+    maxServers: 10
+    scaleUpAt: 3
+    scaleDownAt: 1
+    cooldownMs: 60000
+    startPort: 9000
+    proxyPort: 8080
 
-   autoScaling:
-         enabled: true
-         minServers: 2
-         maxServers: 10
-         scaleUpAt: 3
-         scaleDownAt: 1
-         cooldownMs: 60000
-         startPort: 9000
-         proxyPort: 8080
-   
-   cache :
-         enabled : true
-         host : redis
-         port : 6379
-         ttlSeconds : 60
+  cache:
+    enabled: true
+    host: redis
+    port: 6379
+    ttlSeconds: 60
 
-   upstreams : 
-      - id : node1 
-        url : http://node1:8001
+  upstreams:
+    - id: node1
+      url: http://node1:8001
 
-      - id : node2 
-        url : http://node2:8002 
-      
-      - id : node3 
-        url : http://node3:8003
-      
-      - id : node4
-        url : http://node4:8004
-  
-   paths : 
-      - path : /
-        upstream : 
-           - node1 
-           - node2 
-           - node3 
-           - node4 
-        rateLimit : 
-           windowMs: 60000
-           maxRequests: 1000000 
-        
-      - path : /admin
-        upstream : 
-           - node2 
-           - node3
-           - node4
-        rateLimit:
-           windowMs: 60000
-           maxRequests: 1000000   
+    - id: node2
+      url: http://node2:8002
 
-   headers : 
-      - key: X-Forwarded-For
-        value: client_ip
-      - key: X-Real-IP
-        value: client_ip
+    - id: node3
+      url: http://node3:8003
+
+    - id: node4
+      url: http://node4:8004
+
+    - id: transcoder-api
+      url: http://host.docker.internal:4001
+
+  paths:
+    - path: /api
+      upstream:
+        - transcoder-api
+      rateLimit:
+        windowMs: 60000
+        maxRequests: 1000000
+
+    - path: /admin
+      upstream:
+        - node2
+        - node3
+        - node4
+      rateLimit:
+        windowMs: 60000
+        maxRequests: 1000000
+
+    - path: /
+      upstream:
+        - node1
+        - node2
+        - node3
+        - node4
+      rateLimit:
+        windowMs: 60000
+        maxRequests: 1000000
+
+  headers:
+    - key: X-Forwarded-For
+      value: $proxy_add_x_forwarded_for
+
+    - key: X-Real-IP
+      value: $remote_addr
