@@ -2,8 +2,6 @@ services:
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
     networks:
       - proxy-network
     restart: unless-stopped
@@ -18,8 +16,8 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "8080:8080"
-      - "8443:8443"
+      - "18080:8080"
+      - "18443:8443"
     depends_on:
       redis:
         condition: service_healthy
