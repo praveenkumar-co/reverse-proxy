@@ -7,3 +7,6 @@ logs/
 notes.t
 result.t
 auto_scaling_flow.svg
+configcopy.t
+composecopy.t
+Comm.t

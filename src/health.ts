@@ -1,5 +1,6 @@
 import http from "http";
 import type { ConfigSchemaType } from "./config-schema.js";
+import { LoadBalancer } from "./loadBalancer.js";
 
 // Initial health check 
 export async function initialHealthCheck(
@@ -44,13 +45,14 @@ export async function initialHealthCheck(
 // before reverse Proxy health check
 export async function startHealthChecks(
   upstreams: ConfigSchemaType["server"]["upstreams"],
-  HEALTHY_UPSTREAMS: Set<string>
+  HEALTHY_UPSTREAMS: Set<string>,
+  lb: LoadBalancer
 ) {
   console.log(`Check for health check before server response`);
   setInterval(() => {
     console.log(`\n[HealthCheck] Checking all upstreams...`);
     for (const upstream of upstreams) {
-      const upstreamUrl = new URL(upstream.url); 
+      const upstreamUrl = new URL(upstream.url);
       const req = http.request(
         {
           host: upstreamUrl.hostname, 
@@ -62,7 +64,10 @@ export async function startHealthChecks(
           if (HealthRes.statusCode === 200) {
             if (!HEALTHY_UPSTREAMS.has(upstream.id)) {
               HEALTHY_UPSTREAMS.add(upstream.id);
-              console.log(` ${upstream.id} is back ONLINE!`);
+              if (!lb.hasUpstream(upstream.id)) {
+                lb.addUpstream(upstream.id);
+              }
+              console.log(`${upstream.id} is back ONLINE!`);
             } else {
               console.log(`${upstream.id} is HEALTHY`);
             }
@@ -71,11 +76,11 @@ export async function startHealthChecks(
             console.log(`${upstream.id} is DOWN!`);
           }
         });
-        req.on('error',()=>{
-          HEALTHY_UPSTREAMS.delete(upstream.id);
-          console.log(`${upstream.id} is DOWN! (connection refused)`);
-        });
-        req.end();
-       }
-  },10000);
+      req.on('error', () => {
+        HEALTHY_UPSTREAMS.delete(upstream.id);
+        console.log(`${upstream.id} is DOWN! (connection refused)`);
+      });
+      req.end();
+    }
+  }, 10000);
 }

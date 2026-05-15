@@ -75,14 +75,14 @@ export async function createServer(config: CreateServerConfig) {
         `[Master] New service added to LB: ${service.id} → ${service.url}`
       );
     });
-    registry.onDeregister((service) => {
-      console.log(`[DEBUG] Deregistering: ${service.id}`);
-      if (service.status === "DOWN") {
-        HEALTHY_UPSTREAMS.delete(service.id);
-        lb.removeUpstream(service.id);
-        console.log(`[Master] Service removed from LB: ${service.id}`);
-      }
-    });
+    // registry.onDeregister((service) => {
+    //   console.log(`[DEBUG] Deregistering: ${service.id}`);
+    //   if (service.status === "DOWN") {
+    //     HEALTHY_UPSTREAMS.delete(service.id);
+    //     lb.removeUpstream(service.id);
+    //     console.log(`[Master] Service removed from LB: ${service.id}`);
+    //   }
+    // });
     config.config.server.upstreams.forEach((u) => {
       registry.register({ id: u.id, url: u.url });
     });
@@ -100,7 +100,7 @@ export async function createServer(config: CreateServerConfig) {
       const idx = WORKER_POOL.indexOf(worker);
       if (idx !== -1) WORKER_POOL.splice(idx, 1);
       const newWorker = cluster.fork({
-        APP_CONFIG: JSON.stringify(config.config),  
+        APP_CONFIG: JSON.stringify(config.config),
       });
       WORKER_POOL.push(newWorker);
     });
@@ -138,7 +138,7 @@ export async function createServer(config: CreateServerConfig) {
         upstreamId,
         upstreamUrl: serviceInstance.url,
       };
-   const WORKER_TIMEOUT = 20000;
+      const WORKER_TIMEOUT = 20000;
       const worker = WORKER_POOL[attempt % WORKER_POOL.length];
       if (!worker) {
         res.writeHead(500);
@@ -178,8 +178,13 @@ export async function createServer(config: CreateServerConfig) {
             );
             await cache.set(cacheKey, reply.data);
           }
-          res.writeHead(reply.statusCode ?? 200);
-          res.end(reply.data);
+          res.writeHead(reply.statusCode ?? 200, {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+            "Access-Control-Allow-Credentials": "true",
+          });
+          res.end(reply.data); 
         }
       };
       timer = setTimeout(() => {
@@ -192,17 +197,17 @@ export async function createServer(config: CreateServerConfig) {
     }
     const autoScaler = config.config.server.autoScaling.enabled
       ? new AutoScaler(
-          {
-            minServers: config.config.server.autoScaling.minServers,
-            maxServers: config.config.server.autoScaling.maxServers,
-            scaleUpAt: config.config.server.autoScaling.scaleUpAt,
-            scaleDownAt: config.config.server.autoScaling.scaleDownAt,
-            cooldownMs: config.config.server.autoScaling.cooldownMs,
-            startPort: config.config.server.autoScaling.startPort,
-            proxyPort: config.config.server.autoScaling.proxyPort,
-          },
-          lb
-        )
+        {
+          minServers: config.config.server.autoScaling.minServers,
+          maxServers: config.config.server.autoScaling.maxServers,
+          scaleUpAt: config.config.server.autoScaling.scaleUpAt,
+          scaleDownAt: config.config.server.autoScaling.scaleDownAt,
+          cooldownMs: config.config.server.autoScaling.cooldownMs,
+          startPort: config.config.server.autoScaling.startPort,
+          proxyPort: config.config.server.autoScaling.proxyPort,
+        },
+        lb
+      )
       : null;
 
     const httpServer = http.createServer((req, res) => {
@@ -223,7 +228,16 @@ export async function createServer(config: CreateServerConfig) {
         (req.headers["x-forwarded-for"] as string) ??
         req.socket.remoteAddress ??
         "unknown";
-
+      if (req.method === "OPTIONS") {
+        res.writeHead(204, {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
+          "Access-Control-Allow-Headers": "*",
+          "Access-Control-Allow-Credentials": "true",
+        });
+        res.end();
+        return;
+      }
       if (req.url === "/__lb-stats") {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
@@ -336,14 +350,18 @@ export async function createServer(config: CreateServerConfig) {
         );
       }
       if (req.method === "GET") {
-        const cacheKey = cache.buildKey("GET", url.pathname);
-        const cached = await cache.get(cacheKey);
-        if (cached) {
-          res.writeHead(200, {
-            "X-Cache": "HIT",
-          });
-          res.end(cached);
-          return;
+        // Skip cache for live-polled status endpoints
+        const skipCache = url.pathname.startsWith("/api/upload/");
+        if (!skipCache) {
+          const cacheKey = cache.buildKey("GET", url.pathname);
+          const cached = await cache.get(cacheKey);
+          if (cached) {
+            res.writeHead(200, {
+              "X-Cache": "HIT",
+            });
+            res.end(cached);
+            return;
+          }
         }
       }
       if (
@@ -354,16 +372,19 @@ export async function createServer(config: CreateServerConfig) {
       ) {
         await cache.invalidate(url.pathname);
       }
-      let body = "";
-      req.on("data", (chunk) => {
-        body += chunk;
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk: Buffer) => {
+        chunks.push(chunk);
       });
       req.on("end", () => {
+        const bodyBuffer = Buffer.concat(chunks);
+        // Preserve binary-safe body: use raw buffer string for binary, utf8 for JSON
+        const body = bodyBuffer.length > 0 ? bodyBuffer.toString("binary") : null;
         const payload: WorkerMessageType = {
           requestType: (req.method ??
             "GET") as WorkerMessageType["requestType"],
           headers: req.headers,
-          body: body || null,
+          body: body,
           url: `${req.url}`,
         };
         dispatchToWorker(payload, clientIP, res);
@@ -405,7 +426,7 @@ export async function createServer(config: CreateServerConfig) {
       console.log(
         `[Master] HTTPS on port ${config.config.server.httpsPort ?? 8443}`
       );
-      startHealthChecks(config.config.server.upstreams, HEALTHY_UPSTREAMS);
+      startHealthChecks(config.config.server.upstreams, HEALTHY_UPSTREAMS, lb);
       if (autoScaler) {
         autoScaler.start();
       }

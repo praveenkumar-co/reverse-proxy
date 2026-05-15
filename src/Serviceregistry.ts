@@ -1,95 +1,99 @@
 export interface ServiceInstance {
-  id : string ;
-  url : string ;
-  registeredAt : number ;
-  lastHeartbeat : number ;
-  status : 'UP' | 'DOWN' ; 
-  metadata?:Record<string,string>;
+  id: string;
+  url: string;
+  registeredAt: number;
+  lastHeartbeat: number;
+  status: 'UP' | 'DOWN';
+  metadata?: Record<string, string>;
 }
 
-export interface RegistryConfig{
-  heartbeatTimeoutMs?: number ;
-  cleanupIntervalMs?: number ;
+export interface RegistryConfig {
+  heartbeatTimeoutMs?: number;
+  cleanupIntervalMs?: number;
 }
 
-export class ServiceRegistry{ 
-  private services : Map<string,ServiceInstance> = new Map();
-  private heartbeatTimeoutMs : number ; 
+export class ServiceRegistry {
+  private services: Map<string, ServiceInstance> = new Map();
+  private heartbeatTimeoutMs: number;
   // on every registry of a function 
-  private onRegisterCallbacks : ((service : ServiceInstance)=>void)[] = []; 
-  private onDeregisterCallbacks : ((service: ServiceInstance) => void)[] = [] ;
+  private onRegisterCallbacks: ((service: ServiceInstance) => void)[] = [];
+  private onDeregisterCallbacks: ((service: ServiceInstance) => void)[] = [];
 
-  constructor(config : RegistryConfig){
-    this.heartbeatTimeoutMs = config.heartbeatTimeoutMs ?? 30_000 ; 
-    setInterval(()=>{
+  constructor(config: RegistryConfig) {
+    this.heartbeatTimeoutMs = config.heartbeatTimeoutMs ?? 30_000;
+    setInterval(() => {
       this.checkHeartbeats();
-    },config.cleanupIntervalMs ?? 10_000);
+    }, config.cleanupIntervalMs ?? 10_000);
   }
-   register(instance: Omit<ServiceInstance, 'registeredAt' | 'lastHeartbeat' | 'status'>): ServiceInstance {
-     const service : ServiceInstance  = {
+  register(instance: Omit<ServiceInstance, 'registeredAt' | 'lastHeartbeat' | 'status'>): ServiceInstance {
+    const service: ServiceInstance = {
       ...instance,
-      registeredAt : Date.now(),
-      lastHeartbeat : Date.now(),
+      registeredAt: Date.now(),
+      lastHeartbeat: Date.now(),
       // mark the incoming server to UP 
-      status : 'UP',
-     };
-     this.services.set(instance.id,service);
-     console.log(`[Registry] Service REGISTERED: ${instance.id} → ${instance.url}`);
-     this.onRegisterCallbacks.forEach(callback => callback(service));
-     return service ;
+      status: 'UP',
+    };
+    this.services.set(instance.id, service);
+    console.log(`[Registry] Service REGISTERED: ${instance.id} → ${instance.url}`);
+    this.onRegisterCallbacks.forEach(callback => callback(service));
+    return service;
   }
-  deregister(id : string): boolean {
-     const service = this.services.get(id);
-     if(!service){
-      return false ;
-     }
-     service.status = 'DOWN' ;
-     this.services.delete(id);
-     console.log(`[Registry] Service DEREGISTERED: ${id}`);
-     this.onDeregisterCallbacks.forEach(callback => callback(service));
-     return true ;
-  }
-  heartbeat(id : string):boolean{
+  deregister(id: string): boolean {
     const service = this.services.get(id);
-    if(!service){
-      return false ;
+    if (!service) {
+      return false;
+    }
+    service.status = 'DOWN';
+    this.services.delete(id);
+    console.log(`[Registry] Service DEREGISTERED: ${id}`);
+    this.onDeregisterCallbacks.forEach(callback => callback(service));
+    return true;
+  }
+  heartbeat(id: string): boolean {
+    const service = this.services.get(id);
+    if (!service) {
+      return false;
     }
     service.lastHeartbeat = Date.now();
     service.status = 'UP';
-    return true ;
+    return true;
   }
   // to get all up services
-    getHealthy(): ServiceInstance[] {
+  getHealthy(): ServiceInstance[] {
     return [...this.services.values()].filter(s => s.status === 'UP');
   }
-   getAll(): ServiceInstance[] {
+  getAll(): ServiceInstance[] {
     return [...this.services.values()];
   }
   // get single service 
-   get(id: string): ServiceInstance | undefined {
+  get(id: string): ServiceInstance | undefined {
     return this.services.get(id);
   }
   // to check heartbeat is consistent or not 
-   private checkHeartbeats():void {
-     const now = Date.now();
-     for(const [id,service] of this.services){
-        if(service.status === 'UP' && now - service.lastHeartbeat > this.heartbeatTimeoutMs){
-           console.log(`[Registry] Service TIMED OUT (no heartbeat): ${id}`);
-            service.status = 'DOWN';
-            this.onDeregisterCallbacks.forEach(callback => callback(service)); 
-        }
-     }
-   }
-   onRegister(cb: (service: ServiceInstance) => void): void {
+  private checkHeartbeats(): void {
+    const now = Date.now();
+    for (const [id, service] of this.services) {
+      if (
+        service.metadata?.dynamic === "true" &&
+        service.status === 'UP' &&
+        now - service.lastHeartbeat > this.heartbeatTimeoutMs
+      ) {
+        console.log(`[Registry] Service TIMED OUT (no heartbeat): ${id}`);
+        service.status = 'DOWN';
+        this.onDeregisterCallbacks.forEach(callback => callback(service));
+      }
+    }
+  }
+  onRegister(cb: (service: ServiceInstance) => void): void {
     this.onRegisterCallbacks.push(cb);
   }
- 
+
   onDeregister(cb: (service: ServiceInstance) => void): void {
     this.onDeregisterCallbacks.push(cb);
   }
-  getStats():object{
+  getStats(): object {
     return {
-        total: this.services.size,
+      total: this.services.size,
       healthy: this.getHealthy().length,
       services: this.getAll().map(s => ({
         id: s.id,
@@ -101,8 +105,8 @@ export class ServiceRegistry{
       })),
     };
   }
-} 
+}
 export const registry = new ServiceRegistry({
-  heartbeatTimeoutMs : 30_000 ,
-  cleanupIntervalMs : 10_000
+  heartbeatTimeoutMs: 30_000,
+  cleanupIntervalMs: 10_000
 })

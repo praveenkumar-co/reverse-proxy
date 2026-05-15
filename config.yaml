@@ -9,9 +9,9 @@ server:
     recoveryTimeMs: 15000
 
   autoScaling:
-    enabled: true
-    minServers: 2
-    maxServers: 10
+    enabled: false
+    minServers: 1
+    maxServers: 1
     scaleUpAt: 3
     scaleDownAt: 1
     cooldownMs: 60000
@@ -25,44 +25,13 @@ server:
     ttlSeconds: 60
 
   upstreams:
-    - id: node1
-      url: http://node1:8001
-
-    - id: node2
-      url: http://node2:8002
-
-    - id: node3
-      url: http://node3:8003
-
-    - id: node4
-      url: http://node4:8004
-
-    - id: transcoder-api
-      url: http://host.docker.internal:4001
+  - id: transcoder-api
+    url: http://host.docker.internal:4000
 
   paths:
-    - path: /api
-      upstream:
-        - transcoder-api
-      rateLimit:
-        windowMs: 60000
-        maxRequests: 1000000
-
-    - path: /admin
-      upstream:
-        - node2
-        - node3
-        - node4
-      rateLimit:
-        windowMs: 60000
-        maxRequests: 1000000
-
     - path: /
       upstream:
-        - node1
-        - node2
-        - node3
-        - node4
+        - transcoder-api
       rateLimit:
         windowMs: 60000
         maxRequests: 1000000

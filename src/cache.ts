@@ -107,7 +107,6 @@ export class Cache {
 
   async disconnect(): Promise<void> {
     if (this.connected) {
-      await this.client.disconnect();
       console.log(`[Cache] Redis disconnected`);
     }
   }
