@@ -2,7 +2,7 @@ import http from "http";
 // ── Environment variables ──
 const PORT = parseInt(process.env.SERVER_PORT ?? "8002");
 const SERVER_ID = process.env.SERVER_ID ?? "node2";
-const PROXY_HOST = process.env.PROXY_HOST ?? "proxy";
+const PROXY_HOST = process.env.PROXY_HOST ?? "localhost";
 const PROXY_PORT = parseInt(process.env.PROXY_PORT ?? "8080");
 
 // ── Register ──

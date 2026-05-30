@@ -16,14 +16,108 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "18080:8080"
-      - "18443:8443"
+      - "8080:8080"
+      - "8443:8443"
     depends_on:
       redis:
         condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - proxy-network
     restart: unless-stopped
+
+  node1:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    environment:
+      SERVER_PORT: 8001
+      SERVER_ID: node1
+      PROXY_HOST: proxy
+      PROXY_PORT: 8080
+    depends_on:
+      - proxy
+    ports:
+      - "8001:8001"
+    networks:
+      - proxy-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8001/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+
+  node2:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    environment:
+      SERVER_PORT: 8002
+      SERVER_ID: node2
+      PROXY_HOST: proxy
+      PROXY_PORT: 8080
+    depends_on:
+      - proxy
+    ports:
+      - "8002:8002"
+    networks:
+      - proxy-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8002/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+
+  node3:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    environment:
+      SERVER_PORT: 8003
+      SERVER_ID: node3
+      PROXY_HOST: proxy
+      PROXY_PORT: 8080
+    depends_on:
+      - proxy
+    ports:
+      - "8003:8003"
+    networks:
+      - proxy-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8003/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+
+  node4:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    environment:
+      SERVER_PORT: 8004
+      SERVER_ID: node4
+      PROXY_HOST: proxy
+      PROXY_PORT: 8080
+    depends_on:
+      - proxy
+    ports:
+      - "8004:8004"
+    networks:
+      - proxy-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8004/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
 
 networks:
   proxy-network:

@@ -3,8 +3,9 @@ import http from "http";
 const PORT = parseInt(process.env.SERVER_PORT ?? "8003");
 const SERVER_ID = process.env.SERVER_ID ?? `auto-node-${PORT}`;
 const PROXY_PORT = parseInt(process.env.PROXY_PORT ?? "8080");
+const PROXY_HOST = process.env.PROXY_HOST ?? "localhost";
 
-const SERVER_URL = `http://${SERVER_ID}:${PORT}`;
+const SERVER_URL = `http://${process.env.PROXY_HOST ? SERVER_ID : 'localhost'}:${PORT}`;
 
 function registerSelf() {
   const body = JSON.stringify({
@@ -16,7 +17,7 @@ function registerSelf() {
     },
   });
   const options = {
-    hostname: "proxy",
+    hostname: PROXY_HOST,
     port: PROXY_PORT,
     path: "/__registry/register",
     method: "POST",
@@ -41,7 +42,7 @@ function registerSelf() {
 
 function sendHeartbeat() {
   const options = {
-    hostname: "proxy",
+    hostname: PROXY_HOST,
     port: PROXY_PORT,
     path: `/__registry/heartbeat/${SERVER_ID}`,
     method: "PUT",
@@ -53,7 +54,7 @@ function sendHeartbeat() {
 }
 function deregisterSelf() {
   const options = {
-    hostname: "proxy",
+    hostname: PROXY_HOST,
     port: PROXY_PORT,
     path: `/__registry/deregister/${SERVER_ID}`,
     method: "DELETE",

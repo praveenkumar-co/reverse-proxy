@@ -1,44 +1,66 @@
-server:
-  listen: 8080
-  httpsPort: 8443
-  workers: 6
+server : 
 
-  loadBalancing:
-    strategy: round-robin
-    failureThreshold: 3
-    recoveryTimeMs: 15000
+   listen : 8080
+   httpsPort : 8443
+   workers : 6 
 
-  autoScaling:
-    enabled: false
-    minServers: 1
-    maxServers: 1
-    scaleUpAt: 3
-    scaleDownAt: 1
-    cooldownMs: 60000
-    startPort: 9000
-    proxyPort: 8080
+   loadBalancing : 
+      strategy : round-robin 
+      failureThreshold : 3 
+      recoveryTimeMs : 15000
+      
+   autoScaling:
+         enabled: true
+         minServers: 2
+         maxServers: 10
+         scaleUpAt: 1
+         scaleDownAt: 0
+         cooldownMs: 60000
+         startPort: 9000
+         proxyPort: 8080
+   
+   cache :
+         enabled : false
+         host : redis
+         port : 6379
+         ttlSeconds : 60
 
-  cache:
-    enabled: true
-    host: redis
-    port: 6379
-    ttlSeconds: 60
+   upstreams : 
+      - id : node1 
+        url : http://node1:8001
 
-  upstreams:
-  - id: transcoder-api
-    url: http://host.docker.internal:4000
+      - id : node2 
+        url : http://node2:8002 
+      
+      - id : node3 
+        url : http://node3:8003
+      
+      - id : node4
+        url : http://node4:8004
+  
+   paths : 
+      - path : /
+        upstream : 
+           - node1 
+           - node2 
+           - node3 
+           - node4 
+        rateLimit : 
+           windowMs: 60000
+           maxRequests: 1000000 
+        
+      - path : /admin
+        upstream : 
+           - node2 
+           - node3
+           - node4
+        rateLimit:
+           windowMs: 60000
+           maxRequests: 1000000 
 
-  paths:
-    - path: /
-      upstream:
-        - transcoder-api
-      rateLimit:
-        windowMs: 60000
-        maxRequests: 1000000
+   headers : 
+      - key: X-Forwarded-For
+        value: client_ip
+      - key: X-Real-IP
+        value: client_ip
 
-  headers:
-    - key: X-Forwarded-For
-      value: $proxy_add_x_forwarded_for
-
-    - key: X-Real-IP
-      value: $remote_addr
