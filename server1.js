@@ -1,12 +1,10 @@
 import http from "http";
 
-// ── Environment variables ──
 const PORT = parseInt(process.env.SERVER_PORT ?? "8001");
 const SERVER_ID = process.env.SERVER_ID ?? "node1";
 const PROXY_HOST = process.env.PROXY_HOST ?? "localhost";
 const PROXY_PORT = parseInt(process.env.PROXY_PORT ?? "8080");
 
-// ── Register ──
 function registerSelf() {
   const body = JSON.stringify({
     id: SERVER_ID,
@@ -33,7 +31,6 @@ function registerSelf() {
   req.end();
 }
 
-// ── Heartbeat ──
 function sendHeartbeat() {
   const req = http.request({
     hostname: PROXY_HOST,
@@ -46,7 +43,6 @@ function sendHeartbeat() {
   req.end();
 }
 
-// ── Deregister ──
 function deregisterSelf() {
   const req = http.request({
     hostname: PROXY_HOST,
@@ -59,7 +55,6 @@ function deregisterSelf() {
   req.end();
 }
 
-// ── HTTP Server ──
 http
   .createServer((req, res) => {
     console.log(`[${SERVER_ID}] ${req.method} → ${req.url}`);
