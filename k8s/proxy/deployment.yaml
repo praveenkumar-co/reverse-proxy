@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reverse-proxy
+  namespace: reverse-proxy
+
+spec:
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app: reverse-proxy
+
+  template:
+    metadata:
+      labels:
+        app: reverse-proxy
+
+    spec:
+      containers:
+        - name: reverse-proxy
+          image: pravi2005/reverse-proxy:latest
+
+          imagePullPolicy: Always
+
+          ports:
+            - containerPort: 8080
+
+            - containerPort: 8443
