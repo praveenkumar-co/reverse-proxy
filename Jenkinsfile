@@ -64,17 +64,32 @@ stage("Docker Build") {
     steps {
         git url: "https://github.com/praveenkumar-co/reverse-proxy", branch: "main"
 
-        sh """
-        docker build -t pravi2005/reverse-proxy:latest .
-        """
+        sh "docker build -t pravi2005/reverse-proxy:latest ."
     }
 }
+stage("Docker Push") {
+    agent { label "mylabel2" }
 
+    steps {
+        withCredentials([usernamePassword(
+            credentialsId: 'dockerhub',
+            usernameVariable: 'DOCKER_USER',
+            passwordVariable: 'DOCKER_PASS'
+        )]) {
+
+            sh '''
+                echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+                docker push pravi2005/reverse-proxy:latest
+                docker logout
+            '''
+        }
+    }
+}
         stage("Docker Image Scan") {
             agent { label "mylabel2" }
             steps {
                 echo "Scanning Docker image..."
-                sh "trivy image reverse-proxy"
+               sh "trivy image pravi2005/reverse-proxy:latest"
             }
         }
 
