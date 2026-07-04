@@ -1,4 +1,4 @@
-# build stage
+# build stage : praveen - i am intialising it so that to capture under jenkins
 FROM node:20-alpine AS builder
 
 WORKDIR /app
