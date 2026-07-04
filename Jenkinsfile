@@ -34,7 +34,14 @@ pipeline {
                 }
             }
         }
-
+        stage("Quality Gate") {
+    agent none
+    steps {
+        timeout(time: 5, unit: 'MINUTES') {
+            waitForQualityGate abortPipeline: true
+        }
+    }
+}
         stage("Trivy File System Scan") {
             agent { label "mylabel" }
             steps {
