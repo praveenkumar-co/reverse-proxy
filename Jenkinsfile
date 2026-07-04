@@ -63,9 +63,13 @@ stage("Docker Build") {
 
     steps {
         git url: "https://github.com/praveenkumar-co/reverse-proxy", branch: "main"
-        sh "docker build -t reverse-proxy ."
+
+        sh """
+        docker build -t pravi2005/reverse-proxy:latest .
+        """
     }
 }
+
         stage("Docker Image Scan") {
             agent { label "mylabel2" }
             steps {
