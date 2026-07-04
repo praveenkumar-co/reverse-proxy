@@ -18,7 +18,7 @@ RUN npm ci --omit=dev
 
 COPY --from=builder /app/dist ./dist
 COPY config.yaml ./
-COPY key.pem cert.pem ./
+# COPY key.pem cert.pem ./
 
 EXPOSE 8080 8443
 
