@@ -1,0 +1,30 @@
+# Dependencies and builds
+node_modules
+dist
+npm-debug.log
+yarn-debug.log
+yarn-error.log
+pnpm-debug.log
+
+# Git files
+.git
+.gitignore
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Jenkins & CI/CD
+Jenkinsfile
+sonar-project.properties
+.scannerwork
+
+# Local configurations / credentials
+key.pem
+cert.pem
+*.local
+
+# Documentation and tests
+README.md
+test.js
+image.png
