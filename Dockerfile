@@ -1,5 +1,3 @@
-# Multi-stage build process for the reverse proxy application
-# Stage 1: Build stage - Initialized to capture and compile under Jenkins CI
 FROM node:20-alpine AS builder
 
 WORKDIR /app
