@@ -22,6 +22,7 @@ RUN npm ci --omit=dev
 COPY --from=builder /app/dist ./dist
 
 COPY config.yaml ./
+
 EXPOSE 8080 8443
 
 CMD ["node", "dist/index.js", "--config", "config.yaml"]

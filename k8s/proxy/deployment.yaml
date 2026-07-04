@@ -31,7 +31,19 @@ spec:
               mountPath: /app/config.yaml
               subPath: config.yaml
 
+            - name: tls
+              mountPath: /app/key.pem
+              subPath: tls.key
+
+            - name: tls
+              mountPath: /app/cert.pem
+              subPath: tls.crt
+
       volumes:
         - name: config-volume
           configMap:
             name: reverse-proxy-config
+
+        - name: tls
+          secret:
+            secretName: reverse-proxy-tls
