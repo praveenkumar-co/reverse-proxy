@@ -37,6 +37,7 @@ pipeline {
     agent none
     steps {
         timeout(time: 5, unit: 'MINUTES') {
+            echo "quality gate check under sonarqube"
             waitForQualityGate abortPipeline: true
         }
     }
@@ -62,7 +63,7 @@ stage("Docker Build") {
 
     steps {
         git url: "https://github.com/praveenkumar-co/reverse-proxy", branch: "main"
-
+        echo "deploying to hub"
         sh "docker build -t pravi2005/reverse-proxy:latest ."
     }
 }

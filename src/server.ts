@@ -75,14 +75,6 @@ export async function createServer(config: CreateServerConfig) {
         `[Master] New service added to LB: ${service.id} → ${service.url}`
       );
     });
-    // registry.onDeregister((service) => {
-    //   console.log(`[DEBUG] Deregistering: ${service.id}`);
-    //   if (service.status === "DOWN") {
-    //     HEALTHY_UPSTREAMS.delete(service.id);
-    //     lb.removeUpstream(service.id);
-    //     console.log(`[Master] Service removed from LB: ${service.id}`);
-    //   }
-    // });
     config.config.server.upstreams.forEach((u) => {
       registry.register({ id: u.id, url: u.url });
     });
