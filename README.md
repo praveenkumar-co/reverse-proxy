@@ -1,34 +1,29 @@
 # Ninja Reverse Proxy
 
-A production-grade Reverse Proxy built from scratch using **TypeScript** and **Node.js** — featuring cluster architecture, Redis caching, auto scaling, rate limiting, health checks, service registry, and full Docker support.
+A production-grade, backend-agnostic **Layer 7 Reverse Proxy** built from scratch in **TypeScript** and **Node.js**.
 
----
+Designed in the same philosophy as **Nginx**, **Traefik**, and **HAProxy** — configure it once, point it at any backend, and it handles everything else.
 
-## Project Overview
-
-**Ninja Reverse Proxy** is a high-performance, resilient, and configurable reverse proxy server. Designed to handle large volumes of web traffic, it utilizes a Node.js cluster (Master-Worker) model to distribute workloads across all available CPU cores. Features such as Redis caching, token-bucket/sliding-window rate limiting, service registries, and auto-scaling upstream backends make it suitable for modern cloud-native architectures. The project includes automated CI/CD pipelines, static analysis, containerization, and security vulnerability scanning tools to ensure production-grade quality and safety.
-
----
-
-## Architecture
-
-### System Architecture
-The reverse proxy operates on a Master/Worker architecture:
-*   **Master Process**: Acts as the central controller, binding to ports, validating config files via Zod, managing Redis caches, running continuous health checks, and dynamically scaling upstreams.
-*   **Worker Processes**: Handle active TCP connections. When a request arrives, the load balancer selects a worker using a Round-Robin strategy. The worker proxies the request to one of the active upstream servers.
-
-### CI/CD Deployment Flow
-The pipeline follows a GitOps flow from developer commits to deployment:
-
-```mermaid
-graph TD
-    Developer[Developer] -->|Edits code & Jenkinsfile| GitHub[GitHub Repository]
-    GitHub -->|Webhooks / Polling| Jenkins[Jenkins CI/CD Server]
-    Jenkins -->|Setup & Install| Build[Build stage: npm ci]
-    Build -->|Parallel Lint & Scan| Test[Test stage: Lint & Security Scan]
-    Test -->|Docker Image Build| Docker[Docker stage: Build & Tag]
-    Docker -->|Container Deploy| Deploy[Deploy stage: Run in Production]
 ```
+Developer → GitHub → Jenkins CI/CD → Docker → Any Backend
+```
+
+---
+
+## What it is
+
+Ninja Reverse Proxy is a fully configurable, self-contained reverse proxy that works with **any HTTP backend**:
+
+- Express · Fastify · NestJS
+- Django · FastAPI · Flask
+- Spring Boot · Quarkus
+- Go (net/http, Gin, Echo)
+- ASP.NET Core
+- Kubernetes Services
+- Docker Compose services
+- Any service that speaks HTTP
+
+The proxy never cares what technology runs behind the URLs. You configure upstreams in `config.yaml` and the proxy routes, balances, caches, rate-limits, and health-checks them automatically.
 
 ---
 
@@ -36,135 +31,170 @@ graph TD
 
 | Feature | Details |
 |---|---|
-| Cluster Architecture | Master/Worker pattern via Node.js `cluster` module |
-| Round Robin Load Balancing | Equal request distribution across upstream servers |
-| Redis Caching | GET response caching with configurable TTL |
-| Cache Invalidation | Auto-invalidate on POST / PUT / PATCH / DELETE |
-| Rate Limiting | Per-route sliding window (per client IP) |
-| Auto Scaling | Dynamically spins up/down upstream servers based on load |
-| Service Registry | Upstreams self-register, deregister, and send heartbeats |
-| Health Checks | Initial + continuous health monitoring of backends |
-| HTTPS / SSL Termination | Self-signed or CA cert support at proxy level |
-| HTTP → HTTPS Redirect | All plain HTTP traffic auto-redirected (301) |
-| Auto Worker Replacement | Crashed workers instantly replaced by master |
-| Request Timeout | 20s master timeout + 15s upstream timeout |
-| Retry Logic | Up to 2 retries on upstream failure (different worker each time) |
-| Graceful Shutdown | Drains connections cleanly on SIGTERM / SIGINT |
-| Admin Endpoints | Live stats for LB, cache, registry, auto scaler |
-| All HTTP Methods | GET, POST, PUT, PATCH, DELETE |
-| YAML Configuration | Single config file with full Zod schema validation |
-| Docker Support | One command to run everything |
+| **Cluster Architecture** | Master/Worker pattern via Node.js `cluster` — uses all CPU cores |
+| **Round-Robin Load Balancing** | Equal request distribution across healthy upstreams |
+| **Circuit Breaker** | Marks upstreams DOWN after configurable failure threshold |
+| **Redis Response Cache** | GET response caching with configurable TTL; auto-invalidated on writes |
+| **Per-Route Rate Limiting** | Sliding window rate limiter per client IP per route |
+| **Service Registry** | Backends self-register, deregister, and send heartbeats |
+| **Continuous Health Checks** | Every 10 seconds — auto-removes and auto-recovers upstreams |
+| **HTTPS / TLS Termination** | Full SSL at the proxy; all HTTP auto-redirected (301) |
+| **Auto Scaling** | Optionally spawns/kills upstream servers dynamically based on load |
+| **Retry Logic** | Up to 2 retries on upstream failure, each on a different worker |
+| **Graceful Shutdown** | Drains all connections on SIGTERM / SIGINT |
+| **Admin API** | Live stats for load balancer, cache, registry, auto scaler |
+| **YAML Configuration** | One file, fully validated with Zod — no source code changes needed |
+| **Docker + Kubernetes** | Ships with Compose and K8s manifests out of the box |
+| **Jenkins CI/CD** | Declarative pipeline included |
+| **SonarQube** | `sonar-project.properties` included for static analysis |
 
 ---
 
-## Tech Stack
-
-| Technology | Purpose |
-|---|---|
-| TypeScript | Full type safety |
-| Node.js Cluster | Multi-process master/worker architecture |
-| Redis | Response caching |
-| Zod | Schema validation for config + messages |
-| YAML | Human-readable configuration |
-| Commander | CLI entry point |
-| Docker Compose | Full stack orchestration |
-| k6 | Load testing |
-| Jenkins | Continuous Integration & Delivery (CI/CD) |
-| SonarQube | Continuous Code Quality and Static Analysis |
-| Trivy | Container & Dependency Security Scanner |
-
----
-
-## Project Structure
+## Architecture
 
 ```
-.
-├── src/
-│   ├── index.ts              → Entry point, CLI (Commander)
-│   ├── server.ts             → Main proxy logic (master + worker)
-│   ├── config.ts             → YAML parser
-│   ├── config-schema.ts      → Zod schema for config validation
-│   ├── server-schema.ts      → Zod schema for worker message types
-│   ├── health.ts             → Initial + continuous health check functions
-│   ├── rate-limiter.ts       → Per-route sliding window rate limiter
-│   ├── loadBalancer.ts       → Round-robin load balancer with failure tracking
-│   ├── cache.ts              → Redis cache (get, set, invalidate, stats)
-│   ├── auto-scaler.ts        → Dynamic upstream scaling logic
-│   └── Serviceregistry.ts    → Service registry (register, deregister, heartbeat)
-│
-├── Jenkinsfile               → Declarative Jenkins CI/CD pipeline
-├── sonar-project.properties  → SonarQube analysis configuration
-├── .dockerignore             → Docker build context exclusions
-├── Dockerfile                → Multi-stage build specification
-├── Dockerfile.server         → Dockerfile for mock upstream servers
-├── docker-compose.yml        → Full stack: proxy + Redis + upstream servers
-├── config.yaml               → Proxy configurations
-├── key.pem / cert.pem        → SSL certificates (generated locally)
-├── package.json              → Dependency manifests and scripts
-└── test.js                   → k6 load testing script
+                    ┌─────────────────────────────────────────────────┐
+                    │               Ninja Reverse Proxy                │
+                    │                                                   │
+  Client ──HTTPS──► │  Master Process                                   │
+                    │    ├── Rate Limiter (per-IP, per-route)           │
+                    │    ├── Redis Cache (GET responses)                │
+                    │    ├── Load Balancer (round-robin / ip-hash / …)  │
+                    │    ├── Health Checker (every 10s)                 │
+                    │    ├── Service Registry                           │
+                    │    └── Auto Scaler (optional)                     │
+                    │                                                   │
+                    │  Worker Processes (one per CPU core)              │
+                    │    └── Forward requests via keepAlive TCP         │
+                    └───────────┬─────────────────────────────────────┘
+                                │
+                ┌───────────────┼───────────────┐
+                ▼               ▼               ▼
+           backend-a       backend-b       backend-c
+         (Express)       (Django)        (Spring Boot)
+```
+
+### CI/CD Flow
+
+```
+Developer
+  │ edits code / config
+  ▼
+GitHub
+  ▼
+Jenkins (Jenkinsfile)
+  ├── Setup (npm ci)
+  ├── Static Analysis — Lint + npm audit (parallel)
+  ├── Unit Tests
+  ├── Build Artifact (tsc)
+  └── Deploy to Production (main branch, prod env)
 ```
 
 ---
 
-## Configuration
+## Quick Start
+
+### 1. Clone and generate TLS certificates
+
+```bash
+git clone https://github.com/praveenkumar-co/reverse-proxy.git
+cd reverse-proxy
+
+# Generate a self-signed certificate (for development)
+openssl req -x509 -newkey rsa:4096 \
+  -keyout key.pem -out cert.pem \
+  -days 365 -nodes
+```
+
+### 2. Configure your backends
+
+```bash
+cp config.example.yaml config.yaml
+```
+
+Edit `config.yaml` — replace the example upstreams with your real backend URLs:
+
+```yaml
+upstreams:
+  - id: my-api
+    url: http://my-api:8000
+
+  - id: my-frontend
+    url: http://my-frontend:3000
+```
+
+### 3. Run
+
+```bash
+# Proxy + Redis only (you bring your own backends)
+docker-compose up --build
+
+# Or run the built-in demo (backend-a + backend-b included)
+cd examples/docker-compose && docker-compose up --build
+```
+
+### 4. Test
+
+```bash
+curl -k https://localhost:8443/
+curl -k https://localhost:8443/__lb-stats
+curl -k https://localhost:8443/__registry
+```
+
+---
+
+## Configuration Reference
+
+`config.example.yaml` is the fully commented template. Copy it to `config.yaml` to get started.
 
 ```yaml
 server:
 
-  listen: 8080          # HTTP port (redirects to HTTPS)
-  httpsPort: 8443       # HTTPS port (main entry point)
-  workers: 2            # Match your CPU core count (nproc)
+  listen: 8080          # HTTP port — redirects all traffic to HTTPS
+  httpsPort: 8443       # HTTPS port — main entry point
+  workers: 2            # Set to your CPU core count (run: nproc)
 
   loadBalancing:
-    strategy: round-robin
-    failureThreshold: 3       # Mark upstream DOWN after 3 failures
-    recoveryTimeMs: 15000     # Try recovery after 15 seconds
+    strategy: round-robin           # round-robin | least-connections | ip-hash | random
+    failureThreshold: 3             # Mark upstream DOWN after 3 consecutive failures
+    recoveryTimeMs: 15000           # Retry a DOWN upstream after 15 seconds
 
   autoScaling:
-    enabled: true
+    enabled: false                  # false → static backends (like Nginx)
+                                    # true  → dynamic server spawning based on load
     minServers: 2
-    maxServers: 4             # Keep low on i3/i5 hardware
-    scaleUpAt: 3
-    scaleDownAt: 1
+    maxServers: 10
+    scaleUpAt: 10                   # Spawn a server when connections exceed this
+    scaleDownAt: 2                  # Kill a server when connections drop below this
     cooldownMs: 60000
     startPort: 9000
     proxyPort: 8080
 
   cache:
-    enabled: true
+    enabled: false                  # true → cache GET responses in Redis
     host: redis
-    port: 6379                # Official Redis port
+    port: 6379
     ttlSeconds: 60
 
   upstreams:
-    - id: node1
-      url: http://node1:8001
-    - id: node2
-      url: http://node2:8002
-    - id: node3
-      url: http://node3:8003
-    - id: node4
-      url: http://node4:8004
+    - id: backend-a                 # Any name — used to reference in paths
+      url: http://backend-a:3001    # Any HTTP URL — any technology
+
+    - id: backend-b
+      url: http://backend-b:3002
 
   paths:
-    - path: /
+    - path: /                       # Route all traffic to both backends
       upstream:
-        - node1
-        - node2
-        - node3
-        - node4
+        - backend-a
+        - backend-b
       rateLimit:
-        windowMs: 60000
-        maxRequests: 1000000
+        windowMs: 60000             # 1-minute window
+        maxRequests: 100000         # per client IP
 
-    - path: /admin
+    - path: /api                    # Route /api to a specific backend only
       upstream:
-        - node2
-        - node3
-        - node4
-      rateLimit:
-        windowMs: 60000
-        maxRequests: 1000000
+        - backend-a
 
   headers:
     - key: X-Forwarded-For
@@ -173,159 +203,114 @@ server:
       value: client_ip
 ```
 
-> **Workers warning** — setting `workers` higher than your CPU core count causes context switching and system hangs. Run `nproc` to check your core count.
-
 ---
 
-## Installation
+## Docker
+
+### Build the proxy image
 
 ```bash
-# 1. Clone the repo
-git clone https://github.com/praveenkumar-co/reverse-proxy.git
-cd reverse-proxy
-
-# 2. Install dependencies
-pnpm install
-
-# 3. Generate SSL certificate (development only)
-openssl req -x509 -newkey rsa:4096 \
-  -keyout key.pem -out cert.pem \
-  -days 365 -nodes
-```
-
----
-
-## Docker Instructions
-
-### Multi-Stage Build
-The application uses a multi-stage `Dockerfile` to optimize the final image size and reduce security vulnerabilities:
-1.  **Build Stage**: A Node.js Alpine base image is used to install all dependencies (including devDependencies) and build the TypeScript files into compiled JavaScript files in the `dist` folder.
-2.  **Runtime Stage**: A fresh Node.js Alpine image is initialized. Only production dependencies are installed (using `npm ci --omit=dev`), and the compiled `dist` directory is copied over.
-
-This results in a clean, small, and fast containerized proxy server.
-
-### Orchestration with Docker Compose
-The environment includes the proxy server, a Redis caching instance, and multiple Node.js backend nodes.
-
-```bash
-# Start everything in the foreground — proxy + Redis + all upstream servers
-docker-compose up --build
-
-# Run in background (detached mode)
-docker-compose up --build -d
-
-# Check running container statuses
-docker-compose ps
-
-# View real-time logs
-docker-compose logs -f
-
-# Stop and clean up all resources
-docker-compose down
-```
-
----
-
-## Jenkins CI/CD Pipeline Explanation
-
-The project includes a `Jenkinsfile` that defines a **Declarative Pipeline** for automating the integration and deployment stages.
-
-### Pipeline Stages
-1.  **Setup**: Prepares the build environment by checking credentials and installing dependencies using `npm ci`.
-2.  **Static Analysis**: Runs two parallel sub-stages to save time:
-    *   **Lint**: Checks code formatting and styling rules.
-    *   **Security Scan**: Checks package dependencies for vulnerabilities (`npm audit`).
-3.  **Unit Tests**: Executes automated test suites (conditional on parameter `RUN_TESTS`).
-4.  **Build Artifact**: Compiles TypeScript files into production-ready JavaScript code.
-5.  **Deploy to Production**: Performs a production deployment (conditional on the `main` branch and `ENV_TYPE` set to `prod`), with an interactive confirmation prompt (`input`).
-
-### Pipeline Features
-*   **Global Options**: Prevents simultaneous builds using `disableConcurrentBuilds()`, enforces a 1-hour timeout, and keeps only the last 10 builds via `buildDiscarder`.
-*   **Post Actions**: Cleans workspaces (`cleanWs()`), and provides visual logging for successful or failed states.
-
----
-
-## SonarQube Integration
-
-Continuous code quality monitoring is configured via the `sonar-project.properties` file.
-
-### Metrics Analyzed
-*   **Code Quality**: Measures bugs, vulnerabilities, and code smells.
-*   **Coverage & Duplication**: Checks for code duplication metrics to ensure a dry and maintainable codebase.
-*   **Exclusions**: Excludes vendor directories (`node_modules`), build directories (`dist`), and security credentials (`key.pem`, `cert.pem`) to focus strictly on custom TypeScript files in the `src/` directory.
-
-### Running SonarQube Scanner
-To trigger a manual scan, use the Sonar Scanner CLI:
-```bash
-sonar-scanner \
-  -Dsonar.host.url=http://localhost:9000 \
-  -Dsonar.login=YOUR_SONAR_TOKEN
-```
-
----
-
-## Trivy Security Scanning
-
-To ensure secure infrastructure and dependencies, **Trivy** is used to scan both filesystem files and Docker container images.
-
-### Scanning Dependencies (Filesystem)
-Scan the repository dependencies for CVEs:
-```bash
-trivy fs .
-```
-
-### Scanning Docker Images
-Scan the compiled container image before deploying it:
-```bash
-# Build the local Docker image
 docker build -t ninja-reverse-proxy:latest .
-
-# Run the Trivy scanner
-trivy image ninja-reverse-proxy:latest
 ```
-Trivy checks the base image and npm dependencies against the latest vulnerability databases to flag any issues before production releases.
 
----
-
-## Running Manually (Without Docker)
+### Run with Docker Compose (proxy + Redis only)
 
 ```bash
-# Terminal 1 — Backend server 1
-node server1.js
-
-# Terminal 2 — Backend server 2
-node server2.js
-
-# Terminal 3 — Reverse Proxy
-pnpm dev
+# Uses docker-compose.yml in project root
+docker-compose up --build
 ```
 
----
+Your own backend services connect to the `proxy-network` and are listed in `config.yaml`.
 
-## Testing
+### Run the full built-in demo
 
 ```bash
-# Basic GET
-curl http://localhost:8080/
+# Spins up proxy + redis + backend-a + backend-b
+cd examples/docker-compose
+docker-compose up --build
+```
 
-# HTTPS GET (skip cert verification for self-signed)
-curl -k https://localhost:8443/
+### Connect your real app
 
-# POST request
-curl -k -X POST https://localhost:8443/ \
-  -H "Content-Type: application/json" \
-  -d '{"name": "Ninja"}'
+Add your app as a service in your own `docker-compose.yml` and connect it to the proxy network:
 
-# Admin route
-curl -k https://localhost:8443/admin
+```yaml
+services:
 
-# Load test with k6
-k6 run loadtest.js
+  my-express-app:
+    image: my-express-app:latest
+    networks:
+      - proxy-network
+
+networks:
+  proxy-network:
+    external: true
+    name: reverse-proxy_proxy-network
+```
+
+Then add it to `config.yaml`:
+
+```yaml
+upstreams:
+  - id: my-express-app
+    url: http://my-express-app:3000
 ```
 
 ---
 
-## Admin Endpoints
+## Kubernetes
+
+See [`k8s/README.md`](k8s/README.md) for the full deployment guide.
+
+Quick overview:
+
+```bash
+# Apply all manifests
+kubectl apply -f k8s/
+
+# Port-forward for local testing
+kubectl port-forward svc/ninja-reverse-proxy-svc 8080:8080 8443:8443
+
+# Verify
+curl -k https://localhost:8443/__lb-stats
+```
+
+The proxy config is mounted as a Kubernetes ConfigMap — change it without rebuilding the image.
+
+---
+
+## Auto Scaler
+
+The Auto Scaler is **fully optional** and controlled entirely by `config.yaml`.
+
+### Static mode (default — works like Nginx)
+
+```yaml
+autoScaling:
+  enabled: false
+```
+
+The proxy uses only the upstream servers listed in `config.yaml`. This is appropriate for production setups where you manage your own backend services.
+
+### Dynamic mode
+
+```yaml
+autoScaling:
+  enabled: true
+  minServers: 2
+  maxServers: 10
+  scaleUpAt: 10       # spawn a new server when total active connections exceed this
+  scaleDownAt: 2      # kill the oldest server when connections drop below this
+  cooldownMs: 60000   # minimum wait between scale events
+```
+
+When enabled, the proxy dynamically spawns (`server-template.js`) and kills backend servers based on active connection count. See `examples/docker-compose/` for a working demonstration.
+
+---
+
+## Admin API
+
+All admin endpoints are available on the HTTPS port.
 
 | Endpoint | Method | Description |
 |---|---|---|
@@ -338,68 +323,155 @@ k6 run loadtest.js
 | `/__registry/heartbeat/:id` | PUT | Upstream heartbeat ping |
 
 ```bash
-# Example
 curl -k https://localhost:8443/__lb-stats
 curl -k https://localhost:8443/__cache-stats
 curl -k https://localhost:8443/__registry
+curl -k https://localhost:8443/__autoscaler-stats
 ```
+
+---
+
+## Jenkins CI/CD Pipeline
+
+A declarative `Jenkinsfile` is included in the project root.
+
+**Pipeline stages:**
+
+1. **Setup** — `npm ci` (deterministic install)
+2. **Static Analysis** — Lint + `npm audit` (parallel)
+3. **Unit Tests** — conditional on `RUN_TESTS` parameter
+4. **Build Artifact** — `npm run build` (TypeScript → JavaScript)
+5. **Deploy to Production** — branch `main` + `ENV_TYPE=prod` + manual approval gate
+
+**Global options:** 1-hour timeout · last 10 builds retained · no concurrent builds · timestamps on every log line.
+
+---
+
+## SonarQube
+
+`sonar-project.properties` is included. To run a scan:
+
+```bash
+sonar-scanner \
+  -Dsonar.host.url=http://localhost:9000 \
+  -Dsonar.login=YOUR_SONAR_TOKEN
+```
+
+Scans the `src/` directory. Excludes `node_modules/`, `dist/`, certificates, and CI files.
+
+---
+
+## Security Scanning (Trivy)
+
+```bash
+# Scan dependencies
+trivy fs .
+
+# Scan the Docker image
+docker build -t ninja-reverse-proxy:latest .
+trivy image ninja-reverse-proxy:latest
+```
+
+---
+
+## Project Structure
+
+```
+ninja-reverse-proxy/
+├── src/                           ← Proxy source (TypeScript)
+│   ├── index.ts                   → CLI entry point
+│   ├── server.ts                  → Master + Worker proxy engine
+│   ├── loadBalancer.ts            → Round-robin with circuit breaker
+│   ├── auto-scaler.ts             → Dynamic server scaling
+│   ├── health.ts                  → Health checker (initial + continuous)
+│   ├── Serviceregistry.ts         → Service registry (register/heartbeat/deregister)
+│   ├── cache.ts                   → Redis cache (get/set/invalidate/stats)
+│   ├── rate-limiter.ts            → Sliding window rate limiter
+│   ├── config-schema.ts           → Zod config validation schema
+│   ├── config.ts                  → YAML parser
+│   └── server-schema.ts           → Worker IPC message schema
+│
+├── k8s/                           ← Kubernetes manifests
+│   ├── configmap.yaml
+│   ├── tls-secret.yaml
+│   ├── proxy-deployment.yaml
+│   ├── proxy-service.yaml
+│   └── README.md
+│
+├── examples/                      ← Integration examples (NOT part of the proxy)
+│   ├── docker-compose/            ← Full demo stack (backend-a + backend-b)
+│   │   ├── server-template.js     → Minimal demo backend
+│   │   ├── Dockerfile.server      → Demo backend image
+│   │   ├── docker-compose.yml     → Full demo stack
+│   │   ├── config.yaml            → Demo config
+│   │   └── README.md
+│   └── express/                   ← Express.js integration example
+│       ├── server.js
+│       └── README.md
+│
+├── Dockerfile                     ← Proxy image (multi-stage build)
+├── Jenkinsfile                    ← CI/CD declarative pipeline
+├── sonar-project.properties       ← SonarQube config
+├── docker-compose.yml             ← Proxy + Redis only
+├── config.example.yaml            ← Fully commented configuration template
+├── .dockerignore
+├── .gitignore
+├── package.json
+├── tsconfig.json
+└── README.md
+```
+
+---
+
+## Tech Stack
+
+| Technology | Purpose |
+|---|---|
+| TypeScript | Full type safety |
+| Node.js Cluster | Master/Worker multi-process architecture |
+| Redis | Response caching |
+| Zod | Schema validation for config and worker messages |
+| YAML | Human-readable configuration |
+| Commander | CLI entry point |
+| Docker Compose | Orchestration |
+| Kubernetes | Production cluster deployment |
+| Jenkins | CI/CD pipeline |
+| SonarQube | Static code analysis |
+| Trivy | Container security scanning |
 
 ---
 
 ## Request Lifecycle
 
-1.  Client sends request to `:8080` or `:8443`
-2.  HTTP traffic gets **301 redirected** to HTTPS
-3.  **Rate limiter** checks client IP against route limit — blocks with `429` if exceeded
-4.  For **GET** requests — Redis cache checked. Cache HIT returns response instantly
-5.  For **write** requests — cache invalidated for that path
-6.  Request body collected in **chunks** and assembled
-7.  `dispatchToWorker()` called — load balancer picks next upstream
-8.  A **worker process** receives the enriched payload via IPC
-9.  Worker validates the route, opens **keepAlive TCP connection** to upstream
-10. Upstream responds — worker sends reply back to master
-11. Master caches the response (GET) and **sends response to client**
-12. On failure — load balancer records failure, retries up to **2 times**
-
----
-
-## Heartbeat & Health System
-
-Upstreams stay alive by sending periodic `PUT /__registry/heartbeat/:id` requests.
-
-*   **Initial health check** — run at startup before accepting traffic (3s boot delay)
-*   **Continuous health checks** — run every 10 seconds during operation
-*   **Auto-removal** — unresponsive upstreams removed from load balancer rotation
-*   **Auto-recovery** — upstreams re-added after `recoveryTimeMs` (15s default)
-
----
-
-## Security Features
-
-| Feature | Details |
-|---|---|
-| HTTPS | SSL termination at proxy, HTTP auto-redirected |
-| Rate Limiting | Per-IP, per-route sliding window |
-| X-Forwarded-For | Real client IP forwarded to upstreams |
-| X-Proxy-By | `Ninja-Reverse-Proxy` header on all proxied requests |
-| Request Timeout | 20s master + 15s upstream timeout |
-| Graceful Shutdown | No requests dropped on restart |
+```
+Client → :8080 HTTP → 301 redirect to HTTPS
+Client → :8443 HTTPS
+  1. Rate limiter checks client IP — 429 if exceeded
+  2. GET requests → Redis cache checked — HIT returns instantly
+  3. Write requests (POST/PUT/PATCH/DELETE) → cache invalidated
+  4. Request body assembled from chunks
+  5. Load balancer picks a healthy upstream
+  6. Worker process forwards request over keepAlive TCP
+  7. Upstream responds → reply sent back via IPC
+  8. Master sends response to client + caches (GET)
+  9. On failure → circuit breaker records it, retry up to 2 times
+```
 
 ---
 
 ## Performance Tips
 
-*   Set `workers` = output of `nproc` (never exceed core count)
-*   Keep `maxServers` in autoScaling low on limited hardware (3–4 for i3)
-*   Redis TTL of 60s works well for mostly-read APIs
-*   Use `keepAlive: true` (already set) — avoids TCP handshake per request
-*   Monitor `/__lb-stats` to see which upstreams are under load
+- Set `workers` to `nproc` — never exceed your CPU core count
+- Set `cache.enabled: true` for read-heavy APIs — reduces upstream load significantly
+- Keep `autoScaling.maxServers` realistic for your hardware (3–4 for a 4-core machine)
+- `keepAlive: true` is set by default — avoids TCP handshake overhead per request
+- Monitor `/__lb-stats` in production to see which upstreams are under load
 
 ---
 
 ## Contributing
 
-Pull requests are welcome! Please open an issue first to discuss major changes.
+Pull requests are welcome. Please open an issue first to discuss significant changes.
 
 ---
 
