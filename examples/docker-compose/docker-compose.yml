@@ -1,0 +1,105 @@
+# ============================================================
+#  Ninja Reverse Proxy — Full Demo Stack
+# ============================================================
+#
+#  This is the DEMO. It spins up two built-in backend servers
+#  (backend-a and backend-b) so you can see the proxy working
+#  immediately without wiring up a real application.
+#
+#  HOW TO RUN (from the project root):
+#    cd examples/docker-compose
+#    docker-compose up --build
+#
+#  NOTE: SSL certificates must exist in the PROJECT ROOT.
+#  Generate them first if you have not already:
+#    openssl req -x509 -newkey rsa:4096 \
+#      -keyout ../../key.pem -out ../../cert.pem \
+#      -days 365 -nodes
+# ============================================================
+
+services:
+
+  # ── Redis Cache ────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    networks:
+      - proxy-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # ── Ninja Reverse Proxy ────────────────────────────────────
+  proxy:
+    build:
+      context: ../..         # Project root — where the main Dockerfile lives
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+      - "8443:8443"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ../../cert.pem:/app/cert.pem:ro
+      - ../../key.pem:/app/key.pem:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - proxy-network
+    restart: unless-stopped
+
+  # ── Demo Backend A ─────────────────────────────────────────
+  # A minimal HTTP server built from server-template.js.
+  # Registers itself with the proxy on startup via the service registry.
+  backend-a:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    environment:
+      SERVER_PORT: 3001
+      SERVER_ID: backend-a
+      PROXY_HOST: proxy
+      PROXY_PORT: 8080
+    depends_on:
+      - proxy
+    ports:
+      - "3001:3001"
+    networks:
+      - proxy-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3001/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+
+  # ── Demo Backend B ─────────────────────────────────────────
+  backend-b:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    environment:
+      SERVER_PORT: 3002
+      SERVER_ID: backend-b
+      PROXY_HOST: proxy
+      PROXY_PORT: 8080
+    depends_on:
+      - proxy
+    ports:
+      - "3002:3002"
+    networks:
+      - proxy-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3002/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+
+networks:
+  proxy-network:
+    driver: bridge
