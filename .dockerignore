@@ -19,7 +19,7 @@ Jenkinsfile
 sonar-project.properties
 .scannerwork
 
-# Local configurations / credentials
+# TLS credentials — never bake into the image; mount at runtime
 key.pem
 cert.pem
 *.local
@@ -34,3 +34,8 @@ examples/
 
 # Kubernetes manifests — not needed inside the image
 k8s/
+
+# NOTE: config.yaml is NOT excluded here.
+# The Dockerfile bakes a default config into the image.
+# At runtime, docker-compose.yml mounts your real config.yaml over it.
+# Always run: cp config.example.yaml config.yaml  before building.
