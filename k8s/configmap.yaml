@@ -1,0 +1,64 @@
+# ============================================================
+#  ConfigMap — wraps config.example.yaml for Kubernetes
+#
+#  Edit the 'config.yaml' key below to match your upstreams.
+#  Apply with: kubectl apply -f k8s/configmap.yaml
+# ============================================================
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ninja-proxy-config
+  namespace: default
+  labels:
+    app: ninja-reverse-proxy
+data:
+  config.yaml: |
+    server:
+      listen: 8080
+      httpsPort: 8443
+      workers: 2
+
+      loadBalancing:
+        strategy: round-robin
+        failureThreshold: 3
+        recoveryTimeMs: 15000
+
+      autoScaling:
+        enabled: false
+        minServers: 2
+        maxServers: 10
+        scaleUpAt: 10
+        scaleDownAt: 2
+        cooldownMs: 60000
+        startPort: 9000
+        proxyPort: 8080
+
+      cache:
+        enabled: false
+        host: redis
+        port: 6379
+        ttlSeconds: 60
+
+      # Replace these with your actual Kubernetes Service names and ports
+      upstreams:
+        - id: backend-a
+          url: http://backend-a-svc:3001
+
+        - id: backend-b
+          url: http://backend-b-svc:3002
+
+      paths:
+        - path: /
+          upstream:
+            - backend-a
+            - backend-b
+          rateLimit:
+            windowMs: 60000
+            maxRequests: 100000
+
+      headers:
+        - key: X-Forwarded-For
+          value: client_ip
+        - key: X-Real-IP
+          value: client_ip

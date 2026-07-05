@@ -1,0 +1,79 @@
+# ============================================================
+#  Deployment — Ninja Reverse Proxy
+#
+#  Apply with: kubectl apply -f k8s/proxy-deployment.yaml
+# ============================================================
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ninja-reverse-proxy
+  namespace: default
+  labels:
+    app: ninja-reverse-proxy
+spec:
+  # Increase replicas for high availability
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ninja-reverse-proxy
+  template:
+    metadata:
+      labels:
+        app: ninja-reverse-proxy
+    spec:
+      containers:
+        - name: proxy
+          # Replace with your actual image name after: docker build -t ninja-reverse-proxy .
+          image: ninja-reverse-proxy:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: https
+              containerPort: 8443
+              protocol: TCP
+          volumeMounts:
+            # Mount proxy config from ConfigMap
+            - name: proxy-config
+              mountPath: /app/config.yaml
+              subPath: config.yaml
+              readOnly: true
+            # Mount TLS certificates from Secret
+            - name: proxy-tls
+              mountPath: /app/cert.pem
+              subPath: cert.pem
+              readOnly: true
+            - name: proxy-tls
+              mountPath: /app/key.pem
+              subPath: key.pem
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /__lb-stats
+              port: 8443
+              scheme: HTTPS
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /__lb-stats
+              port: 8443
+              scheme: HTTPS
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+      volumes:
+        - name: proxy-config
+          configMap:
+            name: ninja-proxy-config
+        - name: proxy-tls
+          secret:
+            secretName: ninja-proxy-tls
