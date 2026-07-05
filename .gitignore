@@ -1,7 +1,7 @@
 node_modules/
 dist/
-key.pem       
-cert.pem    
+key.pem
+cert.pem
 logs/
 .env
 notes.t
@@ -10,3 +10,7 @@ auto_scaling_flow.svg
 configcopy.t
 composecopy.t
 Comm.t
+
+# Real config contains local paths and secrets — never commit it.
+# Use config.example.yaml as your starting point.
+config.yaml

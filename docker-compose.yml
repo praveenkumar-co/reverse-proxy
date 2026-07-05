@@ -1,5 +1,28 @@
+# ============================================================
+#  Ninja Reverse Proxy — Core Docker Compose
+# ============================================================
+#
+#  This file starts ONLY the reverse proxy and its required
+#  infrastructure (Redis cache).
+#
+#  Your backend services are NOT included here.
+#  Connect your own services to the 'proxy-network' and
+#  add them to config.yaml under 'upstreams'.
+#
+#  QUICK START:
+#    1. cp config.example.yaml config.yaml
+#    2. Edit config.yaml — set your upstream URLs
+#    3. docker-compose up --build
+#
+#  FULL DEMO (built-in backend servers):
+#    cd examples/docker-compose && docker-compose up --build
+# ============================================================
+
 services:
 
+  # ── Redis ─────────────────────────────────────────────────
+  # Required only when cache.enabled: true in config.yaml.
+  # Can be commented out if you are not using Redis caching.
   redis:
     image: redis:7-alpine
     networks:
@@ -11,113 +34,45 @@ services:
       timeout: 3s
       retries: 3
 
+  # ── Ninja Reverse Proxy ────────────────────────────────────
   proxy:
     build:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "8080:8080"
-      - "8443:8443"
+      - "8080:8080"     # HTTP — auto-redirects to HTTPS
+      - "8443:8443"     # HTTPS — main proxy entry point
+    volumes:
+      # Mount your config at runtime so you can change it without rebuilding
+      - ./config.yaml:/app/config.yaml:ro
+      # Mount your TLS certificates
+      - ./cert.pem:/app/cert.pem:ro
+      - ./key.pem:/app/key.pem:ro
     depends_on:
       redis:
         condition: service_healthy
     extra_hosts:
+      # Allows the proxy to reach services running on the Docker host machine
       - "host.docker.internal:host-gateway"
     networks:
       - proxy-network
     restart: unless-stopped
 
-  node1:
-    build:
-      context: .
-      dockerfile: Dockerfile.server
-    environment:
-      SERVER_PORT: 8001
-      SERVER_ID: node1
-      PROXY_HOST: proxy
-      PROXY_PORT: 8080
-    depends_on:
-      - proxy
-    ports:
-      - "8001:8001"
-    networks:
-      - proxy-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8001/health"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
-      start_period: 20s
-
-  node2:
-    build:
-      context: .
-      dockerfile: Dockerfile.server
-    environment:
-      SERVER_PORT: 8002
-      SERVER_ID: node2
-      PROXY_HOST: proxy
-      PROXY_PORT: 8080
-    depends_on:
-      - proxy
-    ports:
-      - "8002:8002"
-    networks:
-      - proxy-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8002/health"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
-      start_period: 20s
-
-  node3:
-    build:
-      context: .
-      dockerfile: Dockerfile.server
-    environment:
-      SERVER_PORT: 8003
-      SERVER_ID: node3
-      PROXY_HOST: proxy
-      PROXY_PORT: 8080
-    depends_on:
-      - proxy
-    ports:
-      - "8003:8003"
-    networks:
-      - proxy-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8003/health"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
-      start_period: 20s
-
-  node4:
-    build:
-      context: .
-      dockerfile: Dockerfile.server
-    environment:
-      SERVER_PORT: 8004
-      SERVER_ID: node4
-      PROXY_HOST: proxy
-      PROXY_PORT: 8080
-    depends_on:
-      - proxy
-    ports:
-      - "8004:8004"
-    networks:
-      - proxy-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8004/health"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
-      start_period: 20s
+  # ── Add your own backend services below ───────────────────
+  #
+  # Example — Express app:
+  #
+  # my-express-app:
+  #   image: my-express-app:latest
+  #   networks:
+  #     - proxy-network
+  #
+  # Then add to config.yaml:
+  #   upstreams:
+  #     - id: my-express-app
+  #       url: http://my-express-app:3000
+  #
+  # ─────────────────────────────────────────────────────────
 
 networks:
   proxy-network:

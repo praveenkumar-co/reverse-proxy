@@ -28,3 +28,9 @@ cert.pem
 README.md
 test.js
 image.png
+
+# Examples — NOT part of the proxy Docker image
+examples/
+
+# Kubernetes manifests — not needed inside the image
+k8s/
