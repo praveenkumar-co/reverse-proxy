@@ -6,9 +6,8 @@
 #    Copy this file to config.yaml and edit it for your setup.
 #    cp config.example.yaml config.yaml
 #
-#  The proxy never cares what technology runs behind the URLs.
-#  It works with Express, Django, Spring Boot, FastAPI, Go,
-#  ASP.NET, Kubernetes Services — any HTTP backend.
+#  The proxy works with any HTTP backend — Express, Django,
+#  Spring Boot, FastAPI, Go, ASP.NET, Kubernetes Services, etc.
 # ============================================================
 
 server:
@@ -27,22 +26,6 @@ server:
     strategy: round-robin       # Options: round-robin | least-connections | ip-hash | random
     failureThreshold: 3         # Mark an upstream DOWN after this many consecutive failures
     recoveryTimeMs: 15000       # Attempt to recover a DOWN upstream after this delay (ms)
-
-  # ── Auto Scaling ───────────────────────────────────────────
-  #
-  # When enabled: false  → proxy behaves like Nginx (static upstream list)
-  # When enabled: true   → proxy dynamically spawns/kills upstream servers
-  #                        based on active connection count (uses server-template.js)
-  #
-  autoScaling:
-    enabled: false          # Set to true only if you want dynamic server spawning
-    minServers: 2           # Minimum number of auto-scaled servers to keep alive
-    maxServers: 10          # Maximum number of auto-scaled servers allowed
-    scaleUpAt: 10           # Spawn a new server when active connections exceed this
-    scaleDownAt: 2          # Kill the oldest server when connections drop below this
-    cooldownMs: 60000       # Minimum time (ms) between consecutive scale actions
-    startPort: 9000         # First port used when spawning auto-scaled servers
-    proxyPort: 8080         # HTTP port the proxy listens on (used by spawned servers to register)
 
   # ── Redis Cache ────────────────────────────────────────────
   #
@@ -67,9 +50,6 @@ server:
   #   - id: user-service
   #     url: http://user-service:8080
   #
-  #   - id: payment-service
-  #     url: http://payment-service:8080
-  #
   #   - id: my-django-app
   #     url: http://django:8000
   #
@@ -89,9 +69,6 @@ server:
   #   path      → URL prefix to match
   #   upstream  → list of upstream IDs that serve this route
   #   rateLimit → optional per-IP sliding window rate limit for this route
-  #
-  # All traffic to '/' is load-balanced across all upstreams.
-  # Specific routes (e.g. /api, /admin) can target a subset.
   #
   paths:
     - path: /

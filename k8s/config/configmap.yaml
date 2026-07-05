@@ -17,16 +17,6 @@ data:
         failureThreshold: 3
         recoveryTimeMs: 15000
 
-      autoScaling:
-        enabled: false
-        minServers: 2
-        maxServers: 10
-        scaleUpAt: 10
-        scaleDownAt: 2
-        cooldownMs: 60000
-        startPort: 9000
-        proxyPort: 8080
-
       cache:
         enabled: false
         host: redis

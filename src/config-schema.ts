@@ -38,25 +38,7 @@ const loadBalancerSchema = z
     recoveryTimeMs: 15000,
   });
 
-const autoScalingSchema = z.object({
-  enabled: z.boolean().default(false),
-  minServers: z.number().default(2),
-  maxServers: z.number().default(10),
-  scaleUpAt: z.number().default(10),
-  scaleDownAt: z.number().default(2),
-  cooldownMs: z.number().default(10000),
-  startPort: z.number().default(9000),
-  proxyPort: z.number().default(8080),
-}).default({
-    enabled : false ,
-    minServers : 2 ,
-    maxServers : 10,
-    scaleUpAt : 10 ,
-    scaleDownAt : 2 ,
-    cooldownMs : 10000 ,
-    startPort : 9000,
-    proxyPort : 8080
-});
+
 
 const cacheSchema = z.object({
   enabled : z.boolean().default(false),
@@ -78,7 +60,6 @@ const serverSchema = z.object({
   headers: z.array(headerSchema).optional(),
   paths: z.array(pathRuleSchema),
   loadBalancing: loadBalancerSchema,
-  autoScaling: autoScalingSchema,
   cache : cacheSchema ,
 });
 

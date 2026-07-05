@@ -1,28 +1,6 @@
-# ============================================================
-#  Ninja Reverse Proxy — Core Docker Compose
-# ============================================================
-#
-#  This file starts ONLY the reverse proxy and its required
-#  infrastructure (Redis cache).
-#
-#  Your backend services are NOT included here.
-#  Connect your own services to the 'proxy-network' and
-#  add them to config.yaml under 'upstreams'.
-#
-#  QUICK START:
-#    1. cp config.example.yaml config.yaml
-#    2. Edit config.yaml — set your upstream URLs
-#    3. docker-compose up --build
-#
-#  FULL DEMO (built-in backend servers):
-#    cd examples/docker-compose && docker-compose up --build
-# ============================================================
 
 services:
 
-  # ── Redis ─────────────────────────────────────────────────
-  # Required only when cache.enabled: true in config.yaml.
-  # Can be commented out if you are not using Redis caching.
   redis:
     image: redis:7-alpine
     networks:
@@ -34,7 +12,6 @@ services:
       timeout: 3s
       retries: 3
 
-  # ── Ninja Reverse Proxy ────────────────────────────────────
   proxy:
     build:
       context: .
@@ -57,22 +34,6 @@ services:
     networks:
       - proxy-network
     restart: unless-stopped
-
-  # ── Add your own backend services below ───────────────────
-  #
-  # Example — Express app:
-  #
-  # my-express-app:
-  #   image: my-express-app:latest
-  #   networks:
-  #     - proxy-network
-  #
-  # Then add to config.yaml:
-  #   upstreams:
-  #     - id: my-express-app
-  #       url: http://my-express-app:3000
-  #
-  # ─────────────────────────────────────────────────────────
 
 networks:
   proxy-network:

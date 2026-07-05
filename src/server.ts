@@ -4,7 +4,7 @@ import { readFileSync } from "fs";
 import type { ConfigSchemaType } from "./config-schema.js";
 import cluster, { Worker } from "node:cluster";
 import { rootConfigSchema } from "./config-schema.js";
-import { AutoScaler } from "./auto-scaler.js";
+
 
 import type {
   WorkerMessageType,
@@ -195,20 +195,7 @@ export async function createServer(config: CreateServerConfig) {
 
       worker.on("message", handler);
     }
-    const autoScaler = config.config.server.autoScaling.enabled
-      ? new AutoScaler(
-        {
-          minServers: config.config.server.autoScaling.minServers,
-          maxServers: config.config.server.autoScaling.maxServers,
-          scaleUpAt: config.config.server.autoScaling.scaleUpAt,
-          scaleDownAt: config.config.server.autoScaling.scaleDownAt,
-          cooldownMs: config.config.server.autoScaling.cooldownMs,
-          startPort: config.config.server.autoScaling.startPort,
-          proxyPort: config.config.server.autoScaling.proxyPort,
-        },
-        lb
-      )
-      : null;
+
 
     const httpServer = http.createServer((req, res) => {
       if (req.url?.startsWith("/__registry")) {
@@ -253,13 +240,7 @@ export async function createServer(config: CreateServerConfig) {
         );
         return;
       }
-      if (req.url === "/__autoscaler-stats") {
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(
-          JSON.stringify(autoScaler?.getStats() ?? { enabled: false }, null, 2)
-        );
-        return;
-      }
+
       if (req.url === "/__registry") {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(registry.getStats(), null, 2));
@@ -395,9 +376,7 @@ export async function createServer(config: CreateServerConfig) {
     async function gracefulShutdown(signal: string) {
       if (isShuttingDown) return;
       isShuttingDown = true;
-      if (autoScaler) {
-        autoScaler.stop();
-      }
+
       console.log(
         `\n[Master] Received ${signal} — starting graceful shutdown...`
       );
@@ -427,9 +406,7 @@ export async function createServer(config: CreateServerConfig) {
         `[Master] HTTPS on port ${config.config.server.httpsPort ?? 8443}`
       );
       startHealthChecks(config.config.server.upstreams, HEALTHY_UPSTREAMS, lb);
-      if (autoScaler) {
-        autoScaler.start();
-      }
+
     });
   } else {
     console.log(`[Worker ${process.pid}] Ready for work`);
