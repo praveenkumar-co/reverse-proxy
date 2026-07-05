@@ -1,20 +1,20 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: reverse-proxy
-  namespace: reverse-proxy
-
+  name: ninja-reverse-proxy-svc
+  namespace: default
+  labels:
+    app: ninja-reverse-proxy
 spec:
   selector:
-    app: reverse-proxy
-
+    app: ninja-reverse-proxy
   ports:
     - name: http
       port: 8080
       targetPort: 8080
-
+      protocol: TCP
     - name: https
       port: 8443
       targetPort: 8443
-
+      protocol: TCP
   type: ClusterIP
