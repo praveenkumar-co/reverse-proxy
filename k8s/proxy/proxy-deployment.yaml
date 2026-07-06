@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: proxy
-          image: ninja-reverse-proxy:latest
+          image: pravi2005/reverse-proxy:latest
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
