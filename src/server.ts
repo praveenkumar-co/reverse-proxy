@@ -184,7 +184,6 @@ export async function createServer(config: CreateServerConfig) {
         payload.url.startsWith(p.path)
       );
 
-      // --- Sticky Sessions ---
       let upstreamId: string | null = null;
       if (pathRule?.sticky) {
         const cookies = parseCookies(payload.headers.cookie);
