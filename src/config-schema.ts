@@ -3,7 +3,7 @@ import { z } from "zod";
 const upstreamSchema = z.object({
   id: z.string(),
   url: z.string().url(),
-  weight: z.number().optional(),
+  weight: z.number().default(1),
 });
 
 const headerSchema = z.object({
@@ -22,6 +22,7 @@ const pathRuleSchema = z.object({
   path: z.string(),
   upstream: z.array(z.string()),
   rateLimit: rateLimitSchema,
+  sticky: z.boolean().default(false),
 });
 
 const loadBalancerSchema = z
@@ -37,8 +38,6 @@ const loadBalancerSchema = z
     failureThreshold: 3,
     recoveryTimeMs: 15000,
   });
-
-
 
 const cacheSchema = z.object({
   enabled : z.boolean().default(false),
@@ -56,6 +55,10 @@ const serverSchema = z.object({
   listen: z.number(),
   httpsPort: z.number().optional(),
   workers: z.number().optional(),
+  connectTimeoutMs: z.number().default(5000),   
+  readTimeoutMs: z.number().default(15000),     
+  compression: z.boolean().default(false),      
+  accessLog: z.string().optional(),  
   upstreams: z.array(upstreamSchema),
   headers: z.array(headerSchema).optional(),
   paths: z.array(pathRuleSchema),
