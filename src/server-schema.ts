@@ -1,7 +1,7 @@
 import {z} from 'zod';
 
 export const workerMessageSchema = z.object({
-  requestType : z.enum(['GET', 'POST', 'PUT', 'DELETE', 'PATCH']),
+  requestType : z.enum(['GET', 'POST', 'PUT', 'DELETE']),
   headers :  z.any(),
   body : z.string().nullable(),
   url : z.string(),
