@@ -1,15 +1,16 @@
 import http from "http";
 import https from "https";
-import { readFileSync } from "fs";
+import { readFileSync, promises as fs } from "fs";
+import path from "path";
 import type { ConfigSchemaType } from "./config-schema.js";
 import cluster, { Worker } from "node:cluster";
 import { rootConfigSchema } from "./config-schema.js";
-
 
 import type {
   WorkerMessageType,
   WorkerReplyMessageType,
 } from "./server-schema.js";
+
 import {
   workerMessageSchema,
   workerMessageReplySchema,
@@ -26,7 +27,38 @@ interface CreateServerConfig {
   workerCount: number;
   config: ConfigSchemaType;
 }
-const MAX_RETRIES = 2;
+
+let WORKER_POOL: Worker[] = [];
+let ACTIVE_CONFIG: ConfigSchemaType;
+let lb: LoadBalancer;
+let cache: Cache;
+const HEALTHY_UPSTREAMS: Set<string> = new Set();
+const rateLimiters = new Map<string, RateLimiter>();
+
+async function writeAccesslog(
+   logPath: string | undefined,
+   clientIp : string ,
+   method : string ,
+   url : string ,
+   statusCode : number ,
+   bytesSent : number ,
+   latencyMs : number ,
+   userAgent : number ,
+){
+   if (!logPath){
+    return ;
+   }
+  const timestamp = new Date().toISOString();
+    const logLine = `${clientIp} - - [${timestamp}] "${method} ${url} HTTP/1.1" ${statusCode} ${bytesSent} "-" "${userAgent}" ${latencyMs.toFixed(2)}ms\n`;
+    try {
+    const fullPath = path.resolve(logPath);
+    await fs.mkdir(path.dirname(fullPath), { recursive: true });
+    await fs.appendFile(fullPath, logLine, "utf8");
+  } catch (err: any) {
+    console.error(`[Logger Error] Failed to write access log: ${err.message}`);
+  }
+}
+
 
 export async function createServer(config: CreateServerConfig) {
   const { port, workerCount } = config;
