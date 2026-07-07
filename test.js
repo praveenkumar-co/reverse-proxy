@@ -16,7 +16,10 @@ stages: [
   { duration: '45s', target: 100 }, 
   { duration: '45s', target: 150 }, 
   { duration: '45s', target: 175 },  
+  { duration: '45s', target: 200 },  
+  { duration: '45s', target: 100 },  
   { duration: '30s', target: 0   },
+  // gradually reducing the load to again test 
 ],
   thresholds: {
   error_rate: ['rate<0.2'],
