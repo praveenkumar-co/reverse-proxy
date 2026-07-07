@@ -32,11 +32,24 @@ const loadBalancerSchema = z
       .default("least-connections"),
     failureThreshold: z.number().default(3),
     recoveryTimeMs: z.number().default(15000),
+    retry: z
+      .object({
+        maxAttempts: z.number().default(2),
+        statusCodes: z.array(z.number()).default([502, 503, 504]),
+      })
+      .default({
+        maxAttempts: 2,
+        statusCodes: [502, 503, 504],
+      }),
   })
   .default({
     strategy: "least-connections",
     failureThreshold: 3,
     recoveryTimeMs: 15000,
+    retry: {
+      maxAttempts: 2,
+      statusCodes: [502, 503, 504],
+    },
   });
 
 const cacheSchema = z.object({

@@ -9,11 +9,13 @@ export const workerMessageSchema = z.object({
 });
 
 export const workerMessageReplySchema = z.object({
-    requestId : z.string().optional(),
-    data: z.string(),
-    error: z.string(),  
-    errorCode: z.enum(['500', '404']).optional(),
-    statusCode: z.number().optional(),  
+  requestId: z.string().optional(),
+  data: z.string(),
+  error: z.string().optional(),
+  errorCode: z.string().optional(),
+  statusCode: z.number().optional(),
+  isCompressed: z.boolean().optional(),
+  encoding: z.string().optional(),
 });
 
 // making type of worker Message Schema and Reply Schema of Workers
