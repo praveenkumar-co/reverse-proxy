@@ -15,13 +15,11 @@ app.get("/health", (req, res) => {
 });
 
 app.get("/", (req, res) => {
-  setTimeout(() => {
-    res.json({
-      message: `Hello from ${SERVER_ID}`,
-      port: PORT,
-      timestamp: new Date().toISOString(),
-    });
-  }, 2000);
+  res.json({
+    message: `Hello from ${SERVER_ID}`,
+    port: PORT,
+    timestamp: new Date().toISOString(),
+  });
 });
 
 app.get("/api/users", (req, res) => {
