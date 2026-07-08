@@ -2,6 +2,7 @@ import { program } from "commander";
 import { parseYAMLConfig, validateConfig } from "./config.js";
 import os from "node:os";
 import { createServer, reloadServerConfig } from "./server.js";
+import fs from "node:fs";
 
 async function main() {
   program.option("--config <path>");
@@ -33,6 +34,24 @@ async function main() {
       port: validatedConfig.server.listen,
       workerCount: validatedConfig.server.workers ?? os.cpus().length,
       config: validatedConfig,
+    });
+     // praveen : i have added watcher
+    let watchDebounceTimer: NodeJS.Timeout;
+    fs.watch(configPath, (eventType) => {
+      if (eventType === "change") {
+        clearTimeout(watchDebounceTimer);
+        watchDebounceTimer = setTimeout(async () => {
+          console.log(`\n[Master] config.yaml changed — auto-reloading...`);
+          try {
+            const rawConfig = await parseYAMLConfig(configPath);
+            const newConfig = await validateConfig(rawConfig);
+            await reloadServerConfig(newConfig);
+            console.log("[Master] Configuration reloaded automatically!");
+          } catch (err: any) {
+            console.error(`[Master] Auto-reload failed: ${err.message}`);
+          }
+        }, 100);
+      }
     });
   }
 }

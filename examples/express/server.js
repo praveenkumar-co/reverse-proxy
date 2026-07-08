@@ -40,7 +40,7 @@ app.post("/api/users", (req, res) => {
 function registerSelf() {
   const body = JSON.stringify({
     id: SERVER_ID,
-    url: `http://${SERVER_ID}:${PORT}`,
+    url: `http://${process.env.REGISTER_HOST ?? SERVER_ID}:${PORT}`,
     metadata: { type: "express", startedAt: new Date().toISOString() },
   });
   const req = http.request(
