@@ -1,13 +1,9 @@
-# ============================================================
-#  Demo config for examples/docker-compose
-#  Uses the two built-in demo backends: backend-a and backend-b
-# ============================================================
-
 server:
 
   listen: 8080
   httpsPort: 8443
   workers: 2
+  compression: true
 
   loadBalancing:
     strategy: round-robin
@@ -22,10 +18,10 @@ server:
 
   upstreams:
     - id: backend-a
-      url: http://backend-a:3001
+      url: http://host.docker.internal:3001
 
     - id: backend-b
-      url: http://backend-b:3002
+      url: http://host.docker.internal:3002
 
   paths:
     - path: /
@@ -34,7 +30,8 @@ server:
         - backend-b
       rateLimit:
         windowMs: 60000
-        maxRequests: 100000
+        maxRequests: 5
+      sticky: true
 
   headers:
     - key: X-Forwarded-For
