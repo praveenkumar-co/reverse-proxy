@@ -62,6 +62,7 @@ export async function startHealthChecks(
         },
         (HealthRes) => {
           if (HealthRes.statusCode === 200) {
+            lb.recordSuccess(upstream.id);
             if (!HEALTHY_UPSTREAMS.has(upstream.id)) {
               HEALTHY_UPSTREAMS.add(upstream.id);
               if (!lb.hasUpstream(upstream.id)) {
@@ -72,11 +73,13 @@ export async function startHealthChecks(
               console.log(`${upstream.id} is HEALTHY`);
             }
           } else {
+            lb.recordFailure(upstream.id);
             HEALTHY_UPSTREAMS.delete(upstream.id);
             console.log(`${upstream.id} is DOWN!`);
           }
         });
       req.on('error', () => {
+        lb.recordFailure(upstream.id);
         HEALTHY_UPSTREAMS.delete(upstream.id);
         console.log(`${upstream.id} is DOWN! (connection refused)`);
       });
