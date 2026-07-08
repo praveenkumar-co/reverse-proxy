@@ -17,7 +17,7 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "8080:8080"     # HTTP — auto-redirects to HTTPS
+      - "8081:8080"     # HTTP — auto-redirects to HTTPS
       - "8443:8443"     # HTTPS — main proxy entry point
     volumes:
       # Mount your config at runtime so you can change it without rebuilding
