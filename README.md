@@ -48,7 +48,8 @@ npm install -g ninja-reverse-proxy
 ```bash
 openssl req -x509 -newkey rsa:4096 \
   -keyout key.pem -out cert.pem \
-  -days 365 -nodes
+  -days 365 -nodes \
+  -subj "/CN=localhost"
 ```
 
 ### 3. Create your config file
