@@ -3,6 +3,7 @@ test/
 config.d/
 logs/
 examples/
+k8s/
 
 # SSL Certificates - NEVER publish these
 key.pem
@@ -14,6 +15,21 @@ config.yaml
 # Docker files
 docker-compose.yml
 Dockerfile
+.dockerignore
+
+# CI / Code quality files
+Jenkinsfile
+sonar-project.properties
+
+# Test files
+test.js
+dist/*.test.js
+dist/*.test.js.map
+dist/*.test.d.ts
+dist/*.test.d.ts.map
+
+# Unnecessary assets
+image.png
 
 # Dev files
 .env
