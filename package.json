@@ -1,6 +1,6 @@
 {
   "name": "ninja-reverse-proxy",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A production-grade reverse proxy with load balancing, circuit breaker, sticky sessions, and dynamic service registry.",
   "type": "module",
   "main": "dist/index.js",
@@ -13,7 +13,16 @@
     "dev": "tsc-watch --onSuccess \"node dist/index.js --config config.yaml\"",
     "test": "tsc -p tsconfig.test.json && node --test dist-test/test"
   },
-  "keywords": ["reverse-proxy", "load-balancer", "circuit-breaker", "nginx", "gateway", "sticky-session", "rate-limiter", "proxy"],
+  "keywords": [
+    "reverse-proxy",
+    "load-balancer",
+    "circuit-breaker",
+    "nginx",
+    "gateway",
+    "sticky-session",
+    "rate-limiter",
+    "proxy"
+  ],
   "author": "praveenkumar-co",
   "license": "ISC",
   "repository": {
