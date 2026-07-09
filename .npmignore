@@ -1,0 +1,22 @@
+src/
+test/
+config.d/
+logs/
+examples/
+
+# SSL Certificates - NEVER publish these
+key.pem
+cert.pem
+
+# Personal config
+config.yaml
+
+# Docker files
+docker-compose.yml
+Dockerfile
+
+# Dev files
+.env
+*.log
+tsconfig.json
+tsconfig.test.json
