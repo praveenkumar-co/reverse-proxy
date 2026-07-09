@@ -13,9 +13,14 @@
     "dev": "tsc-watch --onSuccess \"node dist/index.js --config config.yaml\"",
     "test": "tsc -p tsconfig.test.json && node --test dist-test/test"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": ["reverse-proxy", "load-balancer", "circuit-breaker", "nginx", "gateway", "sticky-session", "rate-limiter", "proxy"],
+  "author": "praveenkumar-co",
   "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/praveenkumar-co/reverse-proxy.git"
+  },
+  "homepage": "https://github.com/praveenkumar-co/reverse-proxy#readme",
   "packageManager": "pnpm@10.30.3",
   "devDependencies": {
     "@types/node": "^25.5.0",
@@ -24,10 +29,7 @@
   },
   "dependencies": {
     "commander": "^14.0.3",
-    "express": "^5.2.1",
-    "node-utils-kit": "^1.2.4",
     "redis": "^5.11.0",
-    "scalable-bloom-kit": "^1.0.6",
     "yaml": "^2.8.2",
     "zod": "^4.3.6"
   }
