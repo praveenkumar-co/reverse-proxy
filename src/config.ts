@@ -21,35 +21,45 @@ export async function parseYAMLConfig(filepath : string){
    if (dirExists) {
       try {
          const files = await fs.readdir(configDir);
-         for (const file of files) {
-            if (file.endsWith(".yaml") || file.endsWith(".yml")) {
-               const extraFilePath = path.join(configDir, file);
-               try {
-                  const extraContent = await fs.readFile(extraFilePath, "utf-8");
-                  const extraParsed = parse(extraContent);
+         const yamlFiles = files.filter(f => f.endsWith(".yaml") || f.endsWith(".yml"));
 
-                  if (extraParsed && extraParsed.server) {
-                     if (extraParsed.server.upstreams && Array.isArray(extraParsed.server.upstreams)) {
-                        configParsed.server.upstreams = [
-                           ...(configParsed.server.upstreams || []),
-                           ...extraParsed.server.upstreams
-                        ];
-                     }
-                     if (extraParsed.server.paths && Array.isArray(extraParsed.server.paths)) {
-                        configParsed.server.paths = [
-                           ...(configParsed.server.paths || []),
-                           ...extraParsed.server.paths
-                        ];
-                     }
-                     if (extraParsed.server.headers && Array.isArray(extraParsed.server.headers)) {
-                        configParsed.server.headers = [
-                           ...(configParsed.server.headers || []),
-                           ...extraParsed.server.headers
-                        ];
-                     }
-                  }
-               } catch (err: any) {
-                  console.error(`[Config] Skipped loading broken file ${file}: ${err.message}`);
+         // Read and parse all files concurrently
+         const parsePromises = yamlFiles.map(async (file) => {
+            const extraFilePath = path.join(configDir, file);
+            try {
+               const extraContent = await fs.readFile(extraFilePath, "utf-8");
+               return parse(extraContent);
+            } catch (err: any) {
+               console.error(`[Config] Skipped loading broken file ${file}: ${err.message}`);
+               return null; // Return null so we can filter it out safely
+            }
+         });
+
+         const parsedFilesResults = await Promise.all(parsePromises);
+
+         // Merge results sequentially in memory (very fast)
+         for (const extraParsed of parsedFilesResults) {
+            if (extraParsed && extraParsed.server) {
+               // Check and merge upstreams safely
+               if (extraParsed.server.upstreams && Array.isArray(extraParsed.server.upstreams)) {
+                  configParsed.server.upstreams = [
+                     ...(configParsed.server.upstreams || []),
+                     ...extraParsed.server.upstreams
+                  ];
+               }
+               // Check and merge paths safely
+               if (extraParsed.server.paths && Array.isArray(extraParsed.server.paths)) {
+                  configParsed.server.paths = [
+                     ...(configParsed.server.paths || []),
+                     ...extraParsed.server.paths
+                  ];
+               }
+               // Check and merge headers safely
+               if (extraParsed.server.headers && Array.isArray(extraParsed.server.headers)) {
+                  configParsed.server.headers = [
+                     ...(configParsed.server.headers || []),
+                     ...extraParsed.server.headers
+                  ];
                }
             }
          }
