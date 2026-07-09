@@ -80,6 +80,13 @@ export async function reloadServerConfig(newConfig: ConfigSchemaType) {
     recoveryTimeMs: newConfig.server.loadBalancing.recoveryTimeMs,
   });
 
+  // Re-add dynamically registered services from registry
+  registry.getAll().forEach((service) => {
+    if (!lb.hasUpstream(service.id)) {
+      lb.addUpstream(service.id, 1);
+    }
+  });
+
   const oldWorkers = [...WORKER_POOL];
   WORKER_POOL.length = 0;
   const targetWorkers = newConfig.server.workers ?? 2;

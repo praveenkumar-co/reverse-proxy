@@ -2,7 +2,7 @@ import { promises as fs } from 'fs';
 import { parse } from 'yaml';  
 import {rootConfigSchema} from "./config-schema.js";
 import path from 'path';
-   
+
 export async function parseYAMLConfig(filepath : string){
    const configFileContent = await fs.readFile(filepath ,'utf-8');
    const configParsed = parse(configFileContent) || {}; 
