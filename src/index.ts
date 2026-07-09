@@ -3,6 +3,7 @@ import { parseYAMLConfig, validateConfig } from "./config.js";
 import os from "node:os";
 import { createServer, reloadServerConfig } from "./server.js";
 import fs from "node:fs";
+import path from "node:path";
 
 async function main() {
   program.option("--config <path>");
@@ -35,24 +36,35 @@ async function main() {
       workerCount: validatedConfig.server.workers ?? os.cpus().length,
       config: validatedConfig,
     });
-     // praveen : i have added watcher
+
+    // --- Automatic File Watcher Hot-Reload ---
     let watchDebounceTimer: NodeJS.Timeout;
+    const triggerReload = () => {
+      clearTimeout(watchDebounceTimer);
+      watchDebounceTimer = setTimeout(async () => {
+        try {
+          const rawConfig = await parseYAMLConfig(configPath);
+          const newConfig = await validateConfig(rawConfig);
+          await reloadServerConfig(newConfig);
+          console.log("[Master] Configuration reloaded automatically!");
+        } catch (err: any) {
+          console.error(`[Master] Auto-reload failed: ${err.message}`);
+        }
+      }, 100); // 100ms 
+    };
+
     fs.watch(configPath, (eventType) => {
       if (eventType === "change") {
-        clearTimeout(watchDebounceTimer);
-        watchDebounceTimer = setTimeout(async () => {
-          console.log(`\n[Master] config.yaml changed — auto-reloading...`);
-          try {
-            const rawConfig = await parseYAMLConfig(configPath);
-            const newConfig = await validateConfig(rawConfig);
-            await reloadServerConfig(newConfig);
-            console.log("[Master] Configuration reloaded automatically!");
-          } catch (err: any) {
-            console.error(`[Master] Auto-reload failed: ${err.message}`);
-          }
-        }, 100);
+        triggerReload();
       }
     });
+
+    const configDir = path.join(path.dirname(configPath), "config.d");
+    if (fs.existsSync(configDir)) {
+      fs.watch(configDir, (eventType) => {
+        triggerReload();
+      });
+    }
   }
 }
 
