@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { program } from "commander";
 import { parseYAMLConfig, validateConfig } from "./config.js";
 import os from "node:os";
