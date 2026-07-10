@@ -4,6 +4,7 @@ const upstreamSchema = z.object({
   id: z.string(),
   url: z.string().url(),
   weight: z.number().default(1),
+  healthPath: z.string().default("/health"),
 });
 
 const headerSchema = z.object({

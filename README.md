@@ -8,7 +8,7 @@ Designed in the same philosophy as Nginx, Traefik, and HAProxy — configure it 
 
 ## Works with any HTTP backend
 
-Express · Fastify · NestJS · Django · FastAPI · Flask · Spring Boot · Go · ASP.NET Core · Kubernetes Services · Docker Compose services · **Any service that speaks HTTP**
+node· Kubernetes Services · Docker Compose services · **Any service that speaks HTTP**
 
 The proxy never cares what technology runs behind the URLs. You configure upstreams in `config.yaml` and the proxy routes, balances, caches, rate-limits, and health-checks them automatically.
 
@@ -168,7 +168,7 @@ The proxy hot-reloads `config.d/` automatically whenever a file is added or chan
 | `server.httpsPort` | `8443` | HTTPS port — main entry point |
 | `server.workers` | `2` | Set to your CPU core count |
 | `loadBalancing.strategy` | `round-robin` | `round-robin` \| `least-connections` \| `ip-hash` \| `random` |
-| `loadBalancing.failureThreshold` | `3` | Mark upstream DOWN after N consecutive failures |
+| `loadBalancing.failure0Threshold` | `3` | Mark upstream DOWN after N consecutive failures |
 | `loadBalancing.recoveryTimeMs` | `15000` | Retry a DOWN upstream after N ms |
 | `cache.enabled` | `false` | Enable Redis GET response caching |
 | `cache.ttlSeconds` | `60` | Cache TTL in seconds |

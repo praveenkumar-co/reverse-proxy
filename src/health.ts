@@ -15,7 +15,7 @@ export async function initialHealthCheck(
         {
           host: upstreamUrl.hostname,
           port: upstreamUrl.port,
-          path: "/health",
+          path: upstream.healthPath ?? "/health",
           method: "GET",
         },
         (initialRes) => {
@@ -57,7 +57,7 @@ export async function startHealthChecks(
         {
           host: upstreamUrl.hostname, 
           port: upstreamUrl.port,
-          path: "/health",
+          path: upstream.healthPath ?? "/health",
           method: "GET",
         },
         (HealthRes) => {
