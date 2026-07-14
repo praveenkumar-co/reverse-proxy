@@ -21,6 +21,7 @@ import { RateLimiter } from "./rate-limiter.js";
 import { LoadBalancer } from "./loadBalancer.js";
 import { registry } from "./Serviceregistry.js";
 import { Cache } from "./cache.js";
+import { MetricsRegistry } from "./metrics.js";
 
 interface CreateServerConfig {
   port: number;
@@ -32,6 +33,7 @@ let WORKER_POOL: Worker[] = [];
 let ACTIVE_CONFIG: ConfigSchemaType;
 let lb: LoadBalancer;
 let cache: Cache;
+let metricsRegistry: MetricsRegistry;
 const HEALTHY_UPSTREAMS: Set<string> = new Set();
 const rateLimiters = new Map<string, RateLimiter>();
 
@@ -143,6 +145,8 @@ export async function createServer(config: CreateServerConfig) {
     });
     await cache.connect();
 
+    metricsRegistry = new MetricsRegistry(HEALTHY_UPSTREAMS);
+
     lb = new LoadBalancer({
       strategy: ACTIVE_CONFIG.server.loadBalancing.strategy,
       upstreams: ACTIVE_CONFIG.server.upstreams,
@@ -207,9 +211,11 @@ export async function createServer(config: CreateServerConfig) {
       if (!upstreamId) {
         res.writeHead(503, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "No healthy upstreams available" }));
+        metricsRegistry.recordRequest(payload.requestType, payload.url, 503, "none", performance.now() - startTime);
         return;
       }
       attemptedUpstreams.add(upstreamId);
+      metricsRegistry.recordActiveConnection(upstreamId, 1);
 
       const serviceInstance = registry.get(upstreamId);
       if (!serviceInstance) {
@@ -255,10 +261,13 @@ export async function createServer(config: CreateServerConfig) {
         ) {
           lb.recordFailure(upstreamId!);
           if (attempt < retryConfig.maxAttempts) {
+            metricsRegistry.recordActiveConnection(upstreamId!, -1);
             dispatchToWorker(payload, clientIp, res, attempt + 1, attemptedUpstreams, startTime);
           } else {
+            metricsRegistry.recordActiveConnection(upstreamId!, -1);
             res.writeHead(reply.statusCode ?? 502);
             res.end(reply.error || "Bad Gateway");
+            metricsRegistry.recordRequest(payload.requestType, payload.url, reply.statusCode ?? 502, upstreamId!, performance.now() - startTime);
             writeAccessLog(
               ACTIVE_CONFIG.server.accessLog,
               clientIp,
@@ -272,6 +281,11 @@ export async function createServer(config: CreateServerConfig) {
           }
         } else {
           lb.recordSuccess(upstreamId!);
+          metricsRegistry.recordActiveConnection(upstreamId!, -1);
+          metricsRegistry.recordRequest(payload.requestType, payload.url, reply.statusCode ?? 200, upstreamId!, performance.now() - startTime);
+          if (payload.requestType === "GET") {
+            metricsRegistry.recordCacheOp("miss");
+          }
           
           let responseData: Buffer | string = reply.data;
           if (reply.isCompressed && reply.encoding === "gzip") {
@@ -318,8 +332,10 @@ export async function createServer(config: CreateServerConfig) {
 
       timer = setTimeout(() => {
         worker.off("message", handler);
+        metricsRegistry.recordActiveConnection(upstreamId!, -1);
         res.writeHead(504);
         res.end("Gateway Timeout");
+        metricsRegistry.recordRequest(payload.requestType, payload.url, 504, upstreamId!, performance.now() - startTime);
         writeAccessLog(
           ACTIVE_CONFIG.server.accessLog,
           clientIp,
@@ -378,6 +394,13 @@ export async function createServer(config: CreateServerConfig) {
             2
           )
         );
+        return;
+      }
+
+      if (req.url === "/metrics" || req.url === "/__metrics") {
+        res.writeHead(200, { "Content-Type": "text/plain; version=0.0.4; charset=utf-8" });
+        const allUpstreams = [...new Set([...ACTIVE_CONFIG.server.upstreams.map(u => u.id), ...registry.getAll().map(s => s.id)])];
+        res.end(metricsRegistry.getExpositionFormat(allUpstreams));
         return;
       }
 
@@ -453,6 +476,8 @@ export async function createServer(config: CreateServerConfig) {
           if (cached) {
             res.writeHead(200, { "X-Cache": "HIT" });
             res.end(cached);
+            metricsRegistry.recordCacheOp("hit");
+            metricsRegistry.recordRequest("GET", req.url ?? "", 200, "cache", 0);
             writeAccessLog(
               ACTIVE_CONFIG.server.accessLog,
               clientIP,
