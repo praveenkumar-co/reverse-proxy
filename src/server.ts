@@ -2,6 +2,7 @@ import http from "http";
 import https from "https";
 import { readFileSync, promises as fs } from "fs";
 import path from "path";
+import net from "net";
 import type { ConfigSchemaType } from "./config-schema.js";
 import cluster, { Worker } from "node:cluster";
 import { rootConfigSchema } from "./config-schema.js";
@@ -357,6 +358,71 @@ export async function createServer(config: CreateServerConfig) {
       worker.on("message", handler);
     }
 
+    function handleWebSocketUpgrade(req: http.IncomingMessage, socket: net.Socket, head: Buffer) {
+      const url = new URL(req.url!, `http://${req.headers.host}`);
+      const pathRule = ACTIVE_CONFIG.server.paths.find((p) =>
+        url.pathname.startsWith(p.path)
+      );
+
+      if (!pathRule) {
+        socket.destroy();
+        return;
+      }
+
+      const clientIP =
+        (req.headers["x-forwarded-for"] as string) ??
+        socket.remoteAddress ??
+        "unknown";
+
+      const upstreamId = lb.pickFiltered(HEALTHY_UPSTREAMS, clientIP, new Set());
+      if (!upstreamId) {
+        socket.destroy();
+        return;
+      }
+
+      const serviceInstance = registry.get(upstreamId);
+      if (!serviceInstance) {
+        socket.destroy();
+        return;
+      }
+
+      const upstreamUrl = new URL(serviceInstance.url);
+
+      const targetSocket = net.connect(
+        {
+          host: upstreamUrl.hostname,
+          port: parseInt(upstreamUrl.port || "80"),
+        },
+        () => {
+          let rawRequest = `${req.method} ${req.url} HTTP/${req.httpVersion}\r\n`;
+          for (const [key, val] of Object.entries(req.headers)) {
+            if (Array.isArray(val)) {
+              val.forEach((v) => {
+                rawRequest += `${key}: ${v}\r\n`;
+              });
+            } else {
+              rawRequest += `${key}: ${val}\r\n`;
+            }
+          }
+          rawRequest += "\r\n";
+          targetSocket.write(rawRequest);
+          if (head && head.length > 0) {
+            targetSocket.write(head);
+          }
+
+          socket.pipe(targetSocket);
+          targetSocket.pipe(socket);
+        }
+      );
+
+      targetSocket.on("error", () => {
+        socket.destroy();
+      });
+      socket.on("error", () => {
+        targetSocket.destroy();
+      });
+    }
+
     const httpServer = http.createServer((req, res) => {
       if (req.url?.startsWith("/__registry")) {
         httpsServer.emit("request", req, res);
@@ -369,6 +435,8 @@ export async function createServer(config: CreateServerConfig) {
       res.writeHead(301, { Location: httpsUrl });
       res.end();
     });
+
+    httpServer.on("upgrade", handleWebSocketUpgrade);
 
     const httpsServer = https.createServer(sslOptions, async (req, res) => {
       const clientIP =
@@ -519,6 +587,8 @@ export async function createServer(config: CreateServerConfig) {
         dispatchToWorker(payload, clientIP, res);
       });
     });
+
+    httpsServer.on("upgrade", handleWebSocketUpgrade);
 
     let isShuttingDown = false;
     async function gracefulShutdown(signal: string) {
