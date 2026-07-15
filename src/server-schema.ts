@@ -16,6 +16,7 @@ export const workerMessageReplySchema = z.object({
   statusCode: z.number().optional(),
   isCompressed: z.boolean().optional(),
   encoding: z.string().optional(),
+  headers: z.any().optional(),
 });
 
 // making type of worker Message Schema and Reply Schema of Workers

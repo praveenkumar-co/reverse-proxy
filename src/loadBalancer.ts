@@ -160,7 +160,6 @@ export class LoadBalancer {
             best = s;
           }
         }
-
         if (best) {
           best.currentWeight -= totalEffectiveWeight;
           chosen = best;

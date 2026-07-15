@@ -300,12 +300,18 @@ export async function createServer(config: CreateServerConfig) {
             await cache.set(cacheKey, reply.data);
           }
 
-          const responseHeaders: Record<string, string> = {
+          const responseHeaders: Record<string, any> = {
             "Access-Control-Allow-Origin": "*",
             "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
             "Access-Control-Allow-Headers": "*",
             "Access-Control-Allow-Credentials": "true",
+            ...(reply.headers || {}),
           };
+
+          delete responseHeaders["content-length"];
+          delete responseHeaders["content-encoding"];
+          delete responseHeaders["transfer-encoding"];
+          delete responseHeaders["connection"];
 
           if (pathRule?.sticky) {
             responseHeaders["Set-Cookie"] = `NINJA_ROUTE=${upstreamId}; Path=/; HttpOnly; SameSite=Lax`;
@@ -643,6 +649,7 @@ export async function createServer(config: CreateServerConfig) {
                   isCompressed: !err,
                   encoding: err ? undefined : "gzip",
                   statusCode: upstreamRes.statusCode ?? 200,
+                  headers: upstreamRes.headers,
                 };
                 if (process.send) process.send(JSON.stringify(reply));
               });
@@ -651,6 +658,7 @@ export async function createServer(config: CreateServerConfig) {
                 requestId: raw.requestId,
                 data: bodyBuffer.toString("utf8"),
                 statusCode: upstreamRes.statusCode ?? 200,
+                headers: upstreamRes.headers,
               };
               if (process.send) process.send(JSON.stringify(reply));
             }
