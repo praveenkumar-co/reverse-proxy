@@ -23,7 +23,6 @@ data:
         port: 6379
         ttlSeconds: 60
 
-      # Replace these with your actual Kubernetes Service names and ports
       upstreams:
         - id: backend-a
           url: http://backend-a-svc:3001
@@ -38,7 +37,7 @@ data:
             - backend-b
           rateLimit:
             windowMs: 60000
-            maxRequests: 100000
+            maxRequests: 10000
 
       headers:
         - key: X-Forwarded-For

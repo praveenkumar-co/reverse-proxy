@@ -310,15 +310,11 @@ export async function createServer(config: CreateServerConfig) {
           };
 
           delete responseHeaders["content-length"];
-          delete responseHeaders["content-encoding"];
           delete responseHeaders["transfer-encoding"];
           delete responseHeaders["connection"];
 
           if (pathRule?.sticky) {
             responseHeaders["Set-Cookie"] = `NINJA_ROUTE=${upstreamId}; Path=/; HttpOnly; SameSite=Lax`;
-          }
-          if (reply.isCompressed && reply.encoding) {
-            responseHeaders["Content-Encoding"] = reply.encoding;
           }
 
           res.writeHead(reply.statusCode ?? 200, responseHeaders);
@@ -710,27 +706,56 @@ export async function createServer(config: CreateServerConfig) {
             const acceptEncoding = msg.headers["accept-encoding"] || "";
             const contentType = upstreamRes.headers["content-type"] || "";
             const isCompressible = /json|text|javascript|css/.test(contentType);
+            const upstreamEncoding = upstreamRes.headers["content-encoding"];
 
-            if (workerConfig.server.compression && isCompressible && acceptEncoding.includes("gzip")) {
-              zlib.gzip(bodyBuffer, (err, compressed) => {
-                const reply = {
+            // Strip content-encoding from upstream headers — we decompress first,
+            // then optionally re-compress via the proxy's own compression layer.
+            const forwardHeaders = { ...upstreamRes.headers };
+            delete forwardHeaders["content-encoding"];
+
+            const sendReply = (rawBody: Buffer) => {
+              if (workerConfig.server.compression && isCompressible && acceptEncoding.includes("gzip")) {
+                zlib.gzip(rawBody, (err, compressed) => {
+                  const reply = {
+                    requestId: raw.requestId,
+                    data: err ? rawBody.toString("utf8") : compressed.toString("base64"),
+                    isCompressed: !err,
+                    encoding: err ? undefined : "gzip",
+                    statusCode: upstreamRes.statusCode ?? 200,
+                    headers: err ? forwardHeaders : { ...forwardHeaders, "content-encoding": "gzip" },
+                  };
+                  if (process.send) process.send(JSON.stringify(reply));
+                });
+              } else {
+                const reply: WorkerReplyMessageType = {
                   requestId: raw.requestId,
-                  data: err ? bodyBuffer.toString("utf8") : compressed.toString("base64"),
-                  isCompressed: !err,
-                  encoding: err ? undefined : "gzip",
+                  data: rawBody.toString("utf8"),
                   statusCode: upstreamRes.statusCode ?? 200,
-                  headers: upstreamRes.headers,
+                  headers: forwardHeaders,
                 };
                 if (process.send) process.send(JSON.stringify(reply));
+              }
+            };
+
+            if (upstreamEncoding === "gzip") {
+              zlib.gunzip(bodyBuffer, (err, decompressed) => {
+                if (err) {
+                  // Decompression failed — send raw bytes as base64 with original headers
+                  const reply: WorkerReplyMessageType = {
+                    requestId: raw.requestId,
+                    data: bodyBuffer.toString("base64"),
+                    isCompressed: true,
+                    encoding: "gzip",
+                    statusCode: upstreamRes.statusCode ?? 200,
+                    headers: upstreamRes.headers,
+                  };
+                  if (process.send) process.send(JSON.stringify(reply));
+                } else {
+                  sendReply(decompressed);
+                }
               });
             } else {
-              const reply: WorkerReplyMessageType = {
-                requestId: raw.requestId,
-                data: bodyBuffer.toString("utf8"),
-                statusCode: upstreamRes.statusCode ?? 200,
-                headers: upstreamRes.headers,
-              };
-              if (process.send) process.send(JSON.stringify(reply));
+              sendReply(bodyBuffer);
             }
           });
         }
