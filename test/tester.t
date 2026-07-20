@@ -114,3 +114,21 @@ ubuntu@ip-172-31-89-102:~/reverse-proxy-demo$  curl -khttps://localhost:8443/__r
     }
   ]
 }ubuntu@ip-172-31-89-102:~/reverse-proxy-demo$ 
+
+---------------------
+- HTTPS Reverse Proxy
+- Round Robin Load Balancing
+- Least Connections Load Balancing
+- IP Hash Load Balancing
+- Sticky Sessions
+- Health Checks
+- Automatic Failover
+- Retry Mechanism
+- Circuit Breaker
+- Dynamic Service Registry
+- Heartbeat Monitoring
+- Redis Caching
+- Prometheus Metrics
+- Fixed Window Rate Limiting
+- CORS Support
+- Security Headers
