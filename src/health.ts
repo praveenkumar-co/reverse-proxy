@@ -2,10 +2,10 @@ import http from "http";
 import type { ConfigSchemaType } from "./config-schema.js";
 import { LoadBalancer } from "./loadBalancer.js";
 
-// Initial health check 
+// Initial health check
 export async function initialHealthCheck(
   upstreams: ConfigSchemaType["server"]["upstreams"],
-  HEALTHY_UPSTREAMS: Set<string>
+  HEALTHY_UPSTREAMS: Set<string>,
 ) {
   console.log(`Initial health check`);
   for (const upstream of upstreams) {
@@ -27,7 +27,7 @@ export async function initialHealthCheck(
             HEALTHY_UPSTREAMS.delete(upstream.id);
           }
           resolve();
-        }
+        },
       );
       req.on("error", () => {
         console.log(`Some Error Occured`);
@@ -46,7 +46,7 @@ export async function initialHealthCheck(
 export async function startHealthChecks(
   upstreams: ConfigSchemaType["server"]["upstreams"],
   HEALTHY_UPSTREAMS: Set<string>,
-  lb: LoadBalancer
+  lb: LoadBalancer,
 ) {
   console.log(`Check for health check before server response`);
   setInterval(() => {
@@ -55,33 +55,28 @@ export async function startHealthChecks(
       const upstreamUrl = new URL(upstream.url);
       const req = http.request(
         {
-          host: upstreamUrl.hostname, 
+          host: upstreamUrl.hostname,
           port: upstreamUrl.port,
           path: upstream.healthPath ?? "/health",
           method: "GET",
         },
         (HealthRes) => {
           if (HealthRes.statusCode === 200) {
-            lb.recordSuccess(upstream.id);
             if (!HEALTHY_UPSTREAMS.has(upstream.id)) {
               HEALTHY_UPSTREAMS.add(upstream.id);
-              if (!lb.hasUpstream(upstream.id)) {
-                lb.addUpstream(upstream.id);
-              }
               console.log(`${upstream.id} is back ONLINE!`);
             } else {
               console.log(`${upstream.id} is HEALTHY`);
             }
           } else {
-            lb.recordFailure(upstream.id);
             HEALTHY_UPSTREAMS.delete(upstream.id);
             console.log(`${upstream.id} is DOWN!`);
           }
-        });
-      req.on('error', () => {
-        lb.recordFailure(upstream.id);
+        },
+      );
+      req.on("error", () => {
         HEALTHY_UPSTREAMS.delete(upstream.id);
-        console.log(`${upstream.id} is DOWN! (connection refused)`);
+        console.log(`${upstream.id} is DOWN! (con nection refused)`);
       });
       req.end();
     }
