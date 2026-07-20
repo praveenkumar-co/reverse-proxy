@@ -46,12 +46,12 @@ async function writeAccessLog(
   statusCode: number,
   bytesSent: number,
   latencyMs: number,
-  userAgent: string
+  userAgent: string,
 ) {
   if (!logPath) return;
   const timestamp = new Date().toISOString();
   const logLine = `${clientIp} - - [${timestamp}] "${method} ${url} HTTP/1.1" ${statusCode} ${bytesSent} "-" "${userAgent}" ${latencyMs.toFixed(2)}ms\n`;
-  
+
   try {
     const fullPath = path.resolve(logPath);
     await fs.mkdir(path.dirname(fullPath), { recursive: true });
@@ -61,7 +61,9 @@ async function writeAccessLog(
   }
 }
 
-function parseCookies(cookieHeader: string | undefined): Record<string, string> {
+function parseCookies(
+  cookieHeader: string | undefined,
+): Record<string, string> {
   const list: Record<string, string> = {};
   if (!cookieHeader) return list;
   cookieHeader.split(";").forEach((cookie) => {
@@ -133,7 +135,7 @@ export async function createServer(config: CreateServerConfig) {
           new RateLimiter({
             windowMs: p.rateLimit.windowMs,
             maxRequests: p.rateLimit.maxRequests,
-          })
+          }),
         );
       }
     });
@@ -190,29 +192,43 @@ export async function createServer(config: CreateServerConfig) {
       res: http.ServerResponse,
       attempt = 0,
       attemptedUpstreams: Set<string> = new Set(),
-      startTime = performance.now()
+      startTime = performance.now(),
     ) {
       const pathRule = ACTIVE_CONFIG.server.paths.find((p) =>
-        payload.url.startsWith(p.path)
+        payload.url.startsWith(p.path),
       );
 
       let upstreamId: string | null = null;
       if (pathRule?.sticky) {
         const cookies = parseCookies(payload.headers.cookie);
         const stickId = cookies["NINJA_ROUTE"];
-        if (stickId && HEALTHY_UPSTREAMS.has(stickId) && !attemptedUpstreams.has(stickId)) {
+        if (
+          stickId &&
+          HEALTHY_UPSTREAMS.has(stickId) &&
+          !attemptedUpstreams.has(stickId)
+        ) {
           upstreamId = stickId;
         }
       }
 
       if (!upstreamId) {
-        upstreamId = lb.pickFiltered(HEALTHY_UPSTREAMS, clientIp, attemptedUpstreams);
+        upstreamId = lb.pickFiltered(
+          HEALTHY_UPSTREAMS,
+          clientIp,
+          attemptedUpstreams,
+        );
       }
 
       if (!upstreamId) {
         res.writeHead(503, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "No healthy upstreams available" }));
-        metricsRegistry.recordRequest(payload.requestType, payload.url, 503, "none", performance.now() - startTime);
+        metricsRegistry.recordRequest(
+          payload.requestType,
+          payload.url,
+          503,
+          "none",
+          performance.now() - startTime,
+        );
         return;
       }
       attemptedUpstreams.add(upstreamId);
@@ -243,7 +259,7 @@ export async function createServer(config: CreateServerConfig) {
         JSON.stringify({
           ...enrichedPayload,
           requestId,
-        })
+        }),
       );
 
       let timer: NodeJS.Timeout;
@@ -258,17 +274,34 @@ export async function createServer(config: CreateServerConfig) {
         const retryConfig = ACTIVE_CONFIG.server.loadBalancing.retry;
         if (
           reply.errorCode ||
-          (reply.statusCode && retryConfig.statusCodes.includes(reply.statusCode))
+          (reply.statusCode &&
+            retryConfig.statusCodes.includes(reply.statusCode))
         ) {
+          console.log(
+            `[CircuitBreaker] Failure on ${upstreamId}: errorCode=${reply.errorCode}, status=${reply.statusCode}`,
+          );
           lb.recordFailure(upstreamId!);
           if (attempt < retryConfig.maxAttempts) {
             metricsRegistry.recordActiveConnection(upstreamId!, -1);
-            dispatchToWorker(payload, clientIp, res, attempt + 1, attemptedUpstreams, startTime);
+            dispatchToWorker(
+              payload,
+              clientIp,
+              res,
+              attempt + 1,
+              attemptedUpstreams,
+              startTime,
+            );
           } else {
             metricsRegistry.recordActiveConnection(upstreamId!, -1);
             res.writeHead(reply.statusCode ?? 502);
             res.end(reply.error || "Bad Gateway");
-            metricsRegistry.recordRequest(payload.requestType, payload.url, reply.statusCode ?? 502, upstreamId!, performance.now() - startTime);
+            metricsRegistry.recordRequest(
+              payload.requestType,
+              payload.url,
+              reply.statusCode ?? 502,
+              upstreamId!,
+              performance.now() - startTime,
+            );
             writeAccessLog(
               ACTIVE_CONFIG.server.accessLog,
               clientIp,
@@ -277,17 +310,23 @@ export async function createServer(config: CreateServerConfig) {
               reply.statusCode ?? 502,
               0,
               performance.now() - startTime,
-              (payload.headers["user-agent"] as string) ?? "-"
+              (payload.headers["user-agent"] as string) ?? "-",
             );
           }
         } else {
           lb.recordSuccess(upstreamId!);
           metricsRegistry.recordActiveConnection(upstreamId!, -1);
-          metricsRegistry.recordRequest(payload.requestType, payload.url, reply.statusCode ?? 200, upstreamId!, performance.now() - startTime);
+          metricsRegistry.recordRequest(
+            payload.requestType,
+            payload.url,
+            reply.statusCode ?? 200,
+            upstreamId!,
+            performance.now() - startTime,
+          );
           if (payload.requestType === "GET") {
             metricsRegistry.recordCacheOp("miss");
           }
-          
+
           let responseData: Buffer | string = reply.data;
           if (reply.isCompressed && reply.encoding === "gzip") {
             responseData = Buffer.from(reply.data, "base64");
@@ -296,7 +335,7 @@ export async function createServer(config: CreateServerConfig) {
           if (payload.requestType === "GET" && !reply.isCompressed) {
             const cacheKey = cache.buildKey(
               payload.requestType,
-              new URL(payload.url, "http://dummy").pathname
+              new URL(payload.url, "http://dummy").pathname,
             );
             await cache.set(cacheKey, reply.data);
           }
@@ -314,7 +353,8 @@ export async function createServer(config: CreateServerConfig) {
           delete responseHeaders["connection"];
 
           if (pathRule?.sticky) {
-            responseHeaders["Set-Cookie"] = `NINJA_ROUTE=${upstreamId}; Path=/; HttpOnly; SameSite=Lax`;
+            responseHeaders["Set-Cookie"] =
+              `NINJA_ROUTE=${upstreamId}; Path=/; HttpOnly; SameSite=Lax`;
           }
 
           res.writeHead(reply.statusCode ?? 200, responseHeaders);
@@ -328,7 +368,7 @@ export async function createServer(config: CreateServerConfig) {
             reply.statusCode ?? 200,
             Buffer.byteLength(responseData),
             performance.now() - startTime,
-            (payload.headers["user-agent"] as string) ?? "-"
+            (payload.headers["user-agent"] as string) ?? "-",
           );
         }
       };
@@ -338,7 +378,13 @@ export async function createServer(config: CreateServerConfig) {
         metricsRegistry.recordActiveConnection(upstreamId!, -1);
         res.writeHead(504);
         res.end("Gateway Timeout");
-        metricsRegistry.recordRequest(payload.requestType, payload.url, 504, upstreamId!, performance.now() - startTime);
+        metricsRegistry.recordRequest(
+          payload.requestType,
+          payload.url,
+          504,
+          upstreamId!,
+          performance.now() - startTime,
+        );
         writeAccessLog(
           ACTIVE_CONFIG.server.accessLog,
           clientIp,
@@ -347,17 +393,21 @@ export async function createServer(config: CreateServerConfig) {
           504,
           0,
           performance.now() - startTime,
-          (payload.headers["user-agent"] as string) ?? "-"
+          (payload.headers["user-agent"] as string) ?? "-",
         );
       }, ACTIVE_CONFIG.server.readTimeoutMs);
 
       worker.on("message", handler);
     }
 
-    function handleWebSocketUpgrade(req: http.IncomingMessage, socket: net.Socket, head: Buffer) {
+    function handleWebSocketUpgrade(
+      req: http.IncomingMessage,
+      socket: net.Socket,
+      head: Buffer,
+    ) {
       const url = new URL(req.url!, `http://${req.headers.host}`);
       const pathRule = ACTIVE_CONFIG.server.paths.find((p) =>
-        url.pathname.startsWith(p.path)
+        url.pathname.startsWith(p.path),
       );
 
       if (!pathRule) {
@@ -370,7 +420,11 @@ export async function createServer(config: CreateServerConfig) {
         socket.remoteAddress ??
         "unknown";
 
-      const upstreamId = lb.pickFiltered(HEALTHY_UPSTREAMS, clientIP, new Set());
+      const upstreamId = lb.pickFiltered(
+        HEALTHY_UPSTREAMS,
+        clientIP,
+        new Set(),
+      );
       if (!upstreamId) {
         socket.destroy();
         return;
@@ -408,7 +462,7 @@ export async function createServer(config: CreateServerConfig) {
 
           socket.pipe(targetSocket);
           targetSocket.pipe(socket);
-        }
+        },
       );
 
       targetSocket.on("error", () => {
@@ -426,7 +480,7 @@ export async function createServer(config: CreateServerConfig) {
       }
       const httpsUrl = `https://${req.headers.host?.replace(
         String(port),
-        String(ACTIVE_CONFIG.server.httpsPort ?? 8443)
+        String(ACTIVE_CONFIG.server.httpsPort ?? 8443),
       )}${req.url}`;
       res.writeHead(301, { Location: httpsUrl });
       res.end();
@@ -461,15 +515,22 @@ export async function createServer(config: CreateServerConfig) {
               healthyUpstreams: [...HEALTHY_UPSTREAMS],
             },
             null,
-            2
-          )
+            2,
+          ),
         );
         return;
       }
 
       if (req.url === "/metrics" || req.url === "/__metrics") {
-        res.writeHead(200, { "Content-Type": "text/plain; version=0.0.4; charset=utf-8" });
-        const allUpstreams = [...new Set([...ACTIVE_CONFIG.server.upstreams.map(u => u.id), ...registry.getAll().map(s => s.id)])];
+        res.writeHead(200, {
+          "Content-Type": "text/plain; version=0.0.4; charset=utf-8",
+        });
+        const allUpstreams = [
+          ...new Set([
+            ...ACTIVE_CONFIG.server.upstreams.map((u) => u.id),
+            ...registry.getAll().map((s) => s.id),
+          ]),
+        ];
         res.end(metricsRegistry.getExpositionFormat(allUpstreams));
         return;
       }
@@ -502,7 +563,7 @@ export async function createServer(config: CreateServerConfig) {
             const service = registry.register({ id, url, metadata });
             res.writeHead(201, { "Content-Type": "application/json" });
             res.end(
-              JSON.stringify({ message: `Service ${id} registered!`, service })
+              JSON.stringify({ message: `Service ${id} registered!`, service }),
             );
           } catch {
             res.writeHead(400);
@@ -514,14 +575,14 @@ export async function createServer(config: CreateServerConfig) {
 
       const url = new URL(req.url!, `https://${req.headers.host}`);
       const pathRule = ACTIVE_CONFIG.server.paths.find((p) =>
-        url.pathname.startsWith(p.path)
+        url.pathname.startsWith(p.path),
       );
 
       if (pathRule?.rateLimit) {
         const routeLimiter = rateLimiters.get(pathRule.path);
         if (routeLimiter && !routeLimiter.isAllowed(clientIP)) {
           const retryAfter = Math.ceil(
-            (routeLimiter.getResetTime(clientIP) - Date.now()) / 1000
+            (routeLimiter.getResetTime(clientIP) - Date.now()) / 1000,
           );
           res.writeHead(429, {
             "Content-Type": "application/json",
@@ -532,7 +593,7 @@ export async function createServer(config: CreateServerConfig) {
             JSON.stringify({
               error: "Too Many Requests",
               retryAfter: `${retryAfter}s`,
-            })
+            }),
           );
           return;
         }
@@ -547,7 +608,13 @@ export async function createServer(config: CreateServerConfig) {
             res.writeHead(200, { "X-Cache": "HIT" });
             res.end(cached);
             metricsRegistry.recordCacheOp("hit");
-            metricsRegistry.recordRequest("GET", req.url ?? "", 200, "cache", 0);
+            metricsRegistry.recordRequest(
+              "GET",
+              req.url ?? "",
+              200,
+              "cache",
+              0,
+            );
             writeAccessLog(
               ACTIVE_CONFIG.server.accessLog,
               clientIP,
@@ -556,7 +623,7 @@ export async function createServer(config: CreateServerConfig) {
               200,
               Buffer.byteLength(cached),
               0,
-              (req.headers["user-agent"] as string) ?? "-"
+              (req.headers["user-agent"] as string) ?? "-",
             );
             return;
           }
@@ -573,9 +640,11 @@ export async function createServer(config: CreateServerConfig) {
       });
       req.on("end", () => {
         const bodyBuffer = Buffer.concat(chunks);
-        const body = bodyBuffer.length > 0 ? bodyBuffer.toString("binary") : null;
+        const body =
+          bodyBuffer.length > 0 ? bodyBuffer.toString("binary") : null;
         const payload: WorkerMessageType = {
-          requestType: (req.method ?? "GET") as WorkerMessageType["requestType"],
+          requestType: (req.method ??
+            "GET") as WorkerMessageType["requestType"],
           headers: req.headers,
           body: body,
           url: `${req.url}`,
@@ -590,7 +659,9 @@ export async function createServer(config: CreateServerConfig) {
     async function gracefulShutdown(signal: string) {
       if (isShuttingDown) return;
       isShuttingDown = true;
-      console.log(`\n[Master] Received ${signal} — draining and shutting down...`);
+      console.log(
+        `\n[Master] Received ${signal} — draining and shutting down...`,
+      );
       await cache.disconnect();
       httpServer.close();
       httpsServer.close(() => {
@@ -610,13 +681,15 @@ export async function createServer(config: CreateServerConfig) {
     });
   } else {
     const workerConfig = await rootConfigSchema.parseAsync(
-      JSON.parse(process.env.APP_CONFIG!)
+      JSON.parse(process.env.APP_CONFIG!),
     );
     process.on("message", (msgStr: string) => {
       try {
         const msg = JSON.parse(msgStr);
         if (msg.type === "GRACEFUL_SHUTDOWN") {
-          console.log(`[Worker ${process.pid}] Gracefully draining connections...`);
+          console.log(
+            `[Worker ${process.pid}] Gracefully draining connections...`,
+          );
           // Let process exit naturally after connections close
         }
       } catch {}
@@ -633,7 +706,7 @@ export async function createServer(config: CreateServerConfig) {
       const requestUrl = msg.url;
 
       const rule = workerConfig.server.paths.find((e) =>
-        requestUrl.startsWith(e.path)
+        requestUrl.startsWith(e.path),
       );
 
       if (!rule) {
@@ -652,7 +725,7 @@ export async function createServer(config: CreateServerConfig) {
         finalUpstreamUrl = new URL(upstreamUrl);
       } else {
         const upstream = workerConfig.server.upstreams.find(
-          (e) => e.id === rule.upstream[0]
+          (e) => e.id === rule.upstream[0],
         );
         if (!upstream) {
           const reply: WorkerReplyMessageType = {
@@ -714,15 +787,23 @@ export async function createServer(config: CreateServerConfig) {
             delete forwardHeaders["content-encoding"];
 
             const sendReply = (rawBody: Buffer) => {
-              if (workerConfig.server.compression && isCompressible && acceptEncoding.includes("gzip")) {
+              if (
+                workerConfig.server.compression &&
+                isCompressible &&
+                acceptEncoding.includes("gzip")
+              ) {
                 zlib.gzip(rawBody, (err, compressed) => {
                   const reply = {
                     requestId: raw.requestId,
-                    data: err ? rawBody.toString("utf8") : compressed.toString("base64"),
+                    data: err
+                      ? rawBody.toString("utf8")
+                      : compressed.toString("base64"),
                     isCompressed: !err,
                     encoding: err ? undefined : "gzip",
                     statusCode: upstreamRes.statusCode ?? 200,
-                    headers: err ? forwardHeaders : { ...forwardHeaders, "content-encoding": "gzip" },
+                    headers: err
+                      ? forwardHeaders
+                      : { ...forwardHeaders, "content-encoding": "gzip" },
                   };
                   if (process.send) process.send(JSON.stringify(reply));
                 });
@@ -758,7 +839,7 @@ export async function createServer(config: CreateServerConfig) {
               sendReply(bodyBuffer);
             }
           });
-        }
+        },
       );
 
       connectTimeoutTimer = setTimeout(() => {
