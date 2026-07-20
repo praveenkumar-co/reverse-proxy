@@ -28,6 +28,7 @@ server:
       rateLimit:
         windowMs: 60000
         maxRequests: 5
+      sticky: true 
 
   headers:
     - key: X-Forwarded-For
