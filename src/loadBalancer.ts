@@ -78,6 +78,12 @@ export class LoadBalancer {
   recordSuccess(id: string): void {
     const s = this.states.get(id);
     if (!s) return;
+    // have added this to check that whether HALP OPEN server returned back to CLOSED state by logging
+    if (s.state === "HALF_OPEN") {
+      console.log(`[CircuitBreaker] ${id} HALF_OPEN succeeded -> CLOSED`);
+    } else {
+      console.log(`[CircuitBreaker] ${id} -> CLOSED`);
+    }
     s.failures = 0;
     s.state = "CLOSED";
     if (s.effectiveWeight < s.weight) {
@@ -94,9 +100,11 @@ export class LoadBalancer {
     if (s.effectiveWeight > 1) {
       s.effectiveWeight--;
     }
+    console.log(`[CircuitBreaker] ${id} failure count = ${s.failures}`);
     if (s.activeConnections > 0) s.activeConnections--;
     if (s.failures >= this.failureThreshold) {
       s.state = "OPEN";
+      console.log(`[CircuitBreaker] ${id} -> OPEN`);
     }
   }
 
@@ -108,7 +116,10 @@ export class LoadBalancer {
       if (s.state === "OPEN") {
         if (now - s.lastFailureTime >= this.recoveryTimeMs) {
           s.state = "HALF_OPEN";
+          console.log(`[CircuitBreaker] ${s.id} -> HALF_OPEN`);
           available.push(s);
+        } else {
+          console.log(`[CircuitBreaker] ${s.id} is OPEN, skipping`);
         }
         continue;
       }
@@ -124,18 +135,18 @@ export class LoadBalancer {
   pickFiltered(
     healthyIds: Set<string>,
     clientIp?: string,
-    attemptedUpstreams: Set<string> = new Set()
+    attemptedUpstreams: Set<string> = new Set(),
   ): string | null {
     const allAvailable = this.getAvailable(healthyIds);
     const available = allAvailable.filter((s) => !attemptedUpstreams.has(s.id));
-    
+
     if (available.length === 0) return null;
     let chosen: UpstreamState = available[0]!;
 
     switch (this.strategy) {
       case "least-connections": {
         chosen = available.reduce((a, b) =>
-          a.activeConnections <= b.activeConnections ? a : b
+          a.activeConnections <= b.activeConnections ? a : b,
         );
         break;
       }
