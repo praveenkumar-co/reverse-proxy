@@ -50,7 +50,6 @@ export class LoadBalancer {
       });
     }
   }
-
   addUpstream(id: string, weight = 1): void {
     if (this.states.has(id)) return;
     this.staticWeights.set(id, weight);
