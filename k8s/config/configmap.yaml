@@ -2,7 +2,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: ninja-proxy-config
-  namespace: default
+  namespace: reverse-proxy
   labels:
     app: ninja-reverse-proxy
 data:

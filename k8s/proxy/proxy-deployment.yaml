@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: ninja-reverse-proxy
-  namespace: default
+  namespace: reverse-proxy
   labels:
     app: ninja-reverse-proxy
 spec:
