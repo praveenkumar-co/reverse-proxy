@@ -24,7 +24,9 @@ export class Cache {
         port: config.port,
         reconnectStrategy: (retries) => {
           if (retries > 5) {
-            console.error(`[Cache] Redis reconnect failed after ${retries} attempts`);
+            console.error(
+              `[Cache] Redis reconnect failed after ${retries} attempts`,
+            );
             return new Error("Redis reconnect failed");
           }
           return retries * 500;
@@ -98,7 +100,9 @@ export class Cache {
       const keys = await this.client.keys(`proxy:*:${pattern}`);
       if (keys.length > 0) {
         await this.client.del(keys);
-        console.log(`[Cache] INVALIDATED ${keys.length} keys for pattern: ${pattern}`);
+        console.log(
+          `[Cache] INVALIDATED ${keys.length} keys for pattern: ${pattern}`,
+        );
       }
     } catch (err: any) {
       console.error(`[Cache] INVALIDATE error: ${err.message}`);

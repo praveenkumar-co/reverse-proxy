@@ -77,7 +77,7 @@ export class LoadBalancer {
   recordSuccess(id: string): void {
     const s = this.states.get(id);
     if (!s) return;
-    // have added this to check that whether HALP OPEN server returned back to CLOSED state by logging
+    // have added this to check that whether HALF_OPEN server returned back to CLOSED state by logging
     if (s.state === "HALF_OPEN") {
       console.log(`[CircuitBreaker] ${id} HALF_OPEN succeeded -> CLOSED`);
     } else {
@@ -137,7 +137,9 @@ export class LoadBalancer {
     attemptedUpstreams: Set<string> = new Set(),
   ): string | null {
     const allAvailable = this.getAvailable(healthyIds);
-    const available = allAvailable.filter((s) => !attemptedUpstreams.has(s.id));
+    const available = allAvailable.filter(
+      (s) => !attemptedUpstreams.has(s.id),
+    );
 
     if (available.length === 0) return null;
     let chosen: UpstreamState = available[0]!;

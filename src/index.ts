@@ -1,8 +1,7 @@
-#!/usr/bin/env node
 import { program } from "commander";
-import { parseYAMLConfig, validateConfig } from "./config.js";
+import { parseYAMLConfig, validateConfig } from "./config/index.js";
 import os from "node:os";
-import { createServer, reloadServerConfig } from "./server.js";
+import { createServer, reloadServerConfig } from "./core/master.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -14,9 +13,9 @@ async function main() {
 
   if (options && "config" in options) {
     const configPath = options.config as string;
-    
+
     const validatedConfig = await validateConfig(
-      await parseYAMLConfig(configPath)
+      await parseYAMLConfig(configPath),
     );
     process.on("SIGHUP", async () => {
       console.log("\n[Master] SIGHUP received — reloading configuration...");
@@ -26,7 +25,9 @@ async function main() {
         await reloadServerConfig(newConfig);
         console.log("[Master] Configuration reloaded successfully!");
       } catch (err: any) {
-        console.error(`[Master] Reload failed! Keeping old config. Error: ${err.message}`);
+        console.error(
+          `[Master] Reload failed! Keeping old config. Error: ${err.message}`,
+        );
       }
     });
 
@@ -37,8 +38,7 @@ async function main() {
       workerCount: validatedConfig.server.workers ?? os.cpus().length,
       config: validatedConfig,
     });
-
-    // --- Automatic File Watcher Hot-Reload ---
+    // Automatic File Watcher Hot-Reload 
     let watchDebounceTimer: NodeJS.Timeout;
     const triggerReload = () => {
       clearTimeout(watchDebounceTimer);
@@ -51,22 +51,19 @@ async function main() {
         } catch (err: any) {
           console.error(`[Master] Auto-reload failed: ${err.message}`);
         }
-      }, 100); // 100ms 
+      }, 100); 
     };
-
     fs.watch(configPath, (eventType) => {
       if (eventType === "change") {
         triggerReload();
       }
     });
-
     const configDir = path.join(path.dirname(configPath), "config.d");
     if (fs.existsSync(configDir)) {
-      fs.watch(configDir, (eventType) => {
+      fs.watch(configDir, () => {
         triggerReload();
       });
     }
   }
 }
-
 main();

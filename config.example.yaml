@@ -1,37 +1,14 @@
-# ============================================================
-#  Ninja Reverse Proxy — Configuration Template
-# ============================================================
-#
-#  USAGE:
-#    Copy this file to config.yaml and edit it for your setup.
-#    cp config.example.yaml config.yaml
-#
-#  The proxy works with any HTTP backend — Express, Django,
-#  Spring Boot, FastAPI, Go, ASP.NET, Kubernetes Services, etc.
-# ============================================================
 
 server:
 
-  # ── Ports ──────────────────────────────────────────────────
   listen: 8080          # HTTP port — all traffic redirected to HTTPS (301)
   httpsPort: 8443       # HTTPS port — main entry point for all requests
 
-  # Number of worker processes to fork.
-  # Best practice: set this to the number of CPU cores (run `nproc`).
-  # Never exceed your core count — it causes context switching overhead.
   workers: 2
-
-  # ── Load Balancing ─────────────────────────────────────────
   loadBalancing:
     strategy: round-robin       # Options: round-robin | least-connections | ip-hash | random
     failureThreshold: 3         # Mark an upstream DOWN after this many consecutive failures
     recoveryTimeMs: 15000       # Attempt to recover a DOWN upstream after this delay (ms)
-
-  # ── Redis Cache ────────────────────────────────────────────
-  #
-  # GET responses are cached. Write requests (POST/PUT/PATCH/DELETE)
-  # automatically invalidate the cache for that path.
-  #
   cache:
     enabled: false          # Set to true to enable Redis response caching
     host: redis             # Redis hostname (use 'localhost' outside Docker)
@@ -62,14 +39,6 @@ server:
 
     - id: backend-b
       url: http://backend-b:3002
-
-  # ── Path Routing Rules ─────────────────────────────────────
-  #
-  # Each path entry defines:
-  #   path      → URL prefix to match
-  #   upstream  → list of upstream IDs that serve this route
-  #   rateLimit → optional per-IP sliding window rate limit for this route
-  #
   paths:
     - path: /
       upstream:
@@ -86,12 +55,6 @@ server:
       rateLimit:
         windowMs: 60000
         maxRequests: 50000
-
-  # ── Custom Request Headers ─────────────────────────────────
-  #
-  # Headers appended to every proxied request before forwarding upstream.
-  # 'client_ip' is a special value — replaced with the real client IP.
-  #
   headers:
     - key: X-Forwarded-For
       value: client_ip

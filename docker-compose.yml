@@ -20,16 +20,13 @@ services:
       - "8081:8080"     # HTTP — auto-redirects to HTTPS
       - "8443:8443"     # HTTPS — main proxy entry point
     volumes:
-      # Mount your config at runtime so you can change it without rebuilding
       - ./config.yaml:/app/config.yaml:ro
-      # Mount your TLS certificates
       - ./cert.pem:/app/cert.pem:ro
       - ./key.pem:/app/key.pem:ro
     depends_on:
       redis:
         condition: service_healthy
     extra_hosts:
-      # Allows the proxy to reach services running on the Docker host machine
       - "host.docker.internal:host-gateway"
     networks:
       - proxy-network

@@ -1,28 +1,24 @@
 import http from "http";
 import https from "https";
-import { readFileSync, promises as fs } from "fs";
-import path from "path";
+import { readFileSync } from "fs";
 import net from "net";
-import type { ConfigSchemaType } from "./config-schema.js";
-import cluster, { Worker } from "node:cluster";
-import { rootConfigSchema } from "./config-schema.js";
-import zlib from "zlib";
+import type { ConfigSchemaType } from "../config/config-schema.js";
+import cluster, { type Worker } from "node:cluster";
 
-import type {
-  WorkerMessageType,
-  WorkerReplyMessageType,
-} from "./server-schema.js";
 import {
   workerMessageSchema,
   workerMessageReplySchema,
-} from "./server-schema.js";
+  type WorkerMessageType,
+} from "../config/server-schema.js";
 
-import { initialHealthCheck, startHealthChecks } from "./health.js";
-import { RateLimiter } from "./rate-limiter.js";
-import { LoadBalancer } from "./loadBalancer.js";
-import { registry } from "./Serviceregistry.js";
-import { Cache } from "./cache.js";
-import { MetricsRegistry } from "./metrics.js";
+import { initialHealthCheck, startHealthChecks } from "../services/health.js";
+import { RateLimiter } from "../middleware/rate-limiter.js";
+import { LoadBalancer } from "../services/load-balancer.js";
+import { registry } from "../services/registry.js";
+import { Cache } from "../middleware/cache.js";
+import { MetricsRegistry } from "../services/metrics.js";
+import { writeAccessLog } from "../middleware/logger.js";
+import { handleWebSocketUpgrade } from "./websocket.js";
 
 interface CreateServerConfig {
   port: number;
@@ -37,29 +33,6 @@ let cache: Cache;
 let metricsRegistry: MetricsRegistry;
 const HEALTHY_UPSTREAMS: Set<string> = new Set();
 const rateLimiters = new Map<string, RateLimiter>();
-
-async function writeAccessLog(
-  logPath: string | undefined,
-  clientIp: string,
-  method: string,
-  url: string,
-  statusCode: number,
-  bytesSent: number,
-  latencyMs: number,
-  userAgent: string,
-) {
-  if (!logPath) return;
-  const timestamp = new Date().toISOString();
-  const logLine = `${clientIp} - - [${timestamp}] "${method} ${url} HTTP/1.1" ${statusCode} ${bytesSent} "-" "${userAgent}" ${latencyMs.toFixed(2)}ms\n`;
-
-  try {
-    const fullPath = path.resolve(logPath);
-    await fs.mkdir(path.dirname(fullPath), { recursive: true });
-    await fs.appendFile(fullPath, logLine, "utf8");
-  } catch (err: any) {
-    console.error(`[Logger Error] Failed to write access log: ${err.message}`);
-  }
-}
 
 function parseCookies(
   cookieHeader: string | undefined,
@@ -112,7 +85,9 @@ export async function reloadServerConfig(newConfig: ConfigSchemaType) {
           oldWorker.kill("SIGTERM");
         }
       }, 15000);
-    } catch {}
+    } catch {
+      // ignore send errors for already-dead workers
+    }
   }
 }
 
@@ -400,79 +375,6 @@ export async function createServer(config: CreateServerConfig) {
       worker.on("message", handler);
     }
 
-    function handleWebSocketUpgrade(
-      req: http.IncomingMessage,
-      socket: net.Socket,
-      head: Buffer,
-    ) {
-      const url = new URL(req.url!, `http://${req.headers.host}`);
-      const pathRule = ACTIVE_CONFIG.server.paths.find((p) =>
-        url.pathname.startsWith(p.path),
-      );
-
-      if (!pathRule) {
-        socket.destroy();
-        return;
-      }
-
-      const clientIP =
-        (req.headers["x-forwarded-for"] as string) ??
-        socket.remoteAddress ??
-        "unknown";
-
-      const upstreamId = lb.pickFiltered(
-        HEALTHY_UPSTREAMS,
-        clientIP,
-        new Set(),
-      );
-      if (!upstreamId) {
-        socket.destroy();
-        return;
-      }
-
-      const serviceInstance = registry.get(upstreamId);
-      if (!serviceInstance) {
-        socket.destroy();
-        return;
-      }
-
-      const upstreamUrl = new URL(serviceInstance.url);
-
-      const targetSocket = net.connect(
-        {
-          host: upstreamUrl.hostname,
-          port: parseInt(upstreamUrl.port || "80"),
-        },
-        () => {
-          let rawRequest = `${req.method} ${req.url} HTTP/${req.httpVersion}\r\n`;
-          for (const [key, val] of Object.entries(req.headers)) {
-            if (Array.isArray(val)) {
-              val.forEach((v) => {
-                rawRequest += `${key}: ${v}\r\n`;
-              });
-            } else {
-              rawRequest += `${key}: ${val}\r\n`;
-            }
-          }
-          rawRequest += "\r\n";
-          targetSocket.write(rawRequest);
-          if (head && head.length > 0) {
-            targetSocket.write(head);
-          }
-
-          socket.pipe(targetSocket);
-          targetSocket.pipe(socket);
-        },
-      );
-
-      targetSocket.on("error", () => {
-        socket.destroy();
-      });
-      socket.on("error", () => {
-        targetSocket.destroy();
-      });
-    }
-
     const httpServer = http.createServer((req, res) => {
       if (req.url?.startsWith("/__registry")) {
         httpsServer.emit("request", req, res);
@@ -486,7 +388,14 @@ export async function createServer(config: CreateServerConfig) {
       res.end();
     });
 
-    httpServer.on("upgrade", handleWebSocketUpgrade);
+    // WebSocket upgrade: pass config + lb so websocket.ts has no global state
+    const wsUpgradeHandler = (
+      req: http.IncomingMessage,
+      socket: net.Socket,
+      head: Buffer,
+    ) => handleWebSocketUpgrade(req, socket, head, ACTIVE_CONFIG, lb);
+
+    httpServer.on("upgrade", wsUpgradeHandler);
 
     const httpsServer = https.createServer(sslOptions, async (req, res) => {
       const clientIP =
@@ -563,7 +472,10 @@ export async function createServer(config: CreateServerConfig) {
             const service = registry.register({ id, url, metadata });
             res.writeHead(201, { "Content-Type": "application/json" });
             res.end(
-              JSON.stringify({ message: `Service ${id} registered!`, service }),
+              JSON.stringify({
+                message: `Service ${id} registered!`,
+                service,
+              }),
             );
           } catch {
             res.writeHead(400);
@@ -643,8 +555,7 @@ export async function createServer(config: CreateServerConfig) {
         const body =
           bodyBuffer.length > 0 ? bodyBuffer.toString("binary") : null;
         const payload: WorkerMessageType = {
-          requestType: (req.method ??
-            "GET") as WorkerMessageType["requestType"],
+          requestType: (req.method ?? "GET") as WorkerMessageType["requestType"],
           headers: req.headers,
           body: body,
           url: `${req.url}`,
@@ -653,7 +564,7 @@ export async function createServer(config: CreateServerConfig) {
       });
     });
 
-    httpsServer.on("upgrade", handleWebSocketUpgrade);
+    httpsServer.on("upgrade", wsUpgradeHandler);
 
     let isShuttingDown = false;
     async function gracefulShutdown(signal: string) {
@@ -680,206 +591,6 @@ export async function createServer(config: CreateServerConfig) {
       startHealthChecks(ACTIVE_CONFIG.server.upstreams, HEALTHY_UPSTREAMS, lb);
     });
   } else {
-    const workerConfig = await rootConfigSchema.parseAsync(
-      JSON.parse(process.env.APP_CONFIG!),
-    );
-    process.on("message", (msgStr: string) => {
-      try {
-        const msg = JSON.parse(msgStr);
-        if (msg.type === "GRACEFUL_SHUTDOWN") {
-          console.log(
-            `[Worker ${process.pid}] Gracefully draining connections...`,
-          );
-          // Let process exit naturally after connections close
-        }
-      } catch {}
-    });
-
-    process.on("message", async (message: string) => {
-      const msg = await workerMessageSchema.parseAsync(JSON.parse(message));
-      const raw = JSON.parse(message) as {
-        upstreamId?: string;
-        upstreamUrl?: string;
-        requestId?: string;
-      };
-      const upstreamUrl: string | undefined = raw.upstreamUrl;
-      const requestUrl = msg.url;
-
-      const rule = workerConfig.server.paths.find((e) =>
-        requestUrl.startsWith(e.path),
-      );
-
-      if (!rule) {
-        const reply: WorkerReplyMessageType = {
-          requestId: raw.requestId,
-          errorCode: "404",
-          error: "Route not found",
-          data: "",
-        };
-        if (process.send) process.send(JSON.stringify(reply));
-        return;
-      }
-
-      let finalUpstreamUrl: URL;
-      if (upstreamUrl) {
-        finalUpstreamUrl = new URL(upstreamUrl);
-      } else {
-        const upstream = workerConfig.server.upstreams.find(
-          (e) => e.id === rule.upstream[0],
-        );
-        if (!upstream) {
-          const reply: WorkerReplyMessageType = {
-            requestId: raw.requestId,
-            errorCode: "500",
-            error: "Upstream not found",
-            data: "",
-          };
-          if (process.send) process.send(JSON.stringify(reply));
-          return;
-        }
-        finalUpstreamUrl = new URL(upstream.url);
-      }
-
-      const agent = new http.Agent({
-        keepAlive: true,
-        maxSockets: 5000,
-      });
-
-      let connectTimeoutTimer: NodeJS.Timeout;
-      let readTimeoutTimer: NodeJS.Timeout;
-
-      const proxyReq = http.request(
-        {
-          host: finalUpstreamUrl.hostname,
-          port: finalUpstreamUrl.port,
-          path: requestUrl,
-          method: msg.requestType,
-          agent: agent,
-          headers: {
-            ...msg.headers,
-            "X-Forwarded-For": msg.headers["x-forwarded-for"] || "unknown",
-            "X-Real-IP": "127.0.0.1",
-            "X-Proxy-By": "Ninja-Reverse-Proxy",
-            ...(msg.body && {
-              "Content-Length": Buffer.byteLength(msg.body).toString(),
-            }),
-          },
-        },
-        (upstreamRes) => {
-          clearTimeout(connectTimeoutTimer);
-
-          const chunks: Buffer[] = [];
-          upstreamRes.on("data", (chunk: Buffer) => {
-            chunks.push(chunk);
-          });
-
-          upstreamRes.on("end", () => {
-            clearTimeout(readTimeoutTimer);
-            const bodyBuffer = Buffer.concat(chunks);
-            const acceptEncoding = msg.headers["accept-encoding"] || "";
-            const contentType = upstreamRes.headers["content-type"] || "";
-            const isCompressible = /json|text|javascript|css/.test(contentType);
-            const upstreamEncoding = upstreamRes.headers["content-encoding"];
-
-            // Strip content-encoding from upstream headers — we decompress first,
-            // then optionally re-compress via the proxy's own compression layer.
-            const forwardHeaders = { ...upstreamRes.headers };
-            delete forwardHeaders["content-encoding"];
-
-            const sendReply = (rawBody: Buffer) => {
-              if (
-                workerConfig.server.compression &&
-                isCompressible &&
-                acceptEncoding.includes("gzip")
-              ) {
-                zlib.gzip(rawBody, (err, compressed) => {
-                  const reply = {
-                    requestId: raw.requestId,
-                    data: err
-                      ? rawBody.toString("utf8")
-                      : compressed.toString("base64"),
-                    isCompressed: !err,
-                    encoding: err ? undefined : "gzip",
-                    statusCode: upstreamRes.statusCode ?? 200,
-                    headers: err
-                      ? forwardHeaders
-                      : { ...forwardHeaders, "content-encoding": "gzip" },
-                  };
-                  if (process.send) process.send(JSON.stringify(reply));
-                });
-              } else {
-                const reply: WorkerReplyMessageType = {
-                  requestId: raw.requestId,
-                  data: rawBody.toString("utf8"),
-                  statusCode: upstreamRes.statusCode ?? 200,
-                  headers: forwardHeaders,
-                };
-                if (process.send) process.send(JSON.stringify(reply));
-              }
-            };
-
-            if (upstreamEncoding === "gzip") {
-              zlib.gunzip(bodyBuffer, (err, decompressed) => {
-                if (err) {
-                  // Decompression failed — send raw bytes as base64 with original headers
-                  const reply: WorkerReplyMessageType = {
-                    requestId: raw.requestId,
-                    data: bodyBuffer.toString("base64"),
-                    isCompressed: true,
-                    encoding: "gzip",
-                    statusCode: upstreamRes.statusCode ?? 200,
-                    headers: upstreamRes.headers,
-                  };
-                  if (process.send) process.send(JSON.stringify(reply));
-                } else {
-                  sendReply(decompressed);
-                }
-              });
-            } else {
-              sendReply(bodyBuffer);
-            }
-          });
-        },
-      );
-
-      connectTimeoutTimer = setTimeout(() => {
-        proxyReq.destroy();
-        const reply: WorkerReplyMessageType = {
-          requestId: raw.requestId,
-          errorCode: "504",
-          error: "Connect Timeout",
-          data: "",
-        };
-        if (process.send) process.send(JSON.stringify(reply));
-      }, workerConfig.server.connectTimeoutMs);
-
-      readTimeoutTimer = setTimeout(() => {
-        proxyReq.destroy();
-        const reply: WorkerReplyMessageType = {
-          requestId: raw.requestId,
-          errorCode: "504",
-          error: "Read Timeout",
-          data: "",
-        };
-        if (process.send) process.send(JSON.stringify(reply));
-      }, workerConfig.server.readTimeoutMs);
-
-      proxyReq.on("error", (err) => {
-        clearTimeout(connectTimeoutTimer);
-        clearTimeout(readTimeoutTimer);
-        const reply: WorkerReplyMessageType = {
-          requestId: raw.requestId,
-          errorCode: "502",
-          error: `Upstream connection failed: ${err.message}`,
-          data: "",
-        };
-        if (process.send) process.send(JSON.stringify(reply));
-      });
-
-      if (msg.body) {
-        proxyReq.write(Buffer.from(msg.body, "binary"));
-      }
-      proxyReq.end();
-    });
+    // Worker process — handled entirely in core/worker.ts
   }
 }
