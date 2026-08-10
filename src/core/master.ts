@@ -6,7 +6,6 @@ import type { ConfigSchemaType } from "../config/config-schema.js";
 import cluster, { type Worker } from "node:cluster";
 
 import {
-  workerMessageSchema,
   workerMessageReplySchema,
   type WorkerMessageType,
 } from "../config/server-schema.js";
