@@ -592,5 +592,5 @@ export async function createServer(config: CreateServerConfig) {
     });
   } else {
     // Worker process — handled entirely in core/worker.ts
-  }
+  } 
 }

@@ -1,14 +1,7 @@
 import { z } from "zod";
-
-// Per-upstream TLS configuration.
-// Enables HTTPS connections to upstream backends with fine-grained cert control.
 const upstreamTlsSchema = z
   .object({
-    // Default: true (strict certificate validation — required in production).
-    // Set to false ONLY for development/test with self-signed certs.
     rejectUnauthorized: z.boolean().default(true),
-    // Optional path to a PEM-encoded CA bundle for validating internal CAs.
-    // Example: /etc/ssl/internal-ca.pem
     ca: z.string().optional(),
   })
   .optional();
@@ -18,7 +11,6 @@ const upstreamSchema = z.object({
   url: z.string().url(),
   weight: z.number().default(1),
   healthPath: z.string().default("/health"),
-  // Optional TLS config. Only used when url scheme is https:// or wss://
   tls: upstreamTlsSchema,
 });
 
