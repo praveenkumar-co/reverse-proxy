@@ -1,11 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert";
-import { LoadBalancer } from "../src/loadBalancer.js";
+import { LoadBalancer } from "../src/services/load-balancer.js";
 
 // Test 1: Weighted Round-Robin distribution
 test("LoadBalancer - Weighted Round Robin", () => {
   const lb = new LoadBalancer({
-    strategy: "round-robin",
+    strategy: "weighted-round-robin",
     upstreams: [
       { id: "backend-a", weight: 3 },
       { id: "backend-b", weight: 1 }
@@ -30,7 +30,7 @@ test("LoadBalancer - Weighted Round Robin", () => {
 // Test 2: Circuit Breaker isolating failing backends
 test("LoadBalancer - Circuit Breaker Tripping", () => {
   const lb = new LoadBalancer({
-    strategy: "round-robin",
+    strategy: "weighted-round-robin",
     upstreams: [
       { id: "backend-a", weight: 1 },
       { id: "backend-b", weight: 1 }
@@ -54,7 +54,7 @@ test("LoadBalancer - Circuit Breaker Tripping", () => {
 // Test 3: Upstream Retry Filtering
 test("LoadBalancer - Retry Filter exclusion", () => {
   const lb = new LoadBalancer({
-    strategy: "round-robin",
+    strategy: "weighted-round-robin",
     upstreams: [
       { id: "backend-a", weight: 1 },
       { id: "backend-b", weight: 1 }
@@ -71,7 +71,7 @@ test("LoadBalancer - Retry Filter exclusion", () => {
 // Test 4: Circuit Breaker Time Recovery (HALF-OPEN Probe)
 test("LoadBalancer - Circuit Breaker Time Recovery", async () => {
   const lb = new LoadBalancer({
-    strategy: "round-robin",
+    strategy: "weighted-round-robin",
     upstreams: [
       { id: "backend-a", weight: 1 },
       { id: "backend-b", weight: 1 }

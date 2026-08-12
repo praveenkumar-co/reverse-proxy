@@ -7,6 +7,7 @@ import {
   workerMessageSchema,
   type WorkerReplyMessageType,
 } from "../config/server-schema.js";
+import { logger } from "../middleware/logger.js";
 const httpAgent = new http.Agent({
   keepAlive: true,
   keepAliveMsecs: 10000,
@@ -28,9 +29,7 @@ process.on("message", (msgStr: string) => {
   try {
     const msg = JSON.parse(msgStr);
     if (msg.type === "GRACEFUL_SHUTDOWN") {
-      console.log(
-        `[Worker ${process.pid}] Gracefully draining connections...`,
-      );
+      logger.info(`Worker:${process.pid}`, "Gracefully draining connections");
     }
   } catch {
     // ignore parse errors on non-JSON messages
@@ -99,11 +98,9 @@ process.on("message", async (message: string) => {
   const rejectUnauthorized = tlsConfig?.rejectUnauthorized ?? true;
 
   if (isHttps && !rejectUnauthorized) {
-    console.warn(
-      `[Worker ${process.pid}] WARNING: TLS certificate verification is DISABLED ` +
-        `for upstream "${finalUpstreamUrl.host}". ` +
-        `This is acceptable for development but must NOT be used in production.`,
-    );
+    logger.warn(`Worker:${process.pid}`, "TLS certificate verification DISABLED", {
+      host: finalUpstreamUrl.host,
+    });
   }
 
   let caBuffer: Buffer | undefined;
@@ -111,9 +108,7 @@ process.on("message", async (message: string) => {
     try {
       caBuffer = readFileSync(tlsConfig.ca);
     } catch (err: any) {
-      console.error(
-        `[Worker ${process.pid}] Failed to read CA file: ${err.message}`,
-      );
+      logger.error(`Worker:${process.pid}`, `Failed to read CA file: ${err.message}`, { ca: tlsConfig.ca });
     }
   }
 

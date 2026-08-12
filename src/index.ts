@@ -4,6 +4,7 @@ import os from "node:os";
 import { createServer, reloadServerConfig } from "./core/master.js";
 import fs from "node:fs";
 import path from "node:path";
+import { logger } from "./middleware/logger.js";
 
 async function main() {
   program.option("--config <path>");
@@ -17,28 +18,34 @@ async function main() {
     const validatedConfig = await validateConfig(
       await parseYAMLConfig(configPath),
     );
+
+    // Configure logger with event log path from config
+    logger.configure({ eventLogPath: validatedConfig.server.eventLog });
+    logger.info("Bootstrap", "Config loaded", {
+      listen: validatedConfig.server.listen,
+      httpsPort: validatedConfig.server.httpsPort,
+      workers: validatedConfig.server.workers ?? os.cpus().length,
+    });
+
     process.on("SIGHUP", async () => {
-      console.log("\n[Master] SIGHUP received — reloading configuration...");
+      logger.info("Bootstrap", "SIGHUP received — reloading configuration");
       try {
         const rawConfig = await parseYAMLConfig(configPath);
         const newConfig = await validateConfig(rawConfig);
         await reloadServerConfig(newConfig);
-        console.log("[Master] Configuration reloaded successfully!");
+        logger.configure({ eventLogPath: newConfig.server.eventLog });
+        logger.info("Bootstrap", "Configuration reloaded successfully");
       } catch (err: any) {
-        console.error(
-          `[Master] Reload failed! Keeping old config. Error: ${err.message}`,
-        );
+        logger.error("Bootstrap", `Reload failed, keeping old config: ${err.message}`);
       }
     });
-
-    console.log(validatedConfig);
 
     await createServer({
       port: validatedConfig.server.listen,
       workerCount: validatedConfig.server.workers ?? os.cpus().length,
       config: validatedConfig,
     });
-    // Automatic File Watcher Hot-Reload 
+    // Automatic File Watcher Hot-Reload
     let watchDebounceTimer: NodeJS.Timeout;
     const triggerReload = () => {
       clearTimeout(watchDebounceTimer);
@@ -47,11 +54,12 @@ async function main() {
           const rawConfig = await parseYAMLConfig(configPath);
           const newConfig = await validateConfig(rawConfig);
           await reloadServerConfig(newConfig);
-          console.log("[Master] Configuration reloaded automatically!");
+          logger.configure({ eventLogPath: newConfig.server.eventLog });
+          logger.info("Bootstrap", "Configuration reloaded automatically");
         } catch (err: any) {
-          console.error(`[Master] Auto-reload failed: ${err.message}`);
+          logger.error("Bootstrap", `Auto-reload failed: ${err.message}`);
         }
-      }, 100); 
+      }, 100);
     };
     fs.watch(configPath, (eventType) => {
       if (eventType === "change") {

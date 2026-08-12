@@ -1,3 +1,4 @@
+import { logger } from "./logger.js";
 
 export type RateLimitAlgorithm =
   | "fixed-window"
@@ -186,11 +187,10 @@ export class RateLimiter {
         removed++;
       }
     }
-
-    console.log(
-      `[RateLimiter:${this.algorithm}] Cleanup done. ` +
-        `Removed ${removed} stale entries. ` +
-        `Active IPs — fw:${this.fwMap.size} sw:${this.swMap.size} tb:${this.tbMap.size}`,
-    );
+    logger.info("RateLimiter", "Cleanup done", {
+      algorithm: this.algorithm,
+      removed,
+      active: { fw: this.fwMap.size, sw: this.swMap.size, tb: this.tbMap.size },
+    });
   }
 }

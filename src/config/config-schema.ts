@@ -39,7 +39,19 @@ const pathRuleSchema = z.object({
 const loadBalancerSchema = z
   .object({
     strategy: z
-      .enum(["round-robin", "least-connections", "ip-hash", "random"])
+      .enum([
+        "round-robin",
+        "weighted-round-robin",
+        "least-connections",
+        "weighted-least-connections",
+        "least-response-time",
+        "random",
+        "ip-hash",
+        "consistent-hashing",
+        "least-bandwidth",
+        "resource-based",
+        "sticky-sessions",
+      ])
       .default("least-connections"),
     failureThreshold: z.number().default(3),
     recoveryTimeMs: z.number().default(15000),
@@ -85,6 +97,8 @@ const serverSchema = z.object({
   readTimeoutMs: z.number().default(15000),
   compression: z.boolean().default(false),
   accessLog: z.string().optional(),
+  /** Path to write INFO/WARN/ERROR structured event log. Optional. */
+  eventLog: z.string().optional(),
   upstreams: z.array(upstreamSchema),
   headers: z.array(headerSchema).optional(),
   paths: z.array(pathRuleSchema),

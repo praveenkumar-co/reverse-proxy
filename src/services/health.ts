@@ -3,6 +3,7 @@ import https from "https";
 import { readFileSync } from "fs";
 import type { ConfigSchemaType } from "../config/config-schema.js";
 import { LoadBalancer } from "./load-balancer.js";
+import { logger } from "../middleware/logger.js";
 
 async function checkUpstream(
   upstream: ConfigSchemaType["server"]["upstreams"][number],
@@ -16,10 +17,7 @@ async function checkUpstream(
     const rejectUnauthorized = tlsConfig?.rejectUnauthorized ?? true;
 
     if (isHttps && !rejectUnauthorized) {
-      console.warn(
-        `[HealthCheck] WARNING: TLS certificate verification is DISABLED for upstream "${upstream.id}". ` +
-          `This is acceptable for development but must NOT be used in production.`,
-      );
+      logger.warn("HealthCheck", "TLS certificate verification DISABLED", { id: upstream.id });
     }
 
     let caBuffer: Buffer | undefined;
@@ -27,9 +25,7 @@ async function checkUpstream(
       try {
         caBuffer = readFileSync(tlsConfig.ca);
       } catch (err: any) {
-        console.error(
-          `[HealthCheck] Failed to read CA file for upstream "${upstream.id}": ${err.message}`,
-        );
+        logger.error("HealthCheck", `Failed to read CA file: ${err.message}`, { id: upstream.id, ca: tlsConfig.ca });
       }
     }
 
@@ -58,19 +54,18 @@ export async function initialHealthCheck(
   upstreams: ConfigSchemaType["server"]["upstreams"],
   HEALTHY_UPSTREAMS: Set<string>,
 ) {
-  console.log(`Initial health check`);
+  logger.info("HealthCheck", "Initial health check started");
   for (const upstream of upstreams) {
     const healthy = await checkUpstream(upstream);
     if (healthy) {
-      console.log(`${upstream.id} is HEALTHY`);
+      logger.info("HealthCheck", `${upstream.id} is HEALTHY`);
       HEALTHY_UPSTREAMS.add(upstream.id);
     } else {
-      console.log(`${upstream.id} is NOT HEALTHY`);
+      logger.warn("HealthCheck", `${upstream.id} is NOT HEALTHY`);
       HEALTHY_UPSTREAMS.delete(upstream.id);
     }
   }
-  console.log(`Initial Health Check Done!`);
-  console.log(`Healthy Upstreams: ${[...HEALTHY_UPSTREAMS].join(", ")}`);
+  logger.info("HealthCheck", "Initial check done", { healthy: [...HEALTHY_UPSTREAMS] });
 }
 
 // Periodic health check — runs on a fixed interval while the server is running
@@ -79,21 +74,21 @@ export function startHealthChecks(
   HEALTHY_UPSTREAMS: Set<string>,
   lb: LoadBalancer,
 ) {
-  console.log(`Check for health check before server response`);
+  logger.info("HealthCheck", "Periodic health checks started", { intervalMs: 10000 });
   setInterval(() => {
-    console.log(`\n[HealthCheck] Checking all upstreams...`);
+    logger.info("HealthCheck", "Checking all upstreams");
     for (const upstream of upstreams) {
       checkUpstream(upstream).then((healthy) => {
         if (healthy) {
           if (!HEALTHY_UPSTREAMS.has(upstream.id)) {
             HEALTHY_UPSTREAMS.add(upstream.id);
-            console.log(`${upstream.id} is back ONLINE!`);
+            logger.info("HealthCheck", `${upstream.id} back ONLINE`);
           } else {
-            console.log(`${upstream.id} is HEALTHY`);
+            logger.info("HealthCheck", `${upstream.id} HEALTHY`);
           }
         } else {
           HEALTHY_UPSTREAMS.delete(upstream.id);
-          console.log(`${upstream.id} is DOWN! (connection refused)`);
+          logger.warn("HealthCheck", `${upstream.id} is DOWN`, { id: upstream.id });
         }
       });
     }

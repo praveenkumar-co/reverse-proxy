@@ -1,3 +1,5 @@
+import { logger } from "../middleware/logger.js";
+
 export interface ServiceInstance {
   id: string;
   url: string;
@@ -36,9 +38,7 @@ export class ServiceRegistry {
       status: "UP",
     };
     this.services.set(instance.id, service);
-    console.log(
-      `[Registry] Service REGISTERED: ${instance.id} → ${instance.url}`,
-    );
+    logger.info("Registry", `Service REGISTERED: ${instance.id} → ${instance.url}`, { id: instance.id, url: instance.url });
     this.onRegisterCallbacks.forEach((callback) => callback(service));
     return service;
   }
@@ -49,7 +49,7 @@ export class ServiceRegistry {
     }
     service.status = "DOWN";
     this.services.delete(id);
-    console.log(`[Registry] Service DEREGISTERED: ${id}`);
+    logger.info("Registry", `Service DEREGISTERED: ${id}`, { id });
     this.onDeregisterCallbacks.forEach((callback) => callback(service));
     return true;
   }
@@ -82,9 +82,7 @@ export class ServiceRegistry {
         service.status === "UP" &&
         now - service.lastHeartbeat > this.heartbeatTimeoutMs
       ) {
-        console.log(
-          `[Registry] Service TIMED OUT (no heartbeat): ${id}`,
-        );
+        logger.warn("Registry", `Service TIMED OUT (no heartbeat): ${id}`, { id });
         service.status = "DOWN";
         this.onDeregisterCallbacks.forEach((callback) => callback(service));
       }

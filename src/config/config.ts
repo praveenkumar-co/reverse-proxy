@@ -2,6 +2,8 @@ import { promises as fs } from "fs";
 import { parse } from "yaml";
 import { rootConfigSchema } from "./config-schema.js";
 import path from "path";
+import { logger } from "../middleware/logger.js";
+
 
 export async function parseYAMLConfig(filepath: string) {
   const configFileContent = await fs.readFile(filepath, "utf-8");
@@ -32,9 +34,7 @@ export async function parseYAMLConfig(filepath: string) {
           const extraContent = await fs.readFile(extraFilePath, "utf-8");
           return parse(extraContent);
         } catch (err: any) {
-          console.error(
-            `[Config] Skipped loading broken file ${file}: ${err.message}`,
-          );
+          logger.error("Config", `Skipped broken file ${file}: ${err.message}`, { file });
           return null;
         }
       });
@@ -74,9 +74,7 @@ export async function parseYAMLConfig(filepath: string) {
         }
       }
     } catch (dirErr: any) {
-      console.error(
-        `[Config] Error reading config.d directory: ${dirErr.message}`,
-      );
+      logger.error("Config", `Error reading config.d directory: ${dirErr.message}`);
     }
   }
 

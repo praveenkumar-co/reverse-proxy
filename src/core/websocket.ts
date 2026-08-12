@@ -5,6 +5,7 @@ import { readFileSync } from "fs";
 import type { ConfigSchemaType } from "../config/config-schema.js";
 import { LoadBalancer } from "../services/load-balancer.js";
 import { registry } from "../services/registry.js";
+import { logger } from "../middleware/logger.js";
 
 export function handleWebSocketUpgrade(
   req: http.IncomingMessage,
@@ -36,6 +37,7 @@ export function handleWebSocketUpgrade(
     HEALTHY_UPSTREAMS_SNAPSHOT,
     clientIP,
     new Set(),
+    req.headers.cookie,
   );
   if (!upstreamId) {
     socket.destroy();
@@ -63,10 +65,7 @@ export function handleWebSocketUpgrade(
   const rejectUnauthorized = tlsConfig?.rejectUnauthorized ?? true;
 
   if (isTls && !rejectUnauthorized) {
-    console.warn(
-      `[WebSocket] WARNING: TLS certificate verification is DISABLED for upstream "${upstreamId}". ` +
-        `This is acceptable for development but must NOT be used in production.`,
-    );
+    logger.warn("WebSocket", "TLS certificate verification DISABLED", { upstreamId });
   }
 
   let caBuffer: Buffer | undefined;
@@ -74,9 +73,7 @@ export function handleWebSocketUpgrade(
     try {
       caBuffer = readFileSync(tlsConfig.ca);
     } catch (err: any) {
-      console.error(
-        `[WebSocket] Failed to read CA file for upstream "${upstreamId}": ${err.message}`,
-      );
+      logger.error("WebSocket", `Failed to read CA file: ${err.message}`, { upstreamId, ca: tlsConfig.ca });
     }
   }
   let targetSocket: net.Socket;

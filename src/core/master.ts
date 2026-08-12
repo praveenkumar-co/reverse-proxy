@@ -16,7 +16,7 @@ import { LoadBalancer } from "../services/load-balancer.js";
 import { registry } from "../services/registry.js";
 import { Cache } from "../middleware/cache.js";
 import { MetricsRegistry } from "../services/metrics.js";
-import { writeAccessLog } from "../middleware/logger.js";
+import { writeAccessLog, logger } from "../middleware/logger.js";
 import { handleWebSocketUpgrade } from "./websocket.js";
 
 interface CreateServerConfig {
@@ -48,7 +48,7 @@ function parseCookies(
 }
 
 export async function reloadServerConfig(newConfig: ConfigSchemaType) {
-  console.log("[Master] Hot-reload initiated. Spawning replacement workers...");
+  logger.info("Master", "Hot-reload initiated — spawning replacement workers");
   ACTIVE_CONFIG = newConfig;
   lb = new LoadBalancer({
     strategy: newConfig.server.loadBalancing.strategy,
@@ -75,7 +75,7 @@ export async function reloadServerConfig(newConfig: ConfigSchemaType) {
     WORKER_POOL.push(worker);
   }
 
-  console.log(`[Master] Retiring ${oldWorkers.length} old workers...`);
+  logger.info("Master", `Retiring ${oldWorkers.length} old workers`);
   for (const oldWorker of oldWorkers) {
     try {
       oldWorker.send(JSON.stringify({ type: "GRACEFUL_SHUTDOWN" }));
@@ -191,6 +191,7 @@ export async function createServer(config: CreateServerConfig) {
           HEALTHY_UPSTREAMS,
           clientIp,
           attemptedUpstreams,
+          payload.headers.cookie,
         );
       }
 
@@ -252,9 +253,7 @@ export async function createServer(config: CreateServerConfig) {
           (reply.statusCode &&
             retryConfig.statusCodes.includes(reply.statusCode))
         ) {
-          console.log(
-            `[CircuitBreaker] Failure on ${upstreamId}: errorCode=${reply.errorCode}, status=${reply.statusCode}`,
-          );
+          logger.warn("Master", `Upstream failure: errorCode=${reply.errorCode}, status=${reply.statusCode}`, { upstreamId });
           lb.recordFailure(upstreamId!);
           if (attempt < retryConfig.maxAttempts) {
             metricsRegistry.recordActiveConnection(upstreamId!, -1);
@@ -289,22 +288,24 @@ export async function createServer(config: CreateServerConfig) {
             );
           }
         } else {
-          lb.recordSuccess(upstreamId!);
+          let responseData: Buffer | string = reply.data;
+          if (reply.isCompressed && reply.encoding === "gzip") {
+            responseData = Buffer.from(reply.data, "base64");
+          }
+          const latencyMs = performance.now() - startTime;
+          const responseBytes = typeof responseData === "string" ? Buffer.byteLength(responseData) : responseData.length;
+
+          lb.recordSuccess(upstreamId!, latencyMs, responseBytes);
           metricsRegistry.recordActiveConnection(upstreamId!, -1);
           metricsRegistry.recordRequest(
             payload.requestType,
             payload.url,
             reply.statusCode ?? 200,
             upstreamId!,
-            performance.now() - startTime,
+            latencyMs,
           );
           if (payload.requestType === "GET") {
             metricsRegistry.recordCacheOp("miss");
-          }
-
-          let responseData: Buffer | string = reply.data;
-          if (reply.isCompressed && reply.encoding === "gzip") {
-            responseData = Buffer.from(reply.data, "base64");
           }
 
           if (payload.requestType === "GET" && !reply.isCompressed) {
@@ -572,9 +573,7 @@ export async function createServer(config: CreateServerConfig) {
     async function gracefulShutdown(signal: string) {
       if (isShuttingDown) return;
       isShuttingDown = true;
-      console.log(
-        `\n[Master] Received ${signal} — draining and shutting down...`,
-      );
+      logger.info("Master", `Received ${signal} — draining and shutting down`);
       await cache.disconnect();
       httpServer.close();
       httpsServer.close(() => {
