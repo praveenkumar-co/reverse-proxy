@@ -68,7 +68,7 @@ export async function reloadServerConfig(newConfig: ConfigSchemaType) {
   WORKER_POOL.length = 0;
   const targetWorkers = newConfig.server.workers ?? 2;
 
-  for (let i = 0; i < targetWorkers; i++) {
+  for(let i = 0; i < targetWorkers; i++) {
     const worker = cluster.fork({
       APP_CONFIG: JSON.stringify(newConfig),
     });
@@ -109,6 +109,7 @@ export async function createServer(config: CreateServerConfig) {
           new RateLimiter({
             windowMs: p.rateLimit.windowMs,
             maxRequests: p.rateLimit.maxRequests,
+            algorithm: p.rateLimit.algorithm,
           }),
         );
       }
@@ -499,11 +500,13 @@ export async function createServer(config: CreateServerConfig) {
             "Content-Type": "application/json",
             "Retry-After": retryAfter.toString(),
             "X-RateLimit-Remaining": "0",
+            "X-RateLimit-Algorithm": routeLimiter.getAlgorithm(),
           });
           res.end(
             JSON.stringify({
               error: "Too Many Requests",
               retryAfter: `${retryAfter}s`,
+              algorithm: routeLimiter.getAlgorithm(),
             }),
           );
           return;

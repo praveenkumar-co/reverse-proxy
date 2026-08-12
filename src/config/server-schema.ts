@@ -1,6 +1,4 @@
 import { z } from "zod";
-
-// IPC message sent from Master → Worker for each proxied request
 export const workerMessageSchema = z.object({
   requestType: z.enum(["GET", "POST", "PUT", "DELETE"]),
   headers: z.any(),
@@ -8,8 +6,6 @@ export const workerMessageSchema = z.object({
   url: z.string(),
   requestId: z.string().optional(),
 });
-
-// IPC reply sent from Worker → Master after proxying completes
 export const workerMessageReplySchema = z.object({
   requestId: z.string().optional(),
   data: z.string(),

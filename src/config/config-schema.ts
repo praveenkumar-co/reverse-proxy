@@ -23,6 +23,9 @@ const rateLimitSchema = z
   .object({
     windowMs: z.number(),
     maxRequests: z.number(),
+    algorithm: z
+      .enum(["fixed-window", "sliding-window", "token-bucket"])
+      .default("sliding-window"),
   })
   .optional();
 
