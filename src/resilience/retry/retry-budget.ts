@@ -3,7 +3,7 @@ export class RetryBudget {
   private totalRetries = 0;
 
   constructor(
-    private budgetPercent = 15, // default 15% retry budget
+    private budgetPercent = 15,
     private decayFactor = 0.9,
   ) {}
 
@@ -16,7 +16,7 @@ export class RetryBudget {
     if (this.totalRequests >= 10) {
       const ratio = (this.totalRetries + 1) / (this.totalRequests + 1);
       if (ratio > this.budgetPercent / 100) {
-        return false; // budget exhausted
+        return false;
       }
     }
     this.totalRequests = this.totalRequests * this.decayFactor;
