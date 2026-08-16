@@ -1,0 +1,10 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ninja-proxy
+  namespace: ninja-proxy
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: ninja-proxy

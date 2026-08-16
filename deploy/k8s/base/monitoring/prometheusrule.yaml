@@ -1,0 +1,14 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: ninja-proxy-alerts
+  namespace: ninja-proxy
+spec:
+  groups:
+    - name: ninja-proxy
+      rules:
+        - alert: HighErrorRate
+          expr: sum(rate(ninja_proxy_requests_total{status=~"5.."}[5m])) > 0.1
+          for: 5m
+          annotations:
+            summary: High error rate detected

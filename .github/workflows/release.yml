@@ -1,0 +1,17 @@
+name: Release
+on:
+  push:
+    tags:
+      - 'v*'
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v3
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - uses: docker/build-push-action@v5
+        with:
+          push: true
+          tags: ninja-proxy:${{ github.ref_name }}

@@ -1,62 +1,63 @@
-
 server:
+  listen: 8080
+  httpsPort: 8443
+  workers: 4
+  compression: true
+  connectTimeoutMs: 5000
+  readTimeoutMs: 30000
+  accessLog: access.log
+  eventLog: events.log
 
-  listen: 8080          # HTTP port — all traffic redirected to HTTPS (301)
-  httpsPort: 8443       # HTTPS port — main entry point for all requests
-
-  workers: 2
   loadBalancing:
-    strategy: round-robin       # Options: round-robin | least-connections | ip-hash | random
-    failureThreshold: 3         # Mark an upstream DOWN after this many consecutive failures
-    recoveryTimeMs: 15000       # Attempt to recover a DOWN upstream after this delay (ms)
-  cache:
-    enabled: false          # Set to true to enable Redis response caching
-    host: redis             # Redis hostname (use 'localhost' outside Docker)
-    port: 6379              # Redis port
-    ttlSeconds: 60          # Cache TTL — responses expire after this many seconds
+    strategy: weighted-round-robin
+    failureThreshold: 3
+    recoveryTimeMs: 30000
+    virtualNodes: 150
+    ewmaAlpha: 0.1
+    stickyCookieName: NINJA_ROUTE
+    slowStartSeconds: 30
+    retry:
+      maxAttempts: 3
+      statusCodes: [500, 502, 503, 504]
 
-  # ── Upstream Backends ──────────────────────────────────────
-  #
-  # List every backend service this proxy should route traffic to.
-  # The proxy does not care what technology these services use.
-  #
-  # Examples:
-  #   - id: api-server
-  #     url: http://api-server:8000
-  #
-  #   - id: user-service
-  #     url: http://user-service:8080
-  #
-  #   - id: my-django-app
-  #     url: http://django:8000
-  #
-  #   - id: my-spring-boot
-  #     url: http://spring-boot:8080
-  #
+  resilience:
+    circuitBreaker:
+      mode: classic
+    retry:
+      baseDelayMs: 100
+      maxDelayMs: 5000
+      budgetPercent: 15
+
   upstreams:
-    - id: backend-a
-      url: http://backend-a:3001
+    - id: backend-1
+      url: http://localhost:3001
+      weight: 3
+      healthPath: /health
+    - id: backend-2
+      url: http://localhost:3002
+      weight: 1
+      healthPath: /health
 
-    - id: backend-b
-      url: http://backend-b:3002
   paths:
-    - path: /
-      upstream:
-        - backend-a
-        - backend-b
-      rateLimit:
-        windowMs: 60000       # 1-minute sliding window
-        maxRequests: 100000   # maximum requests per IP per window
-
     - path: /api
-      upstream:
-        - backend-a
-        - backend-b
+      upstream: [backend-1, backend-2]
       rateLimit:
+        maxRequests: 100
         windowMs: 60000
-        maxRequests: 50000
-  headers:
-    - key: X-Forwarded-For
-      value: client_ip
-    - key: X-Real-IP
-      value: client_ip
+        algorithm: sliding-window-log
+        storage: memory
+      cache:
+        enabled: true
+        ttlSeconds: 60
+
+  cache:
+    enabled: true
+    host: localhost
+    port: 6379
+    ttlSeconds: 300
+    l1Enabled: true
+    l1MaxSize: 500
+    debezium:
+      enabled: false
+      channel: dbz-events
+      mappings: []

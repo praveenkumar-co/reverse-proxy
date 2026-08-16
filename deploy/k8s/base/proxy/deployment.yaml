@@ -1,0 +1,28 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ninja-proxy
+  namespace: ninja-proxy
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: ninja-proxy
+  template:
+    metadata:
+      labels:
+        app: ninja-proxy
+    spec:
+      containers:
+        - name: proxy
+          image: ninja-proxy:latest
+          ports:
+            - containerPort: 8080
+            - containerPort: 8443
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

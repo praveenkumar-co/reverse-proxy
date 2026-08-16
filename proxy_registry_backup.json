@@ -1,0 +1,24 @@
+{
+  "srv-a": {
+    "id": "srv-a",
+    "url": "http://srv-a",
+    "metadata": {
+      "cpu": "0.8",
+      "memory": "0.9"
+    },
+    "registeredAt": 1786899939363,
+    "lastHeartbeat": 1786899939363,
+    "status": "UP"
+  },
+  "srv-b": {
+    "id": "srv-b",
+    "url": "http://srv-b",
+    "metadata": {
+      "cpu": "0.1",
+      "memory": "0.2"
+    },
+    "registeredAt": 1786899939365,
+    "lastHeartbeat": 1786899939365,
+    "status": "UP"
+  }
+}

@@ -8,6 +8,8 @@ import {
   type WorkerReplyMessageType,
 } from "../config/server-schema.js";
 import { logger } from "../middleware/logger.js";
+import { tunnelWebSocket } from "./websocket.js";
+import net from "net";
 const httpAgent = new http.Agent({
   keepAlive: true,
   keepAliveMsecs: 10000,
@@ -33,6 +35,31 @@ process.on("message", (msgStr: string) => {
     }
   } catch {
     // ignore parse errors on non-JSON messages
+  }
+});
+
+process.on("message", async (msgStr: string, handle?: any) => {
+  try {
+    const payload = JSON.parse(msgStr);
+    if (payload.type === "WEBSOCKET_UPGRADE" && handle) {
+      const clientSocket = handle as net.Socket;
+      const head = Buffer.from(payload.head, "base64");
+
+      // Resolve the TLS config for this upstream
+      const upstreamStaticConfig = workerConfig.server.upstreams.find(
+        (u) => u.id === payload.upstreamId,
+      );
+      const tlsConfig = upstreamStaticConfig?.tls;
+
+      logger.info(`Worker:${process.pid}`, "Received WebSocket socket handle handoff from master", {
+        url: payload.reqFields.url,
+        upstreamId: payload.upstreamId,
+      });
+
+      tunnelWebSocket(clientSocket, payload.upstreamUrl, payload.reqFields, head, tlsConfig);
+    }
+  } catch (err: any) {
+    logger.error(`Worker:${process.pid}`, `Websocket handoff failed: ${err.message}`);
   }
 });
 
