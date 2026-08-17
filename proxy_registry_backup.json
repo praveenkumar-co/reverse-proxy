@@ -6,8 +6,8 @@
       "cpu": "0.8",
       "memory": "0.9"
     },
-    "registeredAt": 1786899939363,
-    "lastHeartbeat": 1786899939363,
+    "registeredAt": 1786986880363,
+    "lastHeartbeat": 1786986880363,
     "status": "UP"
   },
   "srv-b": {
@@ -17,8 +17,8 @@
       "cpu": "0.1",
       "memory": "0.2"
     },
-    "registeredAt": 1786899939365,
-    "lastHeartbeat": 1786899939365,
+    "registeredAt": 1786986880364,
+    "lastHeartbeat": 1786986880364,
     "status": "UP"
   }
 }

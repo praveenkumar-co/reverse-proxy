@@ -8,6 +8,109 @@ import { SoftLimitPolicy } from "./policies/soft-limit.policy.js";
 import { MultiDimensionPolicy, type DimensionConfig } from "./policies/multi-dimension.policy.js";
 import { logger } from "../observability/logger/logger.js";
 
+const REDIS_RATE_LIMIT_SCRIPTS = {
+  fixedWindow: `
+    local count = redis.call("INCR", KEYS[1])
+    if count == 1 then
+      redis.call("PEXPIRE", KEYS[1], ARGV[2])
+    end
+    if count <= tonumber(ARGV[1]) then
+      return 1
+    end
+    return 0
+  `,
+  slidingWindowLog: `
+    local threshold = tonumber(ARGV[2]) - tonumber(ARGV[3])
+    redis.call("ZREMRANGEBYSCORE", KEYS[1], "-inf", threshold)
+    local count = redis.call("ZCARD", KEYS[1])
+    if count < tonumber(ARGV[1]) then
+      local sequence = redis.call("INCR", KEYS[2])
+      redis.call("ZADD", KEYS[1], ARGV[2], ARGV[2] .. "-" .. sequence)
+      redis.call("PEXPIRE", KEYS[1], ARGV[3])
+      redis.call("PEXPIRE", KEYS[2], ARGV[3])
+      return 1
+    end
+    redis.call("PEXPIRE", KEYS[1], ARGV[3])
+    return 0
+  `,
+  slidingWindowCounter: `
+    local state = redis.call("HMGET", KEYS[1], "currentCount", "prevCount", "windowStart")
+    local currentCount = tonumber(state[1]) or 0
+    local prevCount = tonumber(state[2]) or 0
+    local windowStart = tonumber(state[3]) or tonumber(ARGV[2])
+    local now = tonumber(ARGV[2])
+    local windowMs = tonumber(ARGV[3])
+
+    if now - windowStart >= windowMs * 2 then
+      currentCount = 0
+      prevCount = 0
+      windowStart = now
+    elseif now - windowStart >= windowMs then
+      prevCount = currentCount
+      currentCount = 0
+      windowStart = windowStart + windowMs
+    end
+
+    local timeIntoCurrentWindow = now - windowStart
+    local weight = (windowMs - timeIntoCurrentWindow) / windowMs
+    local estimatedCount = math.floor(prevCount * weight + currentCount)
+
+    if estimatedCount < tonumber(ARGV[1]) then
+      currentCount = currentCount + 1
+      redis.call("HSET", KEYS[1], "currentCount", currentCount, "prevCount", prevCount, "windowStart", windowStart)
+      redis.call("PEXPIRE", KEYS[1], windowMs * 2)
+      return 1
+    end
+
+    redis.call("HSET", KEYS[1], "currentCount", currentCount, "prevCount", prevCount, "windowStart", windowStart)
+    redis.call("PEXPIRE", KEYS[1], windowMs * 2)
+    return 0
+  `,
+  tokenBucket: `
+    local state = redis.call("HMGET", KEYS[1], "tokens", "lastRefill")
+    local limit = tonumber(ARGV[1])
+    local now = tonumber(ARGV[2])
+    local windowMs = tonumber(ARGV[3])
+    local tokens = tonumber(state[1]) or limit
+    local lastRefill = tonumber(state[2]) or now
+    local elapsed = now - lastRefill
+    local refillRate = limit / windowMs
+    local newTokens = math.min(limit, tokens + elapsed * refillRate)
+
+    if newTokens >= 1 then
+      redis.call("HSET", KEYS[1], "tokens", newTokens - 1, "lastRefill", now)
+      redis.call("PEXPIRE", KEYS[1], windowMs)
+      return 1
+    end
+
+    redis.call("HSET", KEYS[1], "tokens", newTokens, "lastRefill", now)
+    redis.call("PEXPIRE", KEYS[1], windowMs)
+    return 0
+  `,
+  leakingBucket: `
+    local state = redis.call("HMGET", KEYS[1], "water", "lastLeak")
+    local limit = tonumber(ARGV[1])
+    local now = tonumber(ARGV[2])
+    local windowMs = tonumber(ARGV[3])
+    local water = tonumber(state[1]) or 0
+    local lastLeak = tonumber(state[2]) or now
+    local elapsed = now - lastLeak
+    local leakRate = limit / windowMs
+    local leaked = elapsed * leakRate
+    local waterLevel = math.max(0, water - leaked)
+
+    if waterLevel < limit then
+      redis.call("HSET", KEYS[1], "water", waterLevel + 1, "lastLeak", now)
+      redis.call("PEXPIRE", KEYS[1], windowMs)
+      return 1
+    end
+
+    redis.call("HSET", KEYS[1], "water", waterLevel, "lastLeak", now)
+    redis.call("PEXPIRE", KEYS[1], windowMs)
+    return 0
+  `,
+} as const;
+
 export interface RateLimiterOptions {
   windowMs: number;
   maxRequests: number;
@@ -187,137 +290,60 @@ export class RateLimiter {
 
     switch (this.algorithm) {
       case "fixed-window": {
-        const count = await client.incr(redisKey);
-        if (count === 1) {
-          await client.pExpire(redisKey, windowMs);
-        }
-        return count <= limit;
+        return (await this.evalRedisRateLimitScript(
+          REDIS_RATE_LIMIT_SCRIPTS.fixedWindow,
+          [redisKey],
+          [limit, windowMs],
+        )) === 1;
       }
 
       case "sliding-window-log": {
-        const threshold = now - windowMs;
-        await client.zRemRangeByScore(redisKey, "-inf", threshold);
-        const count = await client.zCard(redisKey);
-        if (count < limit) {
-          await client.zAdd(redisKey, { score: now, value: `${now}-${Math.random()}` });
-          await client.pExpire(redisKey, windowMs);
-          return true;
-        }
-        return false;
+        return (await this.evalRedisRateLimitScript(
+          REDIS_RATE_LIMIT_SCRIPTS.slidingWindowLog,
+          [redisKey, `${redisKey}:seq`],
+          [limit, now, windowMs],
+        )) === 1;
       }
 
       case "sliding-window-counter": {
-        const state = await client.hGetAll(redisKey);
-        let currentCount = 0;
-        let prevCount = 0;
-        let windowStart = now;
-
-        if (state && state.currentCount) {
-          currentCount = parseInt(state.currentCount, 10);
-          prevCount = parseInt(state.prevCount ?? "0", 10);
-          windowStart = parseInt(state.windowStart ?? "0", 10);
-        }
-
-        if (now - windowStart >= windowMs * 2) {
-          currentCount = 0;
-          prevCount = 0;
-          windowStart = now;
-        } else if (now - windowStart >= windowMs) {
-          prevCount = currentCount;
-          currentCount = 0;
-          windowStart = windowStart + windowMs;
-        }
-
-        const timeIntoCurrentWindow = now - windowStart;
-        const weight = (windowMs - timeIntoCurrentWindow) / windowMs;
-        const estimatedCount = Math.floor(prevCount * weight + currentCount);
-
-        if (estimatedCount < limit) {
-          currentCount++;
-          await client.hSet(redisKey, {
-            currentCount: currentCount.toString(),
-            prevCount: prevCount.toString(),
-            windowStart: windowStart.toString(),
-          });
-          await client.pExpire(redisKey, windowMs * 2);
-          return true;
-        }
-
-        await client.hSet(redisKey, {
-          currentCount: currentCount.toString(),
-          prevCount: prevCount.toString(),
-          windowStart: windowStart.toString(),
-        });
-        await client.pExpire(redisKey, windowMs * 2);
-        return false;
+        return (await this.evalRedisRateLimitScript(
+          REDIS_RATE_LIMIT_SCRIPTS.slidingWindowCounter,
+          [redisKey],
+          [limit, now, windowMs],
+        )) === 1;
       }
 
       case "token-bucket": {
-        const state = await client.hGetAll(redisKey);
-        let tokens = limit;
-        let lastRefill = now;
-
-        if (state && state.tokens && state.lastRefill) {
-          tokens = parseFloat(state.tokens);
-          lastRefill = parseInt(state.lastRefill, 10);
-        }
-
-        const elapsed = now - lastRefill;
-        const refillRate = limit / windowMs;
-        const newTokens = Math.min(limit, tokens + elapsed * refillRate);
-
-        if (newTokens >= 1) {
-          await client.hSet(redisKey, {
-            tokens: (newTokens - 1).toString(),
-            lastRefill: now.toString(),
-          });
-          await client.pExpire(redisKey, windowMs);
-          return true;
-        }
-
-        await client.hSet(redisKey, {
-          tokens: newTokens.toString(),
-          lastRefill: now.toString(),
-        });
-        await client.pExpire(redisKey, windowMs);
-        return false;
+        return (await this.evalRedisRateLimitScript(
+          REDIS_RATE_LIMIT_SCRIPTS.tokenBucket,
+          [redisKey],
+          [limit, now, windowMs],
+        )) === 1;
       }
 
       case "leaking-bucket": {
-        const state = await client.hGetAll(redisKey);
-        let water = 0.0;
-        let lastLeak = now;
-
-        if (state && state.water && state.lastLeak) {
-          water = parseFloat(state.water);
-          lastLeak = parseInt(state.lastLeak, 10);
-        }
-
-        const elapsed = now - lastLeak;
-        const leakRate = limit / windowMs;
-        const leaked = elapsed * leakRate;
-        const waterLevel = Math.max(0.0, water - leaked);
-
-        if (waterLevel < limit) {
-          await client.hSet(redisKey, {
-            water: (waterLevel + 1).toString(),
-            lastLeak: now.toString(),
-          });
-          await client.pExpire(redisKey, windowMs);
-          return true;
-        }
-
-        await client.hSet(redisKey, {
-          water: waterLevel.toString(),
-          lastLeak: now.toString(),
-        });
-        await client.pExpire(redisKey, windowMs);
-        return false;
+        return (await this.evalRedisRateLimitScript(
+          REDIS_RATE_LIMIT_SCRIPTS.leakingBucket,
+          [redisKey],
+          [limit, now, windowMs],
+        )) === 1;
       }
 
       default:
         return true;
     }
+  }
+
+  private async evalRedisRateLimitScript(
+    script: string,
+    keys: string[],
+    args: number[],
+  ): Promise<number> {
+    const result = await this.redisClient!.eval(script, {
+      keys,
+      arguments: args.map(String),
+    });
+    return typeof result === "number" ? result : Number(result);
   }
 
   private getCurrentLoadMemory(key: string): number {
