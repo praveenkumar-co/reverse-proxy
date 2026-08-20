@@ -5,11 +5,6 @@ import { circuitBreakerManager } from "../../resilience/circuit-breaker/circuit-
 import { ClassicCircuitBreaker } from "../../resilience/circuit-breaker/classic.circuit-breaker.js";
 import type { IStrategy } from "../contracts/strategy.interface.js";
 
-/**
- * Pure orchestrator.
- * Owns state, health, circuit-breaker filtering, connection tracking, EWMA, slow-start metadata.
- * Does NOT implement any load-balancing algorithm — that lives in IStrategy.
- */
 export class LoadBalancer {
   private strategy: IStrategy;
   private ewmaAlpha: number;
@@ -203,11 +198,6 @@ export class LoadBalancer {
       logger.warn("CircuitBreaker", `${id} tripped to OPEN state`);
     }
   }
-
-  /**
-   * Filter candidates (health, circuit breaker, maxConnections),
-   * prefer HALF_OPEN for recovery probes, then delegate to injected strategy.
-   */
   public pickFiltered(
     healthyIds: Set<string>,
     clientIp?: string,
@@ -238,8 +228,6 @@ export class LoadBalancer {
     }
 
     if (candidates.length === 0) return null;
-
-    // Prefer HALF_OPEN upstreams for recovery probes
     const halfOpenCandidates = candidates.filter((s) => {
       const cb = circuitBreakerManager.getOrCreate(
         s.id,
@@ -254,8 +242,6 @@ export class LoadBalancer {
     if (halfOpenCandidates.length > 0) {
       return halfOpenCandidates[0]!.id;
     }
-
-    // Delegate to injected strategy — no algorithm logic here
     const chosen = this.strategy.pick(candidates, clientIp, cookies);
     return chosen ? chosen.id : null;
   }

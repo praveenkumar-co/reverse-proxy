@@ -4,6 +4,8 @@ import { readFileSync } from "fs";
 import fs from "node:fs";
 import net from "net";
 import cluster, { type Worker } from "node:cluster";
+import { createClient } from "redis";
+import type { RedisClientType } from "redis";
 
 import {
   workerMessageReplySchema,
@@ -39,6 +41,9 @@ let ACTIVE_CONFIG: RootConfigType;
 let lb: LoadBalancer;
 let cache: Cache;
 let metricsRegistry: MetricsRegistry;
+let rlRedisClient: RedisClientType | undefined;
+let healthCheckInterval: NodeJS.Timeout | undefined;
+let passiveProbeRegistered = false;
 const HEALTHY_UPSTREAMS: Set<string> = new Set();
 const rateLimiters = new Map<string, RateLimiter>();
 const upstreamBulkheads = new Map<string, Bulkhead>();
@@ -99,6 +104,12 @@ export async function reloadServerConfig(newConfig: RootConfigType) {
     circuitBreaker: newConfig.server.resilience?.circuitBreaker,
   });
 
+  // Clear old health check interval before hot-reload creates a new LB/config
+  if (healthCheckInterval) {
+    clearInterval(healthCheckInterval);
+    healthCheckInterval = undefined;
+  }
+
   HEALTHY_UPSTREAMS.clear();
   newConfig.server.upstreams.forEach((u) => {
     HEALTHY_UPSTREAMS.add(u.id);
@@ -123,6 +134,18 @@ export async function reloadServerConfig(newConfig: RootConfigType) {
 
   rateLimiters.clear();
   upstreamBulkheads.clear();
+
+  // Decouple rate-limiter Redis from the cache Redis connection
+  if (newConfig.server.rateLimit?.storage === "redis" || newConfig.server.paths.some(p => p.rateLimit?.storage === "redis")) {
+    if (!rlRedisClient) {
+      rlRedisClient = createClient({
+        socket: { host: newConfig.server.cache.host, port: newConfig.server.cache.port },
+      }) as RedisClientType;
+      rlRedisClient.on("error", (err) => logger.error("RateLimiterRedis", err.message));
+      await rlRedisClient.connect().catch(() => {});
+    }
+  }
+
   newConfig.server.paths.forEach((p) => {
     const rlConfig = p.rateLimit ?? newConfig.server.rateLimit;
     if (rlConfig) {
@@ -133,7 +156,7 @@ export async function reloadServerConfig(newConfig: RootConfigType) {
           maxRequests: rlConfig.maxRequests,
           algorithm: rlConfig.algorithm,
           storage: rlConfig.storage,
-          redisClient: cache ? cache.getClient() : undefined,
+          redisClient: rlConfig.storage === "redis" ? rlRedisClient : undefined,
         }),
       );
     }
@@ -184,6 +207,17 @@ export async function createServer(config: CreateServerConfig) {
     });
     await cache.connect();
 
+    // Decouple rate-limiter Redis from the cache Redis connection
+    if (ACTIVE_CONFIG.server.rateLimit?.storage === "redis" || ACTIVE_CONFIG.server.paths.some(p => p.rateLimit?.storage === "redis")) {
+      if (!rlRedisClient) {
+        rlRedisClient = createClient({
+          socket: { host: ACTIVE_CONFIG.server.cache.host, port: ACTIVE_CONFIG.server.cache.port },
+        }) as RedisClientType;
+        rlRedisClient.on("error", (err) => logger.error("RateLimiterRedis", err.message));
+        await rlRedisClient.connect().catch(() => {});
+      }
+    }
+
     ACTIVE_CONFIG.server.paths.forEach((p) => {
       const rlConfig = p.rateLimit ?? ACTIVE_CONFIG.server.rateLimit;
       if (rlConfig) {
@@ -194,7 +228,7 @@ export async function createServer(config: CreateServerConfig) {
             maxRequests: rlConfig.maxRequests,
             algorithm: rlConfig.algorithm,
             storage: rlConfig.storage,
-            redisClient: cache ? cache.getClient() : undefined,
+            redisClient: rlConfig.storage === "redis" ? rlRedisClient : undefined,
           }),
         );
       }
@@ -266,6 +300,7 @@ export async function createServer(config: CreateServerConfig) {
       attempt = 0,
       attemptedUpstreams: Set<string> = new Set(),
       startTime = performance.now(),
+      previousSleepMs?: number,
     ) {
       globalRetryBudget.recordRequest();
 
@@ -358,6 +393,7 @@ export async function createServer(config: CreateServerConfig) {
       const workerIndex = (attempt === 0) ? (nextWorkerIndex++) % WORKER_POOL.length : (nextWorkerIndex + attempt) % WORKER_POOL.length;
       const worker = WORKER_POOL[workerIndex];
       if (!worker) {
+        upstreamBulkheads.get(upstreamId)?.leave();
         metricsRegistry.recordActiveConnection(upstreamId, -1);
         lb.releaseConnection(upstreamId);
         res.writeHead(500);
@@ -451,7 +487,7 @@ export async function createServer(config: CreateServerConfig) {
                     jitterDelay = calculateEqualJitterBackoff(attempt, baseDelayMs, maxDelayMs);
                     break;
                   case "decorrelated-jitter":
-                    jitterDelay = calculateDecorrelatedJitterBackoff(attempt, baseDelayMs, maxDelayMs);
+                    jitterDelay = calculateDecorrelatedJitterBackoff(attempt, baseDelayMs, maxDelayMs, previousSleepMs);
                     break;
                   case "full-jitter":
                   default:
@@ -472,6 +508,7 @@ export async function createServer(config: CreateServerConfig) {
                     attempt + 1,
                     attemptedUpstreams,
                     startTime,
+                    jitterDelay,
                   );
                 }, jitterDelay);
               }
@@ -944,8 +981,15 @@ export async function createServer(config: CreateServerConfig) {
 
     httpServer.listen(port);
     httpsServer.listen(ACTIVE_CONFIG.server.httpsPort ?? 8443, () => {
-      startHealthChecks(ACTIVE_CONFIG.server.upstreams, HEALTHY_UPSTREAMS, lb);
-      registerPassiveProbeListener(HEALTHY_UPSTREAMS, lb);
+      // Clear any existing health-check interval (prevents duplicates after hot-reload)
+      if (healthCheckInterval) clearInterval(healthCheckInterval);
+      healthCheckInterval = startHealthChecks(ACTIVE_CONFIG.server.upstreams, HEALTHY_UPSTREAMS, lb);
+
+      // Only register the passive probe listener once — never on hot-reload
+      if (!passiveProbeRegistered) {
+        registerPassiveProbeListener(HEALTHY_UPSTREAMS, lb);
+        passiveProbeRegistered = true;
+      }
 
       // Register readiness checks — exposed at /__ready
       readinessProbe.register({

@@ -9,7 +9,7 @@ export function registerPassiveProbeListener(
   options: { failureStatusThreshold?: number; errorWindow?: number } = {}
 ) {
   const failureStatusThreshold = options.failureStatusThreshold ?? 500;
-  const errorCounts = new Map<string, number[]>(); 
+  const errorCounts = new Map<string, number[]>();
 
   passiveProbe.onEvent((event) => {
     const isFailure = event.statusCode >= failureStatusThreshold;
@@ -60,14 +60,18 @@ export async function initialHealthCheck(
   logger.info("HealthCheck", "Initial check done", { healthy: [...HEALTHY_UPSTREAMS] });
 }
 
+/**
+ * Starts periodic health checks.
+ * Returns the interval handle so callers can clearInterval on hot-reload.
+ */
 export function startHealthChecks(
   upstreams: Array<{ id: string; url: string; healthPath?: string; tls?: any }>,
   HEALTHY_UPSTREAMS: Set<string>,
   lb: LoadBalancer,
   intervalMs = 10000,
-) {
+): NodeJS.Timeout {
   logger.info("HealthCheck", "Periodic health checks started", { intervalMs });
-  setInterval(() => {
+  const handle = setInterval(() => {
     logger.info("HealthCheck", "Checking all upstreams");
     for (const upstream of upstreams) {
       checkUpstream(upstream).then((healthy) => {
@@ -85,4 +89,5 @@ export function startHealthChecks(
       });
     }
   }, intervalMs);
+  return handle;
 }

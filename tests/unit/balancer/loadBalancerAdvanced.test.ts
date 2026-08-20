@@ -53,7 +53,7 @@ test("RateLimiter - Token Bucket", async () => {
 // ─── LOAD BALANCER TESTS ──────────────────────────────────────────────────────
 
 test("LoadBalancer - Unweighted Round Robin", () => {
-  const lb = new LoadBalancer({
+  const lb = createLoadBalancer({
     strategy: "round-robin",
     upstreams: [
       { id: "srv-a", weight: 10 }, // weight ignored
@@ -68,7 +68,7 @@ test("LoadBalancer - Unweighted Round Robin", () => {
 });
 
 test("LoadBalancer - Weighted Least Connections", () => {
-  const lb = new LoadBalancer({
+  const lb = createLoadBalancer({
     strategy: "weighted-least-connections",
     upstreams: [
       { id: "srv-a", weight: 2 },
@@ -90,7 +90,7 @@ test("LoadBalancer - Weighted Least Connections", () => {
 });
 
 test("LoadBalancer - Least Response Time", () => {
-  const lb = new LoadBalancer({
+  const lb = createLoadBalancer({
     strategy: "least-response-time",
     upstreams: [
       { id: "srv-a" },
@@ -109,7 +109,7 @@ test("LoadBalancer - Least Response Time", () => {
 });
 
 test("LoadBalancer - Consistent Hashing", () => {
-  const lb = new LoadBalancer({
+  const lb = createLoadBalancer({
     strategy: "consistent-hashing",
     upstreams: [
       { id: "srv-a" },
@@ -129,7 +129,7 @@ test("LoadBalancer - Consistent Hashing", () => {
 });
 
 test("LoadBalancer - Power of Two Choices (P2C)", () => {
-  const lb = new LoadBalancer({
+  const lb = createLoadBalancer({
     strategy: "power-of-two",
     upstreams: [
       { id: "srv-a" },
@@ -152,7 +152,7 @@ test("LoadBalancer - Power of Two Choices (P2C)", () => {
 });
 
 test("LoadBalancer - Adaptive Weighted Round Robin", () => {
-  const lb = new LoadBalancer({
+  const lb = createLoadBalancer({
     strategy: "adaptive-wrr",
     upstreams: [
       { id: "srv-a", weight: 10 },
@@ -184,7 +184,7 @@ test("LoadBalancer - Adaptive Weighted Round Robin", () => {
 });
 
 test("LoadBalancer - Resource-Based", () => {
-  const lb = new LoadBalancer({
+  const lb = createLoadBalancer({
     strategy: "resource-based",
     upstreams: [
       { id: "srv-a" },
@@ -203,7 +203,7 @@ test("LoadBalancer - Resource-Based", () => {
 });
 
 test("LoadBalancer - Sticky Sessions (Session Affinity)", () => {
-  const lb = new LoadBalancer({
+  const lb = createLoadBalancer({
     strategy: "sticky-sessions",
     upstreams: [
       { id: "srv-a" },
