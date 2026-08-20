@@ -12,7 +12,7 @@ import {
 
 import { initialHealthCheck, startHealthChecks, registerPassiveProbeListener } from "../../discovery/health/health.manager.js";
 import { RateLimiter } from "../../ratelimit/rate-limiter.js";
-import { LoadBalancer } from "../../balancer/core/load-balancer.js";
+import { LoadBalancer, createLoadBalancer } from "../../balancer/index.js";
 import { registry } from "../../discovery/registry/dynamic.registry.js";
 import { Cache } from "../../cache/cache-manager.js";
 import { MetricsRegistry } from "../../observability/metrics/prometheus.exporter.js";
@@ -89,7 +89,7 @@ export async function reloadServerConfig(newConfig: RootConfigType) {
   logger.info("Master", "Hot-reload initiated — rebuilding dependencies and workers");
   ACTIVE_CONFIG = newConfig; 
 
-  lb = new LoadBalancer({
+  lb = createLoadBalancer({
     strategy: newConfig.server.loadBalancing.strategy,
     upstreams: newConfig.server.upstreams,
     virtualNodes: newConfig.server.loadBalancing.virtualNodes,
@@ -202,7 +202,7 @@ export async function createServer(config: CreateServerConfig) {
 
     metricsRegistry = new MetricsRegistry(HEALTHY_UPSTREAMS);
 
-    lb = new LoadBalancer({
+    lb = createLoadBalancer({
       strategy: ACTIVE_CONFIG.server.loadBalancing.strategy,
       upstreams: ACTIVE_CONFIG.server.upstreams,
       virtualNodes: ACTIVE_CONFIG.server.loadBalancing.virtualNodes,

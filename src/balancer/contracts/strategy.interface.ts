@@ -1,6 +1,11 @@
+import type { UpstreamState } from "../../types/upstream.types.js";
+
 export interface IStrategy {
   pick(
-    candidates: import("../../types/upstream.types.js").UpstreamState[],
+    candidates: UpstreamState[],
     clientIp?: string,
-  ): import("../../types/upstream.types.js").UpstreamState | null;
+    cookies?: string,
+  ): UpstreamState | null;
+
+  onUpstreamsChanged?(upstreams: UpstreamState[]): void;
 }

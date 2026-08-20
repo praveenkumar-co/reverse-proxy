@@ -15,6 +15,6 @@ export function parseCacheControl(header: string): CacheControlDirectives {
     else if (part === 'private') result.private = true;
     else if (part.startsWith('max-age=')) result.maxAge = parseInt(part.split('=')[1]!, 10);
     else if (part.startsWith('s-maxage=')) result.sMaxAge = parseInt(part.split('=')[1]!, 10);
-  }
-  return result;
+}
+return result; 
 }
