@@ -36,15 +36,21 @@ export async function checkUpstream(upstream: {
         port: upstreamUrl.port || (isHttps ? "443" : "80"),
         path: upstream.healthPath ?? "/health",
         method: "GET",
+        timeout: 5000,
         ...(isHttps && {
           rejectUnauthorized,
           ...(caBuffer ? { ca: caBuffer } : {}),
         }),
       },
       (res) => {
+        res.resume();
         resolve(res.statusCode === 200);
       },
     );
+    req.on("timeout", () => {
+      req.destroy();
+      resolve(false);
+    });
     req.on("error", () => resolve(false));
     req.end();
   });

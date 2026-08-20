@@ -1,5 +1,5 @@
 import type { IStrategy } from '../contracts/strategy.interface.js';
-import type { UpstreamState } from '../core/upstream-state.js';
+import type { UpstreamState } from '../../types/upstream.types.js';
 
 export class WeightedLeastConnectionsStrategy implements IStrategy {
   pick(candidates: UpstreamState[]): UpstreamState | null {

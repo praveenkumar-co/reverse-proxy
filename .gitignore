@@ -13,3 +13,6 @@ composecopy.t
 Comm.t
 config.yaml
 command.t
+proxy_registry_backup.json
+proxy_registry_backup.test.json
+explain.t

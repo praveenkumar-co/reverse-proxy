@@ -1,6 +1,5 @@
 import { promises as fs } from "fs";
 import { existsSync } from "fs";
-import path from "path";
 import { logger } from "../../observability/logger/logger.js";
 
 export interface ServiceInstance {
@@ -25,11 +24,11 @@ export class ServiceRegistry {
   private onRegisterCallbacks: ((service: ServiceInstance) => void)[] = [];
   private onDeregisterCallbacks: ((service: ServiceInstance) => void)[] = [];
 
-  constructor(config: RegistryConfig) {
+  constructor(config: RegistryConfig){
     this.heartbeatTimeoutMs = config.heartbeatTimeoutMs ?? 30_000;
-    this.persistencePath = config.persistencePath ?? "proxy_registry_backup.json";
+    const isTest = typeof process !== "undefined" && (process.env.NODE_ENV === "test" || process.env.TAP === "1");
+    this.persistencePath = config.persistencePath ?? (isTest ? "proxy_registry_backup.test.json" : "proxy_registry_backup.json");
 
-    // Rehydrate from backup snapshot if it exists
     this.loadSnapshot();
 
     const timer = setInterval(() => {
@@ -48,7 +47,6 @@ export class ServiceRegistry {
       const now = Date.now();
       for (const key of Object.keys(saved)) {
         const item = saved[key] as ServiceInstance;
-        // Rehydrate: Reset heartbeat so it doesn't instantly timeout
         item.lastHeartbeat = now;
         item.registeredAt = now;
         this.services.set(key, item);
@@ -99,7 +97,7 @@ export class ServiceRegistry {
     this.saveSnapshot();
     return true;
   }
-
+   
   heartbeat(id: string): boolean {
     const service = this.services.get(id);
     if (!service) {
@@ -164,7 +162,7 @@ export class ServiceRegistry {
       })),
     };
   }
-}
+} 
 
 export const registry = new ServiceRegistry({
   heartbeatTimeoutMs: 30_000,

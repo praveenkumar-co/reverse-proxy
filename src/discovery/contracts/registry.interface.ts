@@ -1,6 +1,13 @@
+import type { ServiceInstance } from '../registry/dynamic.registry.js';
+
 export interface IRegistry {
-  register(service: { id: string; url: string; metadata?: Record<string, string> }): any;
-  get(id: string): { id: string; url: string; metadata?: Record<string, string> } | undefined;
-  getAll(): Array<{ id: string; url: string; metadata?: Record<string, string> }>;
-  deregister(id: string): void;
+  register(instance: Omit<ServiceInstance, 'registeredAt' | 'lastHeartbeat' | 'status'>): ServiceInstance;
+  get(id: string): ServiceInstance | undefined;
+  getAll(): ServiceInstance[];
+  getHealthy(): ServiceInstance[];
+  deregister(id: string): boolean;
+  heartbeat(id: string): boolean;
+  onRegister(cb: (service: ServiceInstance) => void): void;
+  onDeregister(cb: (service: ServiceInstance) => void): void;
+  getStats(): object;
 }

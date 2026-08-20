@@ -1,11 +1,12 @@
 import { z } from "zod";
 
 export const workerMessageSchema = z.object({
-  requestType: z.enum(["GET", "POST", "PUT", "DELETE"]),
+  requestType: z.string(),
   headers: z.any(),
   body: z.string().nullable(),
   url: z.string(),
   requestId: z.string().optional(),
+  clientIp: z.string().optional(),
 });
 
 export const workerMessageReplySchema = z.object({

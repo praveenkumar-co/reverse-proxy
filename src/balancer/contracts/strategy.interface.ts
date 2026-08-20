@@ -1,3 +1,6 @@
 export interface IStrategy {
-  pick(candidates: import('../core/upstream-state.js').UpstreamState[], clientIp?: string): import('../core/upstream-state.js').UpstreamState | null;
+  pick(
+    candidates: import("../../types/upstream.types.js").UpstreamState[],
+    clientIp?: string,
+  ): import("../../types/upstream.types.js").UpstreamState | null;
 }

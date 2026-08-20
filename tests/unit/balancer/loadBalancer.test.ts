@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert";
-import { LoadBalancer } from "../../../src/services/load-balancer.js";
+import { LoadBalancer } from "../../../src/balancer/core/load-balancer.js";
 
 // Test 1: Weighted Round-Robin distribution
 test("LoadBalancer - Weighted Round Robin", () => {

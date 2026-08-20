@@ -1,34 +1,12 @@
 import { createClient } from "redis";
 import type { RedisClientType } from "redis";
 import { logger } from "../observability/logger/logger.js";
-
-export interface DebeziumMapping {
-  table: string;
-  pathPattern: string;
-}
-
-export interface DebeziumConfig {
-  enabled: boolean;
-  channel: string;
-  mappings: DebeziumMapping[];
-}
-
-export interface CacheConfig {
-  host: string;
-  port: number;
-  ttlSeconds: number;
-  enabled: boolean;
-  l1Enabled?: boolean;
-  l1MaxSize?: number;
-  staleWhileRevalidate?: boolean;
-  staleIfError?: boolean;
-  debezium?: DebeziumConfig;
-}
-
-interface L1Entry {
-  value: string;
-  expiresAt: number;
-}
+import type {
+  DebeziumMapping,
+  DebeziumConfig,
+  CacheConfig,
+  L1Entry
+} from "./contracts/cache-config.interface.js";
 
 export class Cache {
   private client!: RedisClientType;
@@ -38,7 +16,6 @@ export class Cache {
   private config: CacheConfig;
   private connected: boolean = false;
 
-  // L1 In-Memory Cache Store
   private l1Cache = new Map<string, L1Entry>();
   private l1Keys: string[] = [];
 
@@ -189,8 +166,6 @@ export class Cache {
     if (!this.enabled) return null;
 
     const now = Date.now();
-
-    // 1. Check L1 memory cache if enabled
     if (this.config.l1Enabled) {
       const entry = this.l1Cache.get(key);
       if (entry) {
@@ -225,24 +200,26 @@ export class Cache {
     }
   }
 
-  async set(key: string, value: string): Promise<void> {
+  async set(key: string, value: string, ttlOverride?: number): Promise<void> {
     if (!this.enabled) return;
 
+    const ttl = ttlOverride ?? this.ttlSeconds;
+
     if (this.config.l1Enabled) {
-      this.setL1(key, value);
+      this.setL1(key, value, ttl);
     }
 
     if (!this.connected) return;
 
     try {
-      await this.client.set(key, value, { EX: this.ttlSeconds });
-      logger.info("Cache", `SET → ${key}`, { ttl: this.ttlSeconds });
+      await this.client.set(key, value, { EX: ttl });
+      logger.info("Cache", `SET → ${key}`, { ttl });
     } catch (err: any) {
       logger.error("Cache", `SET error: ${err.message}`);
     }
   }
 
-  private setL1(key: string, value: string) {
+  private setL1(key: string, value: string, ttl: number = this.ttlSeconds) {
     const maxSize = this.config.l1MaxSize ?? 1000;
     const now = Date.now();
 
@@ -256,7 +233,7 @@ export class Cache {
 
     this.l1Cache.set(key, {
       value,
-      expiresAt: now + this.ttlSeconds * 1000,
+      expiresAt: now + ttl * 1000,
     });
     if (!this.l1Keys.includes(key)) {
       this.l1Keys.push(key);
@@ -265,10 +242,7 @@ export class Cache {
 
   async invalidate(pattern: string): Promise<void> {
     if (!this.enabled) return;
-
-    // 1. Invalidate L1 cache
     if (this.config.l1Enabled) {
-      // Find matching keys in L1 memory cache (e.g. pattern *items*123* -> regex matching)
       const escaped = pattern.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&").replace(/\\\*/g, ".*");
       const regex = new RegExp(`^proxy:.*:${escaped}$`);
       for (const k of this.l1Cache.keys()) {

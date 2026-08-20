@@ -148,9 +148,15 @@ process.on("message", async (message: string) => {
     agent,
     headers: {
       ...msg.headers,
-      "X-Forwarded-For": msg.headers["x-forwarded-for"] || "unknown",
-      "X-Real-IP": "127.0.0.1",
+      "X-Real-IP": msg.clientIp || "unknown",
+      "X-Forwarded-For": msg.headers["x-forwarded-for"]
+        ? `${msg.headers["x-forwarded-for"]}, ${msg.clientIp || "unknown"}`
+        : (msg.clientIp || "unknown"),
       "X-Proxy-By": "Ninja-Reverse-Proxy",
+      ...(workerConfig.server.headers?.reduce((acc: any, h) => {
+        acc[h.key] = h.value === "client_ip" ? (msg.clientIp || "unknown") : h.value;
+        return acc;
+      }, {})),
       ...(msg.body && {
         "Content-Length": Buffer.byteLength(msg.body).toString(),
       }),

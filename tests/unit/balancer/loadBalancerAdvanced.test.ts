@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert";
-import { LoadBalancer } from "../../../src/services/load-balancer.js";
-import { RateLimiter } from "../../../src/middleware/rate-limiter.js";
-import { registry } from "../../../src/services/registry.js";
-import { Cache } from "../../../src/middleware/cache.js";
+import { LoadBalancer } from "../../../src/balancer/core/load-balancer.js";
+import { RateLimiter } from "../../../src/ratelimit/rate-limiter.js";
+import { registry } from "../../../src/discovery/registry/dynamic.registry.js";
+import { Cache } from "../../../src/cache/cache-manager.js";
 
 // ─── RATE LIMITER TESTS ──────────────────────────────────────────────────────
 

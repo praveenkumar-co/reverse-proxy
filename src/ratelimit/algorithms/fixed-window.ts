@@ -14,7 +14,6 @@ export class FixedWindowAlgorithm {
     }
     return false;
   }
-
   getResetTime(key: string): number {
     return this.store.get(key)?.resetTime ?? Date.now();
   }

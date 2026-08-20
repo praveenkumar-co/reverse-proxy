@@ -3,7 +3,6 @@ import type { RateLimiter } from '../ratelimit/rate-limiter.js';
 
 export function rateLimitMiddleware(limiter: RateLimiter) {
   return async (ctx: RequestContext, next: () => Promise<void>) => {
-    // Check if client is allowed (supporting context metadata for multi-dimensional policies)
     const apiKey = (ctx.req.headers['x-api-key'] as string) ?? undefined;
     const route = ctx.routePath ?? ctx.req.url ?? '';
     const allowed = await limiter.isAllowed(ctx.clientIp, {

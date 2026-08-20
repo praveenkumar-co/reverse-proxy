@@ -189,6 +189,12 @@ export class RateLimiter {
           return this.isAllowedMultiDimensionMemory(ip, context);
         });
       }
+      if (this.storage === 'hybrid' && this.redisClient) {
+        return this.isAllowedMultiDimensionHybrid(ip, context).catch((err: any) => {
+          logger.error("RateLimiter", `Hybrid multi-dimension limit failed, falling back to memory: ${err.message}`);
+          return this.isAllowedMultiDimensionMemory(ip, context);
+        });
+      }
       return this.isAllowedMultiDimensionMemory(ip, context);
     }
 
@@ -198,14 +204,81 @@ export class RateLimiter {
         return this.isAllowedMemory(ip);
       });
     }
+    if (this.storage === 'hybrid' && this.redisClient) {
+      return this.isAllowedHybrid(ip).catch((err: any) => {
+        logger.error("RateLimiter", `Hybrid limit Redis check failed, falling back to memory: ${err.message}`);
+        return this.isAllowedMemory(ip);
+      });
+    }
     return this.isAllowedMemory(ip);
   }
 
   public getRemaining(ip: string): number | Promise<number> {
-    if (this.storage === 'redis' && this.redisClient) {
+    if ((this.storage === 'redis' || this.storage === 'hybrid') && this.redisClient) {
       return this.getCurrentLoadRedis(ip).then((load) => Math.max(0, this.maxRequests - load));
     }
     return Math.max(0, this.maxRequests - this.getCurrentLoadMemory(ip));
+  }
+
+  // ─── Hybrid (L1 memory + L2 Redis) ──────────────────────────────────────────
+
+  private async isAllowedHybrid(ip: string): Promise<boolean> {
+    let limit = this.maxRequests;
+    if (this.softLimitPolicy) {
+      const localLoad = this.getCurrentLoadMemory(ip);
+      limit = this.softLimitPolicy.effectiveLimit(localLoad);
+    }
+
+    // Fast path: if L1 is already exhausted, skip Redis round-trip
+    const localLoad = this.getCurrentLoadMemory(ip);
+    if (localLoad >= limit) {
+      return false;
+    }
+
+    // Slow path: check L2 Redis
+    const allowed = await this.checkRedis(ip, limit, this.windowMs);
+    if (allowed) {
+      // Synchronize increment to L1
+      this.checkMemory(ip, limit, this.windowMs);
+    }
+    return allowed;
+  }
+
+  private async isAllowedMultiDimensionHybrid(
+    ip: string,
+    context: { apiKey?: string; route?: string; headers?: Record<string, string | string[] | undefined> }
+  ): Promise<boolean> {
+    const dimensions = this.multiDimensionPolicy!.getDimensions();
+
+    // Fast path: check all dimensions in L1 first
+    for (const d of dimensions) {
+      const val = this.getDimensionValue(d, ip, context);
+      if (val === undefined) continue;
+      const key = this.multiDimensionPolicy!.buildKey(d.dimension, val, context.route ?? '');
+      let limit = d.maxRequests;
+      if (this.softLimitPolicy) {
+        limit = this.softLimitPolicy.effectiveLimit(this.getCurrentLoadMemory(key));
+      }
+      if (this.getCurrentLoadMemory(key) >= limit) {
+        return false; // L1 exhausted — fast block, no Redis needed
+      }
+    }
+
+    // Slow path: check all dimensions in Redis (L2)
+    for (const d of dimensions) {
+      const val = this.getDimensionValue(d, ip, context);
+      if (val === undefined) continue;
+      const key = this.multiDimensionPolicy!.buildKey(d.dimension, val, context.route ?? '');
+      let limit = d.maxRequests;
+      if (this.softLimitPolicy) {
+        limit = this.softLimitPolicy.effectiveLimit(await this.getCurrentLoadRedis(key));
+      }
+      const allowed = await this.checkRedis(key, limit, d.windowMs);
+      if (!allowed) return false;
+      // Synchronize increment to L1
+      this.checkMemory(key, limit, d.windowMs);
+    }
+    return true;
   }
 
   private isAllowedMemory(ip: string): boolean {

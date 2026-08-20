@@ -35,9 +35,33 @@ export class Histogram {
 export class HistogramRegistry {
   private histograms = new Map<string, Histogram>();
 
-  getOrCreate(name: string, boundaries = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000]): Histogram {
-    if (!this.histograms.has(name)) this.histograms.set(name, new Histogram(boundaries));
+  /**
+   * Get or create a histogram by a unique name (typically includes labels).
+   * Default boundaries are suitable for millisecond latency tracking.
+   */
+  getOrCreate(
+    name: string,
+    boundaries = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000]
+  ): Histogram {
+    if (!this.histograms.has(name)) {
+      this.histograms.set(name, new Histogram(boundaries));
+    }
     return this.histograms.get(name)!;
+  }
+
+  /**
+   * Emit all histograms whose key starts with `prefix` as Prometheus text.
+   * The key format is expected to be "<prefix>:<labels>".
+   * Produces _bucket, _sum, _count lines for each entry.
+   */
+  toPrometheusAll(prefix: string): string {
+    let out = '';
+    for (const [key, histogram] of this.histograms.entries()) {
+      if (!key.startsWith(`${prefix}:`)) continue;
+      const labels = key.slice(prefix.length + 1);
+      out += histogram.toPrometheus(prefix, labels);
+    }
+    return out;
   }
 }
 

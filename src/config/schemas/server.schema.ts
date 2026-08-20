@@ -3,6 +3,7 @@ import { loadBalancerSchema } from "./balancer.schema.js";
 import { cacheSchema } from "./cache.schema.js";
 import { resilienceSchema } from "./resilience.schema.js";
 import { rateLimitSchema } from "./ratelimit.schema.js";
+import { discoverySchema } from "./discovery.schema.js";
 
 const upstreamTlsSchema = z
   .object({
@@ -47,6 +48,7 @@ const pathRuleSchema = z.object({
   upstream: z.array(z.string()),
   rateLimit: pathRateLimitSchema,
   sticky: z.boolean().default(false),
+  cache: z.object({ enabled: z.boolean().default(true), ttlSeconds: z.number().optional() }).optional(),
 });
 
 export const serverSchema = z.object({
@@ -58,6 +60,8 @@ export const serverSchema = z.object({
   compression: z.boolean().default(false),
   accessLog: z.string().optional(),
   eventLog: z.string().optional(),
+  sslKeyPath: z.string().optional(),
+  sslCertPath: z.string().optional(),
   upstreams: z.array(upstreamSchema),
   headers: z.array(headerSchema).optional(),
   paths: z.array(pathRuleSchema),
@@ -65,6 +69,7 @@ export const serverSchema = z.object({
   cache: cacheSchema,
   resilience: resilienceSchema.optional(),
   rateLimit: rateLimitSchema.optional(),
+  discovery: discoverySchema.optional(),
 });
 
 export const rootConfigSchema = z.object({

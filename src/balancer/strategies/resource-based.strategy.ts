@@ -1,5 +1,5 @@
 import type { IStrategy } from '../contracts/strategy.interface.js';
-import type { UpstreamState } from '../core/upstream-state.js';
+import type { UpstreamState } from '../../types/upstream.types.js';
 import { registry } from '../../discovery/registry/dynamic.registry.js';
 
 export class ResourceBasedStrategy implements IStrategy {
@@ -18,7 +18,7 @@ export class ResourceBasedStrategy implements IStrategy {
       const cpu = parseFloat(r.metadata['cpu'] ?? '0');
       const mem = parseFloat(r.metadata['memory'] ?? '0');
       return cpu * 0.7 + mem * 0.3;
-    }
+    } 
     return 0;
   }
 }

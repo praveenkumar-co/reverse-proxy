@@ -19,6 +19,13 @@ spec:
           ports:
             - containerPort: 8080
             - containerPort: 8443
+          volumeMounts:
+            - name: config-volume
+              mountPath: /etc/ninja-proxy/config.yaml
+              subPath: config.yaml
+            - name: certs-volume
+              mountPath: /etc/ninja-proxy/certs
+              readOnly: true
           resources:
             requests:
               cpu: 100m
@@ -26,3 +33,10 @@ spec:
             limits:
               cpu: 500m
               memory: 512Mi
+      volumes:
+        - name: config-volume
+          configMap:
+            name: ninja-proxy-config
+        - name: certs-volume
+          secret:
+            secretName: ninja-proxy-certs

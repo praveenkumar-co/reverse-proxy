@@ -9,9 +9,12 @@ export const options = {
     { duration: '5m', target: 200 },
     { duration: '2m', target: 0 },
   ],
+  insecureSkipTLSVerify: true,
 };
 
+const baseUrl = __ENV.BASE_URL || 'https://localhost:8443';
+
 export default function () {
-  const res = http.get('https://localhost:8443/');
+  const res = http.get(baseUrl);
   check(res, { 'status ok': (r) => r.status < 500 });
 }

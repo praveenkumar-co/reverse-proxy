@@ -13,5 +13,7 @@ jobs:
       - run: pnpm build
       - uses: docker/build-push-action@v5
         with:
+          context: .
+          file: deploy/docker/Dockerfile
           push: true
           tags: ninja-proxy:${{ github.ref_name }}
