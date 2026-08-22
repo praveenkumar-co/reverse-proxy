@@ -22,4 +22,8 @@ async function benchmark(url: string, requests: number, concurrency: number) {
   console.log(`Done: ${completed} requests in ${elapsed}ms (${Math.round(completed / elapsed * 1000)} req/s)`);
 }
 
-benchmark('https://localhost:8443/', 1000, 10).catch(console.error);
+const url = process.argv[2] ?? 'https://localhost:8443/';
+const requests = parseInt(process.argv[3] ?? '1000', 10);
+const concurrency = parseInt(process.argv[4] ?? '10', 10);
+
+benchmark(url, requests, concurrency).catch(console.error);

@@ -13,14 +13,13 @@ export class StickySessionsStrategy implements IStrategy {
 
     if (cookies) {
       const match = cookies.match(
-        new RegExp(`(?:^|; )${this.cookieName}=([^;]*)`),
+        new RegExp(`(?:^|; )${this.cookieName}=([^;]*)`), 
       );
       if (match?.[1]) {
         const found = candidates.find((c) => c.id === match[1]);
         if (found) return found;
       }
-    }
-
+    } 
     return candidates[0]!;
   }
 }

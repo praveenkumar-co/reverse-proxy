@@ -3,6 +3,7 @@ import { logger } from "../../observability/logger/logger.js";
 import type { UpstreamState } from "../../types/upstream.types.js";
 import { circuitBreakerManager } from "../../resilience/circuit-breaker/circuit-breaker.manager.js";
 import { ClassicCircuitBreaker } from "../../resilience/circuit-breaker/classic.circuit-breaker.js";
+import { AdaptiveCircuitBreaker } from "../../resilience/circuit-breaker/adaptive.circuit-breaker.js";
 import type { IStrategy } from "../contracts/strategy.interface.js";
 
 export class LoadBalancer {
@@ -263,6 +264,7 @@ export class LoadBalancer {
           cb instanceof ClassicCircuitBreaker ? cb.getState() : "CLOSED",
         responseTime: s.responseTime,
         healthy: s.healthy,
+        ...(cb instanceof AdaptiveCircuitBreaker ? { adaptiveStats: cb.getStats() } : {}),
       });
     }
     return list;

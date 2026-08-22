@@ -104,6 +104,8 @@ export async function reloadServerConfig(newConfig: RootConfigType) {
     circuitBreaker: newConfig.server.resilience?.circuitBreaker,
   });
 
+  globalRetryBudget.setBudgetPercent(newConfig.server.resilience?.retry?.budgetPercent ?? 15);
+
   // Clear old health check interval before hot-reload creates a new LB/config
   if (healthCheckInterval) {
     clearInterval(healthCheckInterval);
@@ -245,6 +247,7 @@ export async function createServer(config: CreateServerConfig) {
       slowStartSeconds: ACTIVE_CONFIG.server.loadBalancing.slowStartSeconds,
       circuitBreaker: ACTIVE_CONFIG.server.resilience?.circuitBreaker,
     });
+    globalRetryBudget.setBudgetPercent(ACTIVE_CONFIG.server.resilience?.retry?.budgetPercent ?? 15);
     registry.onRegister((service) => {
       HEALTHY_UPSTREAMS.add(service.id);
       lb.addUpstream(service.id, service.url);

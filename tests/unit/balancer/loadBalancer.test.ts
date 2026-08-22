@@ -1,6 +1,11 @@
-import { test } from 'node:test';
+import { test, beforeEach } from 'node:test';
 import assert from 'node:assert';
 import { createLoadBalancer } from '../../../src/balancer/index.js';
+import { circuitBreakerManager } from '../../../src/resilience/circuit-breaker/circuit-breaker.manager.js';
+
+beforeEach(() => {
+  circuitBreakerManager.clear();
+});
 
 // Test 1: Weighted Round-Robin distribution
 test("LoadBalancer - Weighted Round Robin", () => {

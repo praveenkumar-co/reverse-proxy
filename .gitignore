@@ -15,4 +15,9 @@ config.yaml
 command.t
 proxy_registry_backup.json
 proxy_registry_backup.test.json
-explain.ttobeAdded.c
+explain.t
+tobeAdded.c
+scripts/**/*.js
+scripts/**/*.js.map
+scripts/**/*.d.ts
+scripts/**/*.d.ts.map

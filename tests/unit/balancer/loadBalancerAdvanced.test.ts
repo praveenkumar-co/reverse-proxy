@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert";
-import { LoadBalancer } from "../../../src/balancer/core/load-balancer.js";
+import { createLoadBalancer } from "../../../src/balancer/index.js";
 import { RateLimiter } from "../../../src/ratelimit/rate-limiter.js";
 import { registry } from "../../../src/discovery/registry/dynamic.registry.js";
 import { Cache } from "../../../src/cache/cache-manager.js";

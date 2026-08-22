@@ -23,7 +23,6 @@ export class WeightedRoundRobinStrategy implements IStrategy {
         best = s;
       }
     }
-
     if (best) {
       best.currentWeight -= totalWeight;
     }

@@ -13,6 +13,7 @@ import { IpHashStrategy } from "../strategies/ip-hash.strategy.js";
 import { StickySessionsStrategy } from "../strategies/sticky-sessions.strategy.js";
 import { ResourceBasedStrategy } from "../strategies/resource-based.strategy.js";
 import { RandomStrategy } from "../strategies/random.strategy.js";
+import { AdaptiveWrrStrategy } from "../strategies/adaptive-wrr.strategy.js";
 
 /**
  * Registers every strategy once, then creates a fully wired LoadBalancer.
@@ -50,6 +51,7 @@ export function createLoadBalancer(options: LoadBalancerOptions): LoadBalancer {
   );
   strategyRegistry.register("resource-based", new ResourceBasedStrategy());
   strategyRegistry.register("random", new RandomStrategy());
+  strategyRegistry.register("adaptive-wrr", new AdaptiveWrrStrategy(slowStartSeconds));
 
   const strategy =
     strategyRegistry.get(options.strategy) ??

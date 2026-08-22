@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { createLoadBalancer } from '../../../src/balancer/index.js';
+import { createLoadBalancer } from '../../src/balancer/index.js';
 
 test('Hot reload configuration updates', () => {
   let lb = createLoadBalancer({

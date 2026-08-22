@@ -5,6 +5,6 @@ export function createMockServer(port: number, statusCode = 200, body = 'OK'): h
     res.writeHead(statusCode, { 'Content-Type': 'text/plain' });
     res.end(body);
   });
-  server.listen(port);
+  server.listen(port, '127.0.0.1');
   return server;
 }

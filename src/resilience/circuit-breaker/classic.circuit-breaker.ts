@@ -25,7 +25,7 @@ export class ClassicCircuitBreaker implements ICircuitBreaker {
 
   public isAllowed(): boolean {
     if (this.state === "OPEN") {
-      if (Date.now() - this.lastFailureTime > this.recoveryTimeMs) {
+      if (Date.now() - this.lastFailureTime >= this.recoveryTimeMs) {
         this.state = "HALF_OPEN";
         return true;
       }

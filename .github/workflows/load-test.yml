@@ -1,10 +1,15 @@
 name: Load Test
 on:
   workflow_dispatch:
+    inputs:
+      base_url:
+        description: 'Base URL of the reverse proxy to test'
+        required: true
+        default: 'https://localhost:8443'
 jobs:
   k6:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: grafana/setup-k6-action@v1
-      - run: k6 run tests/load/k6/smoke.js
+      - run: k6 run -e BASE_URL=${{ github.event.inputs.base_url }} tests/load/k6/smoke.js

@@ -18,6 +18,10 @@ export class CircuitBreakerManager {
   get(id: string): ICircuitBreaker | undefined {
     return this.breakers.get(id);
   }
+
+  clear() {
+    this.breakers.clear();
+  }
 }
 
 export const circuitBreakerManager = new CircuitBreakerManager();

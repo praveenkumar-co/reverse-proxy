@@ -189,4 +189,14 @@ export class Cache {
       debeziumEnabled: this.config.debezium?.enabled ?? false,
     };
   }
+
+  async handleDebeziumEvent(eventJson: string): Promise<void> {
+    if (!this.invalidator) {
+      this.invalidator = new DebeziumInvalidator(
+        this.config.debezium?.mappings ?? [],
+        (pattern) => this.invalidate(pattern),
+      );
+    }
+    await this.invalidator.handle(eventJson);
+  }
 }

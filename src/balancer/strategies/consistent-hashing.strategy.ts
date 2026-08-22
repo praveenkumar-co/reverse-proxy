@@ -16,7 +16,7 @@ export class ConsistentHashingStrategy implements IStrategy {
         this.ring.push({
           hash: this.fnv1a(`${u.id}#vnode${i}`),
           id: u.id,
-        });
+        }); 
       }
     }
     this.ring.sort((a, b) => a.hash - b.hash);

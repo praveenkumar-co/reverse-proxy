@@ -7,6 +7,10 @@ export class RetryBudget {
     private decayFactor = 0.9,
   ) {}
 
+  public setBudgetPercent(percent: number) {
+    this.budgetPercent = percent;
+  }
+
   public recordRequest() {
     this.totalRequests = this.totalRequests * this.decayFactor + 1;
     this.totalRetries = this.totalRetries * this.decayFactor;
