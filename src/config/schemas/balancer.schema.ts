@@ -24,6 +24,7 @@ export const loadBalancerSchema = z
     ewmaAlpha: z.number().default(0.1),
     stickyCookieName: z.string().default("NINJA_ROUTE"),
     stickyCookieTtlMs: z.number().optional(),
+    stickyMaxAgeSeconds: z.number().optional(),
     maxConnections: z.number().optional(),
     slowStartSeconds: z.number().default(30),
     retry: z

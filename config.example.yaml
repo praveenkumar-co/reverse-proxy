@@ -1,63 +1,132 @@
+# Ninja Reverse Proxy — Documented Example Configuration
+# Copy this file to config.yaml to run the proxy.
+
 server:
-  listen: 8080
-  httpsPort: 8443
-  workers: 4
-  compression: true
+  host: "0.0.0.0"
+  port: 8080
+  workers: 0                    # 0 = auto (CPU count)
+  trustProxy: true
   connectTimeoutMs: 5000
-  readTimeoutMs: 30000
-  accessLog: access.log
-  eventLog: events.log
+  readTimeoutMs: 15000
+  compression: false
 
-  loadBalancing:
-    strategy: weighted-round-robin
-    failureThreshold: 3
-    recoveryTimeMs: 30000
-    virtualNodes: 150
-    ewmaAlpha: 0.1
-    stickyCookieName: NINJA_ROUTE
-    slowStartSeconds: 30
-    retry:
-      maxAttempts: 3
-      statusCodes: [500, 502, 503, 504]
+tls:
+  enabled: false
+  cert: "./certs/cert.pem"
+  key: "./certs/key.pem"
+  redirectHttp: true            # 301 HTTP → HTTPS when TLS enabled
+  httpsPort: 8443
 
-  resilience:
-    circuitBreaker:
-      mode: classic
-    retry:
-      baseDelayMs: 100
-      maxDelayMs: 5000
-      budgetPercent: 15
+upstreams:
+  - id: app-a
+    url: "http://127.0.0.1:3001"
+    weight: 3
+    maxConnections: 200
+  - id: app-b
+    url: "http://127.0.0.1:3002"
+    weight: 1
+    maxConnections: 200
 
-  upstreams:
-    - id: backend-1
-      url: http://localhost:3001
-      weight: 3
-      healthPath: /health
-    - id: backend-2
-      url: http://localhost:3002
-      weight: 1
-      healthPath: /health
+routes:
+  - path: "/api"
+    upstreams: ["app-a", "app-b"]
+    rateLimit:
+      windowMs: 60000
+      maxRequests: 100
+      algorithm: token-bucket
+      storage: memory
+    cache:
+      enabled: true
+      ttlSeconds: 60
+    sticky: true
 
-  paths:
-    - path: /api
-      upstream: [backend-1, backend-2]
-      rateLimit:
-        maxRequests: 100
-        windowMs: 60000
-        algorithm: sliding-window-log
-        storage: memory
-      cache:
-        enabled: true
-        ttlSeconds: 60
+loadBalancing:
+  strategy: power-of-two          # round-robin | weighted-round-robin | least-connections | weighted-least-connections | least-response-time | power-of-two | consistent-hashing | ip-hash | sticky-sessions | resource-based | random | adaptive-wrr
+  virtualNodes: 150               # consistent-hashing only (recommended 100–200)
+  ewmaAlpha: 0.1                  # least-response-time EWMA smoothing
+  stickyCookieName: "NINJA_ROUTE"
+  stickyMaxAgeSeconds: 3600
+  slowStartSeconds: 30
 
-  cache:
+resilience:
+  retry:
     enabled: true
-    host: localhost
+    maxAttempts: 3
+    backoff: full-jitter          # full-jitter | equal-jitter | decorrelated-jitter | exponential
+    baseDelayMs: 100
+    maxDelayMs: 5000
+    budgetPercent: 15             # max % of requests that may be retries
+    retryOn:
+      localNodeFailure: true
+      systemOverload: true
+  circuitBreaker:
+    mode: adaptive                # classic | adaptive
+    failureThreshold: 3
+    recoveryTimeMs: 15000
+    K: 2
+    windowMs: 10000
+  bulkhead:
+    enabled: false
+    maxConcurrentPerUpstream: 100
+
+rateLimit:
+  enabled: true
+  storage: memory                 # memory | redis | hybrid
+  algorithm: token-bucket         # fixed-window | sliding-window-log | sliding-window-counter | token-bucket | leaking-bucket
+  windowMs: 60000
+  maxRequests: 200
+  softLimit: false
+  redis:
+    host: "127.0.0.1"
     port: 6379
-    ttlSeconds: 300
-    l1Enabled: true
-    l1MaxSize: 500
-    debezium:
-      enabled: false
-      channel: dbz-events
-      mappings: []
+    keyPrefix: "rl:"
+  headers: true                   # emit X-RateLimit-* and Retry-After
+
+cache:
+  enabled: false
+  host: "127.0.0.1"
+  port: 6379
+  ttlSeconds: 60
+  l1Enabled: true
+  l1MaxSize: 10000
+  staleWhileRevalidate: true
+  staleIfError: true
+  key:
+    ignoreQueryParams: ["utm_source", "utm_medium"]
+    varyHeaders: ["Accept", "Accept-Encoding"]
+  debezium:
+    enabled: false
+    channel: "debezium.cache"
+    mappings:
+      - table: "public.users"
+        pathPattern: "/api/users*"
+
+discovery:
+  mode: static                    # static | dynamic
+  heartbeatTtlMs: 30000
+  health:
+    active:
+      enabled: true
+      intervalMs: 10000
+      timeoutMs: 2000
+      path: "/health"
+      healthyThreshold: 2
+      unhealthyThreshold: 3
+    passive:
+      enabled: true
+
+observability:
+  logging:
+    level: info                   # debug | info | warn | error
+    accessLog: true
+  metrics:
+    enabled: true
+    path: "/metrics"
+    histograms: true
+  tracing:
+    enabled: false
+    endpoint: ""
+
+admin:
+  enabled: true
+  pathPrefix: "/__admin"

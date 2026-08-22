@@ -11,7 +11,6 @@ export class PowerOfTwoStrategy implements IStrategy {
     while (i2 === i1 && candidates.length > 1) {
       i2 = Math.floor(Math.random() * candidates.length);
     }
-
     const a = candidates[i1]!;
     const b = candidates[i2]!;
     return a.activeConnections <= b.activeConnections ? a : b;

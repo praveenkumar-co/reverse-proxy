@@ -13,4 +13,3 @@ export class StrategyRegistry {
 }
 
 export const strategyRegistry = new StrategyRegistry();
- 
