@@ -10,6 +10,9 @@ import {
 import { logger } from "../../observability/logger/logger.js";
 import { tunnelWebSocket } from "../proxy/websocket.handler.js";
 import net from "net";
+import { MetricsRegistry } from "../../observability/metrics/prometheus.exporter.js";
+import { writeAccessLog } from "../../observability/logger/logger.js";
+import { tenantLogStreamer } from "../../observability/logger/tenant-log.streamer.js";
 
 const httpAgent = new http.Agent({
   keepAlive: true,
@@ -29,11 +32,32 @@ const workerConfig = await rootConfigSchema.parseAsync(
   JSON.parse(process.env["APP_CONFIG"]!),
 );
 
-process.on("message", (msgStr: string) => {
+const healthyUpstreams = new Set<string>(workerConfig.server.upstreams.map((u) => u.id));
+const metricsRegistry = new MetricsRegistry(healthyUpstreams);
+
+if (workerConfig.observability?.tenantDelivery?.mode === "webhook") {
+  tenantLogStreamer.configure(workerConfig.observability.tenantDelivery.exportEndpoints);
+}
+
+process.on("message", (rawMsg: any) => {
   try {
-    const msg = JSON.parse(msgStr);
+    const msg = typeof rawMsg === "string" ? JSON.parse(rawMsg) : rawMsg;
+    if (!msg) return;
     if (msg.type === "GRACEFUL_SHUTDOWN") {
       logger.info(`Worker:${process.pid}`, "Gracefully draining connections");
+    } else if (msg.type === "DUMP_METRICS_REQUEST") {
+      process.send?.(JSON.stringify({
+        type: "DUMP_METRICS_RESPONSE",
+        requestId: msg.requestId,
+        data: metricsRegistry.getSnapshot(),
+      }));
+    } else if (msg.type === "UPDATE_SERVICES") {
+      healthyUpstreams.clear();
+      if (msg.healthyUpstreams && Array.isArray(msg.healthyUpstreams)) {
+        for (const id of msg.healthyUpstreams) {
+          healthyUpstreams.add(id);
+        }
+      }
     }
   } catch {}
 });
@@ -77,6 +101,7 @@ process.on("message", async (message: string) => {
   };
   const upstreamUrl: string | undefined = raw.upstreamUrl;
   const requestUrl = msg.url;
+  const startTime = performance.now();
 
   const rule = workerConfig.server.paths.find((e) =>
     requestUrl.startsWith(e.path),
@@ -137,6 +162,48 @@ process.on("message", async (message: string) => {
     }
   }
 
+  const recordAndLog = (statusCode: number, bytesSent: number, latencyMs: number) => {
+    const tenantId = (msg.headers["x-tenant-id"] as string) ?? "none";
+    metricsRegistry.recordRequest(
+      msg.requestType,
+      msg.url,
+      statusCode,
+      raw.upstreamId || "unknown",
+      latencyMs,
+      tenantId
+    );
+
+    const logPath = workerConfig.observability?.logging?.accessLog === true
+      ? "logs/access.log"
+      : (typeof workerConfig.observability?.logging?.accessLog === "string" ? workerConfig.observability.logging.accessLog : undefined);
+
+    if (logPath) {
+      void writeAccessLog(
+        logPath,
+        msg.clientIp || "unknown",
+        msg.requestType,
+        msg.url,
+        statusCode,
+        bytesSent,
+        latencyMs,
+        (msg.headers["user-agent"] as string) ?? "-"
+      );
+    }
+
+    if (workerConfig.observability?.tenantDelivery?.mode === "webhook") {
+      tenantLogStreamer.queueLog(tenantId, {
+        timestamp: new Date().toISOString(),
+        clientIp: msg.clientIp || "unknown",
+        method: msg.requestType,
+        url: msg.url,
+        statusCode,
+        bytesSent,
+        latencyMs,
+        userAgent: (msg.headers["user-agent"] as string) ?? "-"
+      });
+    }
+  };
+
   let connectTimeoutTimer: NodeJS.Timeout;
   let readTimeoutTimer: NodeJS.Timeout;
 
@@ -184,6 +251,9 @@ process.on("message", async (message: string) => {
       const upstreamEncoding = upstreamRes.headers["content-encoding"];
       const forwardHeaders = { ...upstreamRes.headers };
       delete forwardHeaders["content-encoding"];
+
+      const latency = performance.now() - startTime;
+      recordAndLog(upstreamRes.statusCode ?? 200, bodyBuffer.length, latency);
 
       const sendReply = (rawBody: Buffer) => {
         if (
@@ -241,6 +311,7 @@ process.on("message", async (message: string) => {
 
   connectTimeoutTimer = setTimeout(() => {
     proxyReq.destroy();
+    recordAndLog(504, 0, workerConfig.server.connectTimeoutMs);
     const reply: WorkerReplyMessageType = {
       requestId: raw.requestId,
       errorCode: "504",
@@ -252,6 +323,7 @@ process.on("message", async (message: string) => {
 
   readTimeoutTimer = setTimeout(() => {
     proxyReq.destroy();
+    recordAndLog(504, 0, workerConfig.server.readTimeoutMs);
     const reply: WorkerReplyMessageType = {
       requestId: raw.requestId,
       errorCode: "504",
@@ -264,6 +336,8 @@ process.on("message", async (message: string) => {
   proxyReq.on("error", (err) => {
     clearTimeout(connectTimeoutTimer);
     clearTimeout(readTimeoutTimer);
+    const latency = performance.now() - startTime;
+    recordAndLog(502, 0, latency);
     const reply: WorkerReplyMessageType = {
       requestId: raw.requestId,
       errorCode: "502",

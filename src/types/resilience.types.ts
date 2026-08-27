@@ -29,6 +29,7 @@ export interface RetryConfig {
   budgetPercent: number;
 }
 export namespace ResilienceTypes {
+   // praveen : CB = Circuit Brekers
   export type CBMode = CircuitBreakerMode;
   export type CBState = CircuitBreakerState;
   export type BackoffStrategy = RetryBackoffStrategy;

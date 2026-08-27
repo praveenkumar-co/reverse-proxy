@@ -19,6 +19,7 @@ import { registry } from "../../discovery/registry/dynamic.registry.js";
 import { Cache } from "../../cache/cache-manager.js";
 import { MetricsRegistry } from "../../observability/metrics/prometheus.exporter.js";
 import { writeAccessLog, logger } from "../../observability/logger/logger.js";
+import { tenantLogStreamer } from "../../observability/logger/tenant-log.streamer.js";
 import { globalRetryBudget } from "../../resilience/retry/retry-budget.js";
 import { Bulkhead } from "../../resilience/bulkhead/bulkhead.js";
 import { calculateExponentialBackoff } from "../../resilience/retry/backoff/exponential.backoff.js";
@@ -60,10 +61,29 @@ interface PendingRequest {
 }
 const pendingRequests = new Map<string, PendingRequest>();
 
+interface MetricQueryRequest {
+  resolve: (snapshots: any[]) => void;
+  pendingWorkers: Set<number>;
+  results: any[];
+  timer: NodeJS.Timeout;
+}
+const pendingMetricQueries = new Map<string, MetricQueryRequest>();
+
 function setupWorkerMessageHandling(worker: Worker) {
   worker.on("message", async (raw: string) => {
     try {
       const parsed = JSON.parse(raw);
+      if (parsed.type === "DUMP_METRICS_RESPONSE") {
+        const query = pendingMetricQueries.get(parsed.requestId);
+        if (query) {
+          query.results.push(parsed.data);
+          query.pendingWorkers.delete(worker.id);
+          if (query.pendingWorkers.size === 0) {
+            query.resolve(query.results);
+          }
+        }
+        return;
+      }
       if (parsed.requestId) {
         const pending = pendingRequests.get(parsed.requestId);
         if (pending) {
@@ -74,6 +94,71 @@ function setupWorkerMessageHandling(worker: Worker) {
       }
     } catch (err: any) {
       logger.error("Master", `Error processing worker reply: ${err.message}`);
+    }
+  });
+}
+
+function broadcastUpstreams() {
+  const payload = JSON.stringify({
+    type: "UPDATE_SERVICES",
+    healthyUpstreams: Array.from(HEALTHY_UPSTREAMS),
+  });
+  for (const w of WORKER_POOL) {
+    if (w.isConnected()) {
+      try {
+        w.send(payload);
+      } catch {}
+    }
+  }
+}
+
+function collectWorkerMetricSnapshots(): Promise<any[]> {
+  return new Promise((resolve) => {
+    const requestId = `${Date.now()}-${Math.random()}`;
+    const activeWorkers = WORKER_POOL.filter(w => w.isConnected());
+
+    if (activeWorkers.length === 0) {
+      return resolve([]);
+    }
+
+    const pendingWorkers = new Set(activeWorkers.map(w => w.id));
+    const results: any[] = [];
+
+    const cleanup = () => {
+      const query = pendingMetricQueries.get(requestId);
+      if (query) {
+        clearTimeout(query.timer);
+        pendingMetricQueries.delete(requestId);
+      }
+    };
+
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve(results);
+    }, 500);
+
+    pendingMetricQueries.set(requestId, {
+      resolve: (data) => {
+        cleanup();
+        resolve(data);
+      },
+      pendingWorkers,
+      results,
+      timer,
+    });
+
+    const payload = JSON.stringify({ type: "DUMP_METRICS_REQUEST", requestId });
+    for (const w of activeWorkers) {
+      try {
+        w.send(payload);
+      } catch {
+        pendingWorkers.delete(w.id);
+      }
+    }
+
+    if (pendingWorkers.size === 0) {
+      cleanup();
+      resolve([]);
     }
   });
 }
@@ -164,6 +249,12 @@ export async function reloadServerConfig(newConfig: RootConfigType) {
     }
   });
 
+  if (newConfig.observability?.tenantDelivery?.mode === "webhook") {
+    tenantLogStreamer.configure(newConfig.observability.tenantDelivery.exportEndpoints);
+  } else {
+    tenantLogStreamer.stop();
+  }
+
   const oldWorkers = [...WORKER_POOL];
   WORKER_POOL.length = 0;
   const targetWorkers = newConfig.server.workers ?? 2;
@@ -175,6 +266,7 @@ export async function reloadServerConfig(newConfig: RootConfigType) {
     setupWorkerMessageHandling(worker);
     WORKER_POOL.push(worker);
   }
+  broadcastUpstreams();
 
   logger.info("Master", `Retiring ${oldWorkers.length} old workers`);
   for (const oldWorker of oldWorkers) {
@@ -252,11 +344,13 @@ export async function createServer(config: CreateServerConfig) {
       HEALTHY_UPSTREAMS.add(service.id);
       lb.addUpstream(service.id, service.url);
       lb.setHealthy(service.id, true);
+      broadcastUpstreams();
     });
 
     registry.onDeregister((service) => {
       HEALTHY_UPSTREAMS.delete(service.id);
       lb.removeUpstream(service.id);
+      broadcastUpstreams();
     });
 
     ACTIVE_CONFIG.server.upstreams.forEach((u) => {
@@ -288,6 +382,10 @@ export async function createServer(config: CreateServerConfig) {
       }
     });
 
+    if (ACTIVE_CONFIG.observability?.tenantDelivery?.mode === "webhook") {
+      tenantLogStreamer.configure(ACTIVE_CONFIG.observability.tenantDelivery.exportEndpoints);
+    }
+
     for (let i = 0; i < workerCount; i++) {
       const worker = cluster.fork({
         APP_CONFIG: JSON.stringify(ACTIVE_CONFIG),
@@ -295,6 +393,7 @@ export async function createServer(config: CreateServerConfig) {
       setupWorkerMessageHandling(worker);
       WORKER_POOL.push(worker);
     }
+    broadcastUpstreams();
 
     function dispatchToWorker(
       payload: WorkerMessageType,
@@ -521,23 +620,6 @@ export async function createServer(config: CreateServerConfig) {
               lb.releaseConnection(upstreamId!);
               res.writeHead(errorStatus);
               res.end(reply.error || "Bad Gateway");
-              metricsRegistry.recordRequest(
-                payload.requestType,
-                payload.url,
-                errorStatus,
-                upstreamId!,
-                performance.now() - startTime,
-              );
-              writeAccessLog(
-                ACTIVE_CONFIG.server.accessLog,
-                clientIp,
-                payload.requestType,
-                payload.url,
-                errorStatus,
-                0,
-                performance.now() - startTime,
-                (payload.headers["user-agent"] as string) ?? "-",
-              );
             }
           } else {
             let responseData: Buffer | string = reply.data;
@@ -557,14 +639,6 @@ export async function createServer(config: CreateServerConfig) {
             upstreamBulkheads.get(upstreamId!)?.leave();
             metricsRegistry.recordActiveConnection(upstreamId!, -1);
             lb.releaseConnection(upstreamId!);
-
-            metricsRegistry.recordRequest(
-              payload.requestType,
-              payload.url,
-              reply.statusCode ?? 200,
-              upstreamId!,
-              latencyMs,
-            );
 
             if (payload.requestType === "GET") {
               metricsRegistry.recordCacheOp("miss");
@@ -618,16 +692,7 @@ export async function createServer(config: CreateServerConfig) {
             res.writeHead(reply.statusCode ?? 200, responseHeaders);
             res.end(responseData);
 
-            writeAccessLog(
-              ACTIVE_CONFIG.server.accessLog,
-              clientIp,
-              payload.requestType,
-              payload.url,
-              reply.statusCode ?? 200,
-              responseBytes,
-              latencyMs,
-              (payload.headers["user-agent"] as string) ?? "-",
-            );
+            // Access log is written by the worker process
           }
         }
       });
@@ -761,17 +826,29 @@ export async function createServer(config: CreateServerConfig) {
         return;
       }
 
-      if (req.url === "/metrics" || req.url === "/__metrics") {
+      if (req.url?.startsWith("/metrics") || req.url?.startsWith("/__metrics")) {
+        const parsedUrl = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+        const tenantFilter = parsedUrl.searchParams.get("tenant") || undefined;
+
         res.writeHead(200, {
           "Content-Type": "text/plain; version=0.0.4; charset=utf-8",
         });
+
+        const snapshots = await collectWorkerMetricSnapshots();
         const allUpstreams = [
           ...new Set([
             ...ACTIVE_CONFIG.server.upstreams.map((u) => u.id),
             ...registry.getAll().map((s) => s.id),
           ]),
         ];
-        res.end(metricsRegistry.getExpositionFormat(allUpstreams));
+
+        const aggregatedRegistry = new MetricsRegistry(HEALTHY_UPSTREAMS);
+        aggregatedRegistry.mergeSnapshot(metricsRegistry.getSnapshot());
+        for (const snap of snapshots) {
+          aggregatedRegistry.mergeSnapshot(snap);
+        }
+
+        res.end(aggregatedRegistry.getExpositionFormat(allUpstreams, tenantFilter));
         return;
       }
 
@@ -908,6 +985,7 @@ export async function createServer(config: CreateServerConfig) {
                 ? Buffer.from(cached.body, "base64")
                 : cached.body;
               res.end(bodyBuf);
+              const tenantId = (req.headers["x-tenant-id"] as string) ?? "none";
               metricsRegistry.recordCacheOp("hit");
               metricsRegistry.recordRequest(
                 "GET",
@@ -915,6 +993,7 @@ export async function createServer(config: CreateServerConfig) {
                 cached.statusCode ?? 200,
                 "cache",
                 0,
+                tenantId,
               );
               writeAccessLog(
                 ACTIVE_CONFIG.server.accessLog,
@@ -926,6 +1005,18 @@ export async function createServer(config: CreateServerConfig) {
                 0,
                 (req.headers["user-agent"] as string) ?? "-",
               );
+              if (ACTIVE_CONFIG.observability?.tenantDelivery?.mode === "webhook") {
+                tenantLogStreamer.queueLog(tenantId, {
+                  timestamp: new Date().toISOString(),
+                  clientIp: clientIP,
+                  method: "GET",
+                  url: req.url ?? "",
+                  statusCode: cached.statusCode ?? 200,
+                  bytesSent: Buffer.byteLength(bodyBuf),
+                  latencyMs: 0,
+                  userAgent: (req.headers["user-agent"] as string) ?? "-",
+                });
+              }
               return;
             } catch {
               // fallback if cache corrup

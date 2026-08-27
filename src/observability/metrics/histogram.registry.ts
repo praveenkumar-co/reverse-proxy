@@ -30,6 +30,26 @@ export class Histogram {
     out += `${name}_count{${labels}} ${this.count}\n`;
     return out;
   }
+
+  getSnapshot() {
+    return {
+      buckets: this.buckets.map(b => ({ le: b.le, count: b.count })),
+      sum: this.sum,
+      count: this.count,
+    };
+  }
+
+  merge(other: { buckets: HistogramBucket[]; sum: number; count: number }) {
+    this.sum += other.sum;
+    this.count += other.count;
+    for (let i = 0; i < this.buckets.length; i++) {
+      const b = this.buckets[i]!;
+      const ob = other.buckets[i];
+      if (ob) {
+        b.count += ob.count;
+      }
+    }
+  }
 }
 
 export class HistogramRegistry {
@@ -62,6 +82,21 @@ export class HistogramRegistry {
       out += histogram.toPrometheus(prefix, labels);
     }
     return out;
+  }
+
+  getSnapshotAll(): Record<string, any> {
+    const snapshots: Record<string, any> = {};
+    for (const [key, histogram] of this.histograms.entries()) {
+      snapshots[key] = histogram.getSnapshot();
+    }
+    return snapshots;
+  }
+
+  mergeAll(snapshots: Record<string, any>) {
+    for (const [key, snap] of Object.entries(snapshots)) {
+      const hist = this.getOrCreate(key);
+      hist.merge(snap as any);
+    }
   }
 }
 

@@ -8,12 +8,9 @@ function mapBackwardCompatibleKeys(configParsed: any): any {
   if (!configParsed) return {};
   if (!configParsed.server) configParsed.server = {};
 
-  // 1. Port compatibility
   if (configParsed.server.listen !== undefined && configParsed.server.port === undefined) {
     configParsed.server.port = configParsed.server.listen;
   }
-
-  // 2. TLS mapping
   if (!configParsed.tls) {
     configParsed.tls = {};
   }
@@ -29,12 +26,10 @@ function mapBackwardCompatibleKeys(configParsed: any): any {
     configParsed.tls.httpsPort = configParsed.server.httpsPort;
   }
 
-  // 3. Upstreams mapping
   if (configParsed.server.upstreams !== undefined && configParsed.upstreams === undefined) {
     configParsed.upstreams = configParsed.server.upstreams;
   }
 
-  // 4. Routes / paths mapping
   if (configParsed.server.paths !== undefined && configParsed.routes === undefined) {
     configParsed.routes = configParsed.server.paths.map((p: any) => {
       const upstreams = p.upstreams || (p.upstream ? (Array.isArray(p.upstream) ? p.upstream : [p.upstream]) : []);
@@ -47,7 +42,6 @@ function mapBackwardCompatibleKeys(configParsed: any): any {
       };
     });
   } else if (configParsed.routes) {
-    // Standardize routes' upstreams plural vs singular
     configParsed.routes = configParsed.routes.map((p: any) => {
       const upstreams = p.upstreams || (p.upstream ? (Array.isArray(p.upstream) ? p.upstream : [p.upstream]) : []);
       return {
@@ -57,7 +51,6 @@ function mapBackwardCompatibleKeys(configParsed: any): any {
     });
   }
 
-  // 5. Sections mappings
   const sections = ["loadBalancing", "cache", "resilience", "rateLimit", "discovery"];
   for (const section of sections) {
     if (configParsed.server[section] !== undefined && configParsed[section] === undefined) {
@@ -65,7 +58,6 @@ function mapBackwardCompatibleKeys(configParsed: any): any {
     }
   }
 
-  // 6. Observability mapping
   if (!configParsed.observability) {
     configParsed.observability = {};
   }
@@ -76,7 +68,6 @@ function mapBackwardCompatibleKeys(configParsed: any): any {
     configParsed.observability.logging.accessLog = configParsed.server.accessLog;
   }
 
-  // 7. Retry mapping inside loadBalancing -> resilience
   if (configParsed.loadBalancing?.retry) {
     if (!configParsed.resilience) configParsed.resilience = {};
     if (!configParsed.resilience.retry) configParsed.resilience.retry = {};
@@ -84,6 +75,11 @@ function mapBackwardCompatibleKeys(configParsed: any): any {
       ...configParsed.resilience.retry,
       ...configParsed.loadBalancing.retry,
     };
+  }
+
+  if (configParsed.tenant_delivery !== undefined && configParsed.observability?.tenantDelivery === undefined) {
+    if (!configParsed.observability) configParsed.observability = {};
+    configParsed.observability.tenantDelivery = configParsed.tenant_delivery;
   }
 
   return configParsed;
@@ -185,11 +181,8 @@ export async function parseYAMLConfig(filepath: string) {
       logger.error("Config", `Error reading config.d directory: ${dirErr.message}`);
     }
   }
-
-  // Preprocess backward compatible mappings
   configParsed = mapBackwardCompatibleKeys(configParsed);
 
-  // Apply environment variable overrides
   configParsed = applyEnvironmentOverrides(configParsed);
 
   return configParsed;
