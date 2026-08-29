@@ -62,7 +62,7 @@ test('AdaptiveCircuitBreaker - allows all requests initially', () => {
 test('AdaptiveCircuitBreaker - builds up drop probability on failures', () => {
   const cb = new AdaptiveCircuitBreaker(2, 0.9);
   // Record many failures (no accepts)
-  for (let i = 0; i < 20; i++) {
+  for (let i = 0; i < 20; i++){
     cb.recordFailure();
   }
   const stats = cb.getStats();
@@ -163,7 +163,7 @@ test('calculateExponentialBackoff - no randomness, deterministic', () => {
 });
 
 test('calculateFullJitterBackoff - within [0, cap]', () => {
-  for (let i = 0; i < 20; i++) {
+  for (let i = 0; i < 20; i++){
     const delay = calculateFullJitterBackoff(3, 100, 5000);
     const cap = Math.min(5000, 100 * Math.pow(2, 3));
     assert.ok(delay >= 0 && delay <= cap, `Full jitter ${delay} out of [0, ${cap}]`);
@@ -171,7 +171,7 @@ test('calculateFullJitterBackoff - within [0, cap]', () => {
 });
 
 test('calculateEqualJitterBackoff - within [cap/2, cap]', () => {
-  for (let i = 0; i < 20; i++) {
+  for (let i = 0; i < 20; i++){
     const delay = calculateEqualJitterBackoff(2, 100, 5000);
     const cap = Math.min(5000, 100 * Math.pow(2, 2));
     assert.ok(delay >= cap / 2 && delay <= cap, `Equal jitter ${delay} out of [${cap / 2}, ${cap}]`);
@@ -180,7 +180,7 @@ test('calculateEqualJitterBackoff - within [cap/2, cap]', () => {
 
 test('calculateDecorrelatedJitterBackoff - within [base, max]', () => {
   let prev = 100;
-  for (let i = 0; i < 20; i++) {
+  for (let i = 0; i < 20; i++){
     const delay = calculateDecorrelatedJitterBackoff(i, 100, 5000, prev);
     assert.ok(delay >= 100 && delay <= 5000, `Decorrelated jitter ${delay} out of [100, 5000]`);
     prev = delay;

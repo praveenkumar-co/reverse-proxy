@@ -18,7 +18,7 @@ test('Upstream failover integration - circuit breaker tripping', () => {
   lb.recordFailure('upstream-1');
   lb.recordFailure('upstream-1');
 
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < 5; i++){
     const next = lb.pickFiltered(healthy, '127.0.0.1', new Set());
     assert.strictEqual(next, 'upstream-2');
   }

@@ -69,42 +69,42 @@ interface MetricQueryRequest {
 }
 const pendingMetricQueries = new Map<string, MetricQueryRequest>();
 
-function setupWorkerMessageHandling(worker: Worker) {
+function setupWorkerMessageHandling(worker: Worker){
   worker.on("message", async (raw: string) => {
     try {
       const parsed = JSON.parse(raw);
-      if (parsed.type === "DUMP_METRICS_RESPONSE") {
+      if (parsed.type === "DUMP_METRICS_RESPONSE"){
         const query = pendingMetricQueries.get(parsed.requestId);
-        if (query) {
+        if (query){
           query.results.push(parsed.data);
           query.pendingWorkers.delete(worker.id);
-          if (query.pendingWorkers.size === 0) {
+          if (query.pendingWorkers.size === 0){
             query.resolve(query.results);
           }
         }
         return;
       }
-      if (parsed.requestId) {
+      if (parsed.requestId){
         const pending = pendingRequests.get(parsed.requestId);
-        if (pending) {
+        if (pending){
           pendingRequests.delete(parsed.requestId);
           clearTimeout(pending.timer);
           pending.resolve(parsed);
         }
       }
-    } catch (err: any) {
+    } catch (err: any){
       logger.error("Master", `Error processing worker reply: ${err.message}`);
     }
   });
 }
 
-function broadcastUpstreams() {
+function broadcastUpstreams(){
   const payload = JSON.stringify({
     type: "UPDATE_SERVICES",
     healthyUpstreams: Array.from(HEALTHY_UPSTREAMS),
   });
-  for (const w of WORKER_POOL) {
-    if (w.isConnected()) {
+  for(const w of WORKER_POOL){
+    if (w.isConnected()){
       try {
         w.send(payload);
       } catch {}
@@ -117,7 +117,7 @@ function collectWorkerMetricSnapshots(): Promise<any[]> {
     const requestId = `${Date.now()}-${Math.random()}`;
     const activeWorkers = WORKER_POOL.filter(w => w.isConnected());
 
-    if (activeWorkers.length === 0) {
+    if (activeWorkers.length === 0){
       return resolve([]);
     }
 
@@ -126,7 +126,7 @@ function collectWorkerMetricSnapshots(): Promise<any[]> {
 
     const cleanup = () => {
       const query = pendingMetricQueries.get(requestId);
-      if (query) {
+      if (query){
         clearTimeout(query.timer);
         pendingMetricQueries.delete(requestId);
       }
@@ -148,7 +148,7 @@ function collectWorkerMetricSnapshots(): Promise<any[]> {
     });
 
     const payload = JSON.stringify({ type: "DUMP_METRICS_REQUEST", requestId });
-    for (const w of activeWorkers) {
+    for (const w of activeWorkers){
       try {
         w.send(payload);
       } catch {
@@ -156,7 +156,7 @@ function collectWorkerMetricSnapshots(): Promise<any[]> {
       }
     }
 
-    if (pendingWorkers.size === 0) {
+    if (pendingWorkers.size === 0){
       cleanup();
       resolve([]);
     }
@@ -168,14 +168,14 @@ function parseCookies(cookieHeader: string | undefined): Record<string, string> 
   if (!cookieHeader) return list;
   cookieHeader.split(";").forEach((cookie) => {
     const parts = cookie.split("=");
-    if (parts[0]) {
+    if (parts[0]){
       list[parts[0].trim()] = parts.slice(1).join("=").trim();
     }
   });
   return list;
 }
 
-export async function reloadServerConfig(newConfig: RootConfigType) {
+export async function reloadServerConfig(newConfig: RootConfigType){
   logger.info("Master", "Hot-reload initiated — rebuilding dependencies and workers");
   ACTIVE_CONFIG = newConfig; 
 
@@ -192,7 +192,7 @@ export async function reloadServerConfig(newConfig: RootConfigType) {
   globalRetryBudget.setBudgetPercent(newConfig.server.resilience?.retry?.budgetPercent ?? 15);
 
   // Clear old health check interval before hot-reload creates a new LB/config
-  if (healthCheckInterval) {
+  if (healthCheckInterval){
     clearInterval(healthCheckInterval);
     healthCheckInterval = undefined;
   }
@@ -203,7 +203,7 @@ export async function reloadServerConfig(newConfig: RootConfigType) {
     registry.register({ id: u.id, url: u.url });
   });
 
-  if (cache) {
+  if (cache){
     await cache.disconnect().catch(() => {});
   }
   cache = new Cache({
@@ -223,8 +223,8 @@ export async function reloadServerConfig(newConfig: RootConfigType) {
   upstreamBulkheads.clear();
 
   // Decouple rate-limiter Redis from the cache Redis connection
-  if (newConfig.server.rateLimit?.storage === "redis" || newConfig.server.paths.some(p => p.rateLimit?.storage === "redis")) {
-    if (!rlRedisClient) {
+  if (newConfig.server.rateLimit?.storage === "redis" || newConfig.server.paths.some(p => p.rateLimit?.storage === "redis")){
+    if (!rlRedisClient){
       rlRedisClient = createClient({
         socket: { host: newConfig.server.cache.host, port: newConfig.server.cache.port },
       }) as RedisClientType;
@@ -235,7 +235,7 @@ export async function reloadServerConfig(newConfig: RootConfigType) {
 
   newConfig.server.paths.forEach((p) => {
     const rlConfig = p.rateLimit ?? newConfig.server.rateLimit;
-    if (rlConfig) {
+    if (rlConfig){
       rateLimiters.set(
         p.path,
         new RateLimiter({
@@ -249,7 +249,7 @@ export async function reloadServerConfig(newConfig: RootConfigType) {
     }
   });
 
-  if (newConfig.observability?.tenantDelivery?.mode === "webhook") {
+  if (newConfig.observability?.tenantDelivery?.mode === "webhook"){
     tenantLogStreamer.configure(newConfig.observability.tenantDelivery.exportEndpoints);
   } else {
     tenantLogStreamer.stop();
@@ -259,7 +259,7 @@ export async function reloadServerConfig(newConfig: RootConfigType) {
   WORKER_POOL.length = 0;
   const targetWorkers = newConfig.server.workers ?? 2;
 
-  for (let i = 0; i < targetWorkers; i++) {
+  for (let i = 0; i < targetWorkers; i++){
     const worker = cluster.fork({
       APP_CONFIG: JSON.stringify(newConfig),
     });
@@ -269,11 +269,11 @@ export async function reloadServerConfig(newConfig: RootConfigType) {
   broadcastUpstreams();
 
   logger.info("Master", `Retiring ${oldWorkers.length} old workers`);
-  for (const oldWorker of oldWorkers) {
+  for (const oldWorker of oldWorkers){
     try {
       oldWorker.send(JSON.stringify({ type: "GRACEFUL_SHUTDOWN" }));
       setTimeout(() => {
-        if (!oldWorker.isDead()) {
+        if (!oldWorker.isDead()){
           oldWorker.kill("SIGTERM");
         }
       }, 15000);
@@ -281,13 +281,13 @@ export async function reloadServerConfig(newConfig: RootConfigType) {
   }
 }
 
-export async function createServer(config: CreateServerConfig) {
+export async function createServer(config: CreateServerConfig){
   ACTIVE_CONFIG = config.config;
   const { port, workerCount } = config;
 
   ACTIVE_CONFIG.server.upstreams.forEach((e) => HEALTHY_UPSTREAMS.add(e.id));
 
-  if (cluster.isPrimary) {
+  if (cluster.isPrimary){
     cache = new Cache({
       enabled: ACTIVE_CONFIG.server.cache.enabled,
       host: ACTIVE_CONFIG.server.cache.host,
@@ -302,8 +302,8 @@ export async function createServer(config: CreateServerConfig) {
     await cache.connect();
 
     // Decouple rate-limiter Redis from the cache Redis connection
-    if (ACTIVE_CONFIG.server.rateLimit?.storage === "redis" || ACTIVE_CONFIG.server.paths.some(p => p.rateLimit?.storage === "redis")) {
-      if (!rlRedisClient) {
+    if (ACTIVE_CONFIG.server.rateLimit?.storage === "redis" || ACTIVE_CONFIG.server.paths.some(p => p.rateLimit?.storage === "redis")){
+      if (!rlRedisClient){
         rlRedisClient = createClient({
           socket: { host: ACTIVE_CONFIG.server.cache.host, port: ACTIVE_CONFIG.server.cache.port },
         }) as RedisClientType;
@@ -314,7 +314,7 @@ export async function createServer(config: CreateServerConfig) {
 
     ACTIVE_CONFIG.server.paths.forEach((p) => {
       const rlConfig = p.rateLimit ?? ACTIVE_CONFIG.server.rateLimit;
-      if (rlConfig) {
+      if (rlConfig){
         rateLimiters.set(
           p.path,
           new RateLimiter({
@@ -365,14 +365,14 @@ export async function createServer(config: CreateServerConfig) {
         key: readFileSync(keyPath),
         cert: readFileSync(certPath),
       };
-    } catch (err: any) {
+    } catch (err: any){
       logger.error("Master", `Failed to load TLS certificates: ${err.message}`);
       throw err;
     }
 
     cluster.on("exit", (worker) => {
       const idx = WORKER_POOL.indexOf(worker);
-      if (idx !== -1) {
+      if (idx !== -1){
         WORKER_POOL.splice(idx, 1);
         const newWorker = cluster.fork({
           APP_CONFIG: JSON.stringify(ACTIVE_CONFIG),
@@ -382,11 +382,11 @@ export async function createServer(config: CreateServerConfig) {
       }
     });
 
-    if (ACTIVE_CONFIG.observability?.tenantDelivery?.mode === "webhook") {
+    if (ACTIVE_CONFIG.observability?.tenantDelivery?.mode === "webhook"){
       tenantLogStreamer.configure(ACTIVE_CONFIG.observability.tenantDelivery.exportEndpoints);
     }
 
-    for (let i = 0; i < workerCount; i++) {
+    for (let i = 0; i < workerCount; i++){
       const worker = cluster.fork({
         APP_CONFIG: JSON.stringify(ACTIVE_CONFIG),
       });
@@ -403,7 +403,7 @@ export async function createServer(config: CreateServerConfig) {
       attemptedUpstreams: Set<string> = new Set(),
       startTime = performance.now(),
       previousSleepMs?: number,
-    ) {
+    ){
       globalRetryBudget.recordRequest();
 
       const pathRule = ACTIVE_CONFIG.server.paths.find((p) =>
@@ -416,19 +416,19 @@ export async function createServer(config: CreateServerConfig) {
       );
 
       let upstreamId: string | null = null;
-      if (pathRule?.sticky) {
+      if (pathRule?.sticky){
         const cookies = parseCookies(payload.headers.cookie);
         const stickId = cookies[ACTIVE_CONFIG.server.loadBalancing.stickyCookieName ?? "NINJA_ROUTE"];
         if (
           stickId &&
           routeHealthyUpstreams.has(stickId) &&
           !attemptedUpstreams.has(stickId)
-        ) {
+        ){
           upstreamId = stickId;
         }
       }
 
-      if (!upstreamId) {
+      if (!upstreamId){
         upstreamId = lb.pickFiltered(
           routeHealthyUpstreams.size > 0 ? routeHealthyUpstreams : HEALTHY_UPSTREAMS,
           clientIp,
@@ -437,7 +437,7 @@ export async function createServer(config: CreateServerConfig) {
         );
       }
 
-      if (!upstreamId) {
+      if (!upstreamId){
         res.writeHead(503, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "No healthy upstreams available" }));
         metricsRegistry.recordRequest(
@@ -452,18 +452,18 @@ export async function createServer(config: CreateServerConfig) {
 
       attemptedUpstreams.add(upstreamId);
       let bulkhead = upstreamBulkheads.get(upstreamId);
-      if (!bulkhead) {
+      if (!bulkhead){
         const upstreamConf = ACTIVE_CONFIG.server.upstreams.find((u) => u.id === upstreamId);
         const maxConcurrent = upstreamConf?.maxConnections ?? 1000;
         bulkhead = new Bulkhead(maxConcurrent);
         upstreamBulkheads.set(upstreamId, bulkhead);
       }
 
-      if (!bulkhead.enter()) {
+      if (!bulkhead.enter()){
         logger.warn("Resilience", `Bulkhead capacity reached for upstream: ${upstreamId}`);
         const retryConfig = ACTIVE_CONFIG.server.loadBalancing.retry;
         const retryAllowed = globalRetryBudget.recordRetry();
-        if (retryAllowed && attempt < retryConfig.maxAttempts) {
+        if (retryAllowed && attempt < retryConfig.maxAttempts){
           dispatchToWorker(payload, clientIp, res, attempt + 1, attemptedUpstreams, startTime);
         } else {
           res.writeHead(503, { "Content-Type": "application/json" });
@@ -476,7 +476,7 @@ export async function createServer(config: CreateServerConfig) {
       metricsRegistry.recordActiveConnection(upstreamId, 1);
       lb.incrementConnection(upstreamId);
       const serviceInstance = registry.get(upstreamId);
-      if (!serviceInstance) {
+      if (!serviceInstance){
         upstreamBulkheads.get(upstreamId)?.leave();
         metricsRegistry.recordActiveConnection(upstreamId, -1);
         lb.releaseConnection(upstreamId);
@@ -494,7 +494,7 @@ export async function createServer(config: CreateServerConfig) {
 
       const workerIndex = (attempt === 0) ? (nextWorkerIndex++) % WORKER_POOL.length : (nextWorkerIndex + attempt) % WORKER_POOL.length;
       const worker = WORKER_POOL[workerIndex];
-      if (!worker) {
+      if (!worker){
         upstreamBulkheads.get(upstreamId)?.leave();
         metricsRegistry.recordActiveConnection(upstreamId, -1);
         lb.releaseConnection(upstreamId);
@@ -507,7 +507,7 @@ export async function createServer(config: CreateServerConfig) {
 
       const timer = setTimeout(() => {
         const pending = pendingRequests.get(requestId);
-        if (pending) {
+        if (pending){
           pendingRequests.delete(requestId);
           upstreamBulkheads.get(upstreamId!)?.leave();
           metricsRegistry.recordActiveConnection(upstreamId!, -1);
@@ -549,7 +549,7 @@ export async function createServer(config: CreateServerConfig) {
             reply.errorCode ||
             (reply.statusCode && retryConfig.statusCodes.includes(reply.statusCode));
 
-          if (isRetryable) {
+          if(isRetryable){
             logger.warn("Master", `Upstream failure: errorCode=${reply.errorCode}, status=${reply.statusCode}`, { upstreamId });
             lb.recordFailure(upstreamId!);
             passiveProbe.record({
@@ -561,8 +561,8 @@ export async function createServer(config: CreateServerConfig) {
             const isLocalFailure = errorStatus === 500 || errorStatus === 502;
             const retryAllowed = globalRetryBudget.recordRetry();
 
-            if (retryAllowed && attempt < retryConfig.maxAttempts) {
-              if (isLocalFailure) {
+            if(retryAllowed && attempt < retryConfig.maxAttempts){
+              if(isLocalFailure){
                 upstreamBulkheads.get(upstreamId!)?.leave();
                 metricsRegistry.recordActiveConnection(upstreamId!, -1);
                 lb.releaseConnection(upstreamId!);
@@ -581,7 +581,7 @@ export async function createServer(config: CreateServerConfig) {
                 const backoffType = retryConf?.backoff ?? "full-jitter";
 
                 let jitterDelay: number;
-                switch (backoffType) {
+                switch (backoffType){
                   case "exponential":
                     jitterDelay = calculateExponentialBackoff(attempt, baseDelayMs, maxDelayMs);
                     break;
@@ -623,7 +623,7 @@ export async function createServer(config: CreateServerConfig) {
             }
           } else {
             let responseData: Buffer | string = reply.data;
-            if (reply.isCompressed && reply.encoding === "gzip") {
+            if (reply.isCompressed && reply.encoding === "gzip"){
               responseData = Buffer.from(reply.data, "base64");
             }
             const latencyMs = performance.now() - startTime;
@@ -640,7 +640,7 @@ export async function createServer(config: CreateServerConfig) {
             metricsRegistry.recordActiveConnection(upstreamId!, -1);
             lb.releaseConnection(upstreamId!);
 
-            if (payload.requestType === "GET") {
+            if (payload.requestType === "GET"){
               metricsRegistry.recordCacheOp("miss");
             }
 
@@ -652,7 +652,7 @@ export async function createServer(config: CreateServerConfig) {
               !hasSetCookie &&
               !isPrivate;
 
-            if (isCacheable && payload.requestType === "GET") {
+            if (isCacheable && payload.requestType === "GET"){
               const parsedUrl = new URL(payload.url, "http://dummy");
               const cacheKey = cache.buildKey(
                 payload.requestType,
@@ -681,7 +681,7 @@ export async function createServer(config: CreateServerConfig) {
             delete responseHeaders["transfer-encoding"];
             delete responseHeaders["connection"];
 
-            if (pathRule?.sticky) {
+            if (pathRule?.sticky){
               const maxAge = ACTIVE_CONFIG.server.loadBalancing.stickyCookieTtlMs
                 ? `; Max-Age=${Math.round(ACTIVE_CONFIG.server.loadBalancing.stickyCookieTtlMs / 1000)}`
                 : "";
@@ -706,7 +706,7 @@ export async function createServer(config: CreateServerConfig) {
     }
 
     const httpServer = http.createServer((req, res) => {
-      if (req.url?.startsWith("/__registry")) {
+      if (req.url?.startsWith("/__registry")){
         httpsServer.emit("request", req, res);
         return;
       }
@@ -728,7 +728,7 @@ export async function createServer(config: CreateServerConfig) {
         url.pathname.startsWith(p.path),
       );
 
-      if (!pathRule) {
+      if (!pathRule){
         socket.destroy();
         return;
       }
@@ -748,25 +748,25 @@ export async function createServer(config: CreateServerConfig) {
         new Set(),
         req.headers.cookie,
       );
-      if (!upstreamId) {
+      if (!upstreamId){
         socket.destroy();
         return;
       }
 
       const serviceInstance = registry.get(upstreamId);
-      if (!serviceInstance) {
+      if (!serviceInstance){
         socket.destroy();
         return;
       }
 
-      if (WORKER_POOL.length === 0) {
+      if (WORKER_POOL.length === 0){
         socket.destroy();
         return;
       }
 
       const workerIndex = Math.floor(Math.random() * WORKER_POOL.length);
       const worker = WORKER_POOL[workerIndex];
-      if (!worker) {
+      if (!worker){
         socket.destroy();
         return;
       }
@@ -799,7 +799,7 @@ export async function createServer(config: CreateServerConfig) {
         req.socket.remoteAddress ??
         "unknown";
 
-      if (req.method === "OPTIONS") {
+      if (req.method === "OPTIONS"){
         res.writeHead(204, {
           "Access-Control-Allow-Origin": "*",
           "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
@@ -810,7 +810,7 @@ export async function createServer(config: CreateServerConfig) {
         return;
       }
 
-      if (req.url === "/__lb-stats") {
+      if (req.url === "/__lb-stats"){
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
           JSON.stringify(
@@ -826,7 +826,7 @@ export async function createServer(config: CreateServerConfig) {
         return;
       }
 
-      if (req.url?.startsWith("/metrics") || req.url?.startsWith("/__metrics")) {
+      if (req.url?.startsWith("/metrics") || req.url?.startsWith("/__metrics")){
         const parsedUrl = new URL(req.url, `http://${req.headers.host || "localhost"}`);
         const tenantFilter = parsedUrl.searchParams.get("tenant") || undefined;
 
@@ -844,7 +844,7 @@ export async function createServer(config: CreateServerConfig) {
 
         const aggregatedRegistry = new MetricsRegistry(HEALTHY_UPSTREAMS);
         aggregatedRegistry.mergeSnapshot(metricsRegistry.getSnapshot());
-        for (const snap of snapshots) {
+        for (const snap of snapshots){
           aggregatedRegistry.mergeSnapshot(snap);
         }
 
@@ -852,27 +852,27 @@ export async function createServer(config: CreateServerConfig) {
         return;
       }
 
-      if (req.url === "/__registry") {
+      if (req.url === "/__registry"){
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(registry.getStats(), null, 2));
         return;
       }
 
-      if (req.url === "/__ready") {
+      if (req.url === "/__ready"){
         const result = await readinessProbe.isReady();
         res.writeHead(result.ready ? 200 : 503, { "Content-Type": "application/json" });
         res.end(JSON.stringify(result));
         return;
       }
 
-      if (req.url === "/__cache-stats") {
+      if (req.url === "/__cache-stats"){
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(cache.getStats(), null, 2));
         return;
       }
 
       // Dynamic Registration Endpoints (Issue 4)
-      if (req.url === "/__registry/register" && req.method === "POST") {
+      if (req.url === "/__registry/register" && req.method === "POST"){
         let body = "";
         req.on("data", (chunk) => {
           body += chunk;
@@ -880,7 +880,7 @@ export async function createServer(config: CreateServerConfig) {
         req.on("end", () => {
           try {
             const { id, url, metadata } = JSON.parse(body);
-            if (!id || !url) {
+            if (!id || !url){
               res.writeHead(400);
               res.end(JSON.stringify({ error: "id and url are required" }));
               return;
@@ -901,11 +901,11 @@ export async function createServer(config: CreateServerConfig) {
         return;
       }
 
-      if (req.url?.startsWith("/__registry/heartbeat/") && req.method === "PUT") {
+      if (req.url?.startsWith("/__registry/heartbeat/") && req.method === "PUT"){
         const id = req.url.substring("/__registry/heartbeat/".length);
-        if (id) {
+        if (id){
           const success = registry.heartbeat(id);
-          if (success) {
+          if (success){
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ status: "OK", message: `Heartbeat for ${id} recorded` }));
           } else {
@@ -919,11 +919,11 @@ export async function createServer(config: CreateServerConfig) {
         return;
       }
 
-      if (req.url?.startsWith("/__registry/deregister/") && req.method === "DELETE") {
+      if (req.url?.startsWith("/__registry/deregister/") && req.method === "DELETE"){
         const id = req.url.substring("/__registry/deregister/".length);
-        if (id) {
+        if (id){
           const success = registry.deregister(id);
-          if (success) {
+          if (success){
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ message: `Service ${id} deregistered` }));
           } else {
@@ -943,9 +943,9 @@ export async function createServer(config: CreateServerConfig) {
       );
 
       const activeLimitConfig = pathRule?.rateLimit ?? ACTIVE_CONFIG.server.rateLimit;
-      if (activeLimitConfig && pathRule) {
+      if (activeLimitConfig && pathRule){
         const routeLimiter = rateLimiters.get(pathRule.path);
-        if (routeLimiter && !(await routeLimiter.isAllowed(clientIP))) {
+        if (routeLimiter && !(await routeLimiter.isAllowed(clientIP))){
           const retryAfter = Math.ceil(
             (routeLimiter.getResetTime(clientIP) - Date.now()) / 1000,
           );
@@ -969,12 +969,12 @@ export async function createServer(config: CreateServerConfig) {
       }
 
 
-      if (req.method === "GET") {
+      if (req.method === "GET"){
         const skipCache = url.pathname.startsWith("/api/upload/") || (pathRule?.cache?.enabled === false);
-        if (!skipCache) {
+        if (!skipCache){
           const cacheKey = cache.buildKey("GET", url.pathname + url.search);
           const cachedJson = await cache.get(cacheKey);
-          if (cachedJson) {
+          if (cachedJson){
             try {
               const cached = JSON.parse(cachedJson);
               res.writeHead(cached.statusCode ?? 200, {
@@ -1005,7 +1005,7 @@ export async function createServer(config: CreateServerConfig) {
                 0,
                 (req.headers["user-agent"] as string) ?? "-",
               );
-              if (ACTIVE_CONFIG.observability?.tenantDelivery?.mode === "webhook") {
+              if (ACTIVE_CONFIG.observability?.tenantDelivery?.mode === "webhook"){
                 tenantLogStreamer.queueLog(tenantId, {
                   timestamp: new Date().toISOString(),
                   clientIp: clientIP,
@@ -1025,11 +1025,11 @@ export async function createServer(config: CreateServerConfig) {
         }
       }
 
-      if (["POST", "PUT", "PATCH", "DELETE"].includes(req.method ?? "")) {
+      if (["POST", "PUT", "PATCH", "DELETE"].includes(req.method ?? "")){
         await cache.invalidate(url.pathname);
       }
       const contentLength = parseInt(req.headers["content-length"] ?? "0", 10);
-      if (contentLength > 10 * 1024 * 1024) { 
+      if (contentLength > 10 * 1024 * 1024){ 
         res.writeHead(413, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Payload Too Large" }));
         return;
@@ -1056,7 +1056,7 @@ export async function createServer(config: CreateServerConfig) {
     httpsServer.on("upgrade", wsUpgradeHandler);
 
     let isShuttingDown = false;
-    async function gracefulShutdown(signal: string) {
+    async function gracefulShutdown(signal: string){
       if (isShuttingDown) return;
       isShuttingDown = true;
       logger.info("Master", `Received ${signal} — draining and shutting down`);
@@ -1075,17 +1075,13 @@ export async function createServer(config: CreateServerConfig) {
 
     httpServer.listen(port);
     httpsServer.listen(ACTIVE_CONFIG.server.httpsPort ?? 8443, () => {
-      // Clear any existing health-check interval (prevents duplicates after hot-reload)
       if (healthCheckInterval) clearInterval(healthCheckInterval);
       healthCheckInterval = startHealthChecks(ACTIVE_CONFIG.server.upstreams, HEALTHY_UPSTREAMS, lb);
 
-      // Only register the passive probe listener once — never on hot-reload
-      if (!passiveProbeRegistered) {
+      if (!passiveProbeRegistered){
         registerPassiveProbeListener(HEALTHY_UPSTREAMS, lb);
         passiveProbeRegistered = true;
       }
-
-      // Register readiness checks — exposed at /__ready
       readinessProbe.register({
         name: "upstream-available",
         check: async () => HEALTHY_UPSTREAMS.size > 0,

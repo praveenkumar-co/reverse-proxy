@@ -7,7 +7,7 @@ export class LeakingBucketAlgorithm {
     const elapsed = now - bucket.lastLeak;
     const leaked = elapsed * (maxRequests / windowMs);
     const level = Math.max(0, bucket.water - leaked);
-    if (level < maxRequests) {
+    if(level < maxRequests){
       this.store.set(key, { water: level + 1, lastLeak: now });
       return true;
     }

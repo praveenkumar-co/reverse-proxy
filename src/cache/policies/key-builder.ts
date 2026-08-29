@@ -5,7 +5,7 @@ export interface KeyBuilderOptions {
 }
 
 export class KeyBuilder {
-  constructor(private opts: KeyBuilderOptions = {}) {}
+  constructor(private opts: KeyBuilderOptions = {}){}
 
   build(method: string, url: string, headers: Record<string, string> = {}): string {
     const parsed = new URL(url, 'http://dummy');

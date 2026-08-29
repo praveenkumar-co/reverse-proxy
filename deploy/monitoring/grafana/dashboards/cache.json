@@ -1,1 +1,109 @@
-{"title": "Cache", "panels": []}
+{
+  "uid": "ninja-cache",
+  "title": "Ninja Proxy — Cache",
+  "tags": ["ninja-proxy"],
+  "timezone": "browser",
+  "schemaVersion": 38,
+  "refresh": "15s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Cache Hit Rate (%)",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 0, "w": 8, "h": 6 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "100 * rate(ninja_cache_operations_total{action=\"hit\"}[5m]) / (rate(ninja_cache_operations_total{action=\"hit\"}[5m]) + rate(ninja_cache_operations_total{action=\"miss\"}[5m]))",
+          "legendFormat": "Hit Rate"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 50 },
+              { "color": "green", "value": 80 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "Total Cache Hits",
+      "type": "stat",
+      "gridPos": { "x": 8, "y": 0, "w": 8, "h": 6 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "ninja_cache_operations_total{action=\"hit\"}",
+          "legendFormat": "Total Hits"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "color": { "fixedColor": "green", "mode": "fixed" } }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Total Cache Misses",
+      "type": "stat",
+      "gridPos": { "x": 16, "y": 0, "w": 8, "h": 6 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "ninja_cache_operations_total{action=\"miss\"}",
+          "legendFormat": "Total Misses"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "color": { "fixedColor": "orange", "mode": "fixed" } }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Cache Hits vs Misses / sec",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 6, "w": 24, "h": 8 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "rate(ninja_cache_operations_total{action=\"hit\"}[1m])",
+          "legendFormat": "Hits/s"
+        },
+        {
+          "expr": "rate(ninja_cache_operations_total{action=\"miss\"}[1m])",
+          "legendFormat": "Misses/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "reqps" }
+      }
+    },
+    {
+      "id": 5,
+      "title": "Cache Offload (Requests served from cache vs proxy)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 14, "w": 24, "h": 7 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "sum(rate(ninja_http_requests_total{upstream_id=\"cache\"}[1m]))",
+          "legendFormat": "From Cache"
+        },
+        {
+          "expr": "sum(rate(ninja_http_requests_total{upstream_id!=\"cache\"}[1m]))",
+          "legendFormat": "From Upstream"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "reqps" }
+      }
+    }
+  ]
+}

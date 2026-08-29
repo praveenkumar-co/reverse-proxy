@@ -17,17 +17,16 @@ export class Cache {
   private config: CacheConfig;
   private connected = false;
 
-  constructor(config: CacheConfig) {
+  constructor(config: CacheConfig){
     this.config = config;
     this.ttlSeconds = config.ttlSeconds;
     this.enabled = config.enabled;
-
     this.client = createClient({
       socket: {
         host: config.host,
         port: config.port,
         reconnectStrategy: (retries) => {
-          if (retries > 5) {
+          if(retries > 5){
             logger.error("Cache", `Redis reconnect failed after ${retries} attempts`);
             return new Error("Redis reconnect failed");
           }
@@ -35,7 +34,6 @@ export class Cache {
         },
       },
     }) as RedisClientType;
-
     this.client.on("error", (err) => {
       logger.error("Cache", `Redis error: ${err.message}`);
       this.connected = false;
@@ -45,18 +43,17 @@ export class Cache {
       logger.info("Cache", `Redis connected at ${config.host}:${config.port}`);
       this.connected = true;
     });
-
     this.client.on("reconnecting", () => {
       logger.warn("Cache", "Redis reconnecting");
     });
     const redisStore = new RedisCache(this.client, this.ttlSeconds);
-    if (config.l1Enabled !== false) {
+    if(config.l1Enabled !== false){
       this.store = new HybridCache(
         redisStore,
         config.l1MaxSize ?? 1000,
         this.ttlSeconds,
       );
-    } else {
+    }else {
       this.store = redisStore;
     }
   }
@@ -66,7 +63,7 @@ export class Cache {
   }
 
   async connect(): Promise<void> {
-    if (!this.enabled) {
+    if(!this.enabled){
       logger.info("Cache", "Caching disabled — skipping Redis connection");
       return;
     }
@@ -74,15 +71,14 @@ export class Cache {
       await this.client.connect();
       this.connected = true;
 
-      if (this.config.debezium?.enabled) {
+      if(this.config.debezium?.enabled){
         await this.setupDebeziumSubscriber();
       }
-    } catch (err: any) {
+    } catch (err: any){
       logger.error("Cache", `Failed to connect to Redis: ${err.message}`);
       this.connected = false;
     }
   }
-
   private async setupDebeziumSubscriber(): Promise<void> {
     const dbzConfig = this.config.debezium!;
     try {
@@ -102,8 +98,6 @@ export class Cache {
         "Cache",
         `Debezium subscriber connected, listening on channel: ${dbzConfig.channel}`,
       );
-
-      // Wire the already-existing modular invalidator
       this.invalidator = new DebeziumInvalidator(
         dbzConfig.mappings ?? [],
         (pattern) => this.invalidate(pattern),
@@ -112,11 +106,11 @@ export class Cache {
       await this.subClient.subscribe(dbzConfig.channel, async (message) => {
         try {
           await this.invalidator!.handle(message);
-        } catch (err: any) {
+        } catch (err: any){
           logger.error("Cache", `Debezium handle failed: ${err.message}`);
         }
       });
-    } catch (err: any) {
+    } catch (err: any){
       logger.error("Cache", `Failed to setup Debezium subscriber: ${err.message}`);
     }
   }
@@ -126,46 +120,47 @@ export class Cache {
   }
 
   async get(key: string): Promise<string | null> {
-    if (!this.enabled) return null;
+    if(!this.enabled) return null;
     try {
       const value = await this.store.get(key);
-      if (value) {
+      if(value){
         logger.info("Cache", `HIT → ${key}`);
-      } else {
+      }
+      else {
         logger.info("Cache", `MISS → ${key}`);
       }
       return value;
-    } catch (err: any) {
+    } catch (err: any){
       logger.error("Cache", `GET error: ${err.message}`);
       return null;
     }
   }
 
   async set(key: string, value: string, ttlOverride?: number): Promise<void> {
-    if (!this.enabled) return;
+    if(!this.enabled) return;
     const ttl = ttlOverride ?? this.ttlSeconds;
     try {
       await this.store.set(key, value, ttl);
       logger.info("Cache", `SET → ${key}`, { ttl });
-    } catch (err: any) {
+    } catch (err: any){
       logger.error("Cache", `SET error: ${err.message}`);
     }
   }
 
   async invalidate(pattern: string): Promise<void> {
-    if (!this.enabled) return;
+    if(!this.enabled) return;
     try {
       await this.store.invalidate(pattern);
       logger.info("Cache", `INVALIDATED pattern`, { pattern });
-    } catch (err: any) {
+    } catch (err: any){
       logger.error("Cache", `INVALIDATE error: ${err.message}`);
     }
   }
 
   async disconnect(): Promise<void> {
-    if (this.connected) {
+    if(this.connected){
       try {
-        if (this.subClient) {
+        if(this.subClient){
           await this.subClient.quit();
         }
         await this.client.quit();
@@ -191,7 +186,7 @@ export class Cache {
   }
 
   async handleDebeziumEvent(eventJson: string): Promise<void> {
-    if (!this.invalidator) {
+    if(!this.invalidator){
       this.invalidator = new DebeziumInvalidator(
         this.config.debezium?.mappings ?? [],
         (pattern) => this.invalidate(pattern),

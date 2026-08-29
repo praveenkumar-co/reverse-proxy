@@ -5,11 +5,11 @@ export class StaleWhileRevalidate {
     return age > maxAge && !this.revalidating.has(key);
   }
 
-  markRevalidating(key: string) {
+  markRevalidating(key: string){
     this.revalidating.add(key);
   }
 
-  markDone(key: string) {
+  markDone(key: string){
     this.revalidating.delete(key);
   }
 }

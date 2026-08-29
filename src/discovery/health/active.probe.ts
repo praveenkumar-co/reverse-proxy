@@ -13,23 +13,19 @@ export async function checkUpstream(upstream: {
     const upstreamUrl = new URL(upstream.url);
     const isHttps = upstreamUrl.protocol === "https:";
     const transport = isHttps ? https : http;
-
     const tlsConfig = upstream.tls;
     const rejectUnauthorized = tlsConfig?.rejectUnauthorized ?? true;
-
-    if (isHttps && !rejectUnauthorized) {
+    if(isHttps && !rejectUnauthorized){
       logger.warn("HealthCheck", "TLS certificate verification DISABLED", { id: upstream.id });
     }
-
     let caBuffer: Buffer | undefined;
-    if (isHttps && tlsConfig?.ca) {
-      try {
+    if(isHttps && tlsConfig?.ca){
+      try{
         caBuffer = readFileSync(tlsConfig.ca);
-      } catch (err: any) {
+      }catch (err: any){
         logger.error("HealthCheck", `Failed to read CA file: ${err.message}`, { id: upstream.id, ca: tlsConfig.ca });
       }
     }
-
     const req = transport.request(
       {
         host: upstreamUrl.hostname,

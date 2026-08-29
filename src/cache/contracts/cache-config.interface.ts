@@ -2,13 +2,11 @@ export interface DebeziumMapping {
   table: string;
   pathPattern: string;
 }
-
 export interface DebeziumConfig {
   enabled: boolean;
   channel: string;
   mappings: DebeziumMapping[];
 }
-
 export interface CacheConfig {
   host: string;
   port: number;
@@ -20,7 +18,6 @@ export interface CacheConfig {
   staleIfError?: boolean;
   debezium?: DebeziumConfig;
 }
-
 export interface L1Entry {
   value: string;
   expiresAt: number;

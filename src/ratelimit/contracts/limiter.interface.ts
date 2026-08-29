@@ -1,7 +1,3 @@
-/**
- * Contract for any rate limiter implementation.
- * Matches the public API of the RateLimiter class.
- */
 export interface ILimiter {
   isAllowed(
     key: string,

@@ -2,7 +2,7 @@ import type { RequestContext } from '../core/pipeline/context.js';
 import crypto from 'node:crypto';
 import { tracer } from '../observability/tracing/tracer.js';
 
-export function tracingMiddleware() {
+export function tracingMiddleware(){
   return async (ctx: RequestContext, next: () => Promise<void>) => {
     const traceId = (ctx.req.headers['x-trace-id'] as string) ?? crypto.randomUUID();
     ctx.metadata['traceId'] = traceId;

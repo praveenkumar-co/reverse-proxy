@@ -22,7 +22,7 @@ export class Tracer {
     return span;
   }
 
-  endSpan(span: Span) {
+  endSpan(span: Span){
     span.endMs = Date.now();
   }
 

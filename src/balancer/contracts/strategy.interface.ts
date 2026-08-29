@@ -6,6 +6,5 @@ export interface IStrategy {
     clientIp?: string,
     cookies?: string,
   ): UpstreamState | null;
-
   onUpstreamsChanged?(upstreams: UpstreamState[]): void;
 }

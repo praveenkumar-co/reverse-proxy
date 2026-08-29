@@ -75,20 +75,12 @@ test("LoadBalancer - Weighted Least Connections", () => {
       { id: "srv-b", weight: 1 }
     ]
   });
-
   const healthy = new Set(["srv-a", "srv-b"]);
-
-  // Increment active connections manually on srv-b
   const pickedB = lb.pickFiltered(healthy, undefined, new Set(["srv-a"])); 
-  assert.strictEqual(pickedB, "srv-b"); // active connections: srv-a=0, srv-b=1
-
-  // srv-a: activeConnections/weight = 0/2 = 0
-  // srv-b: activeConnections/weight = 1/1 = 1
-  // srv-a should be chosen
+  assert.strictEqual(pickedB, "srv-b"); 
   const picked = lb.pickFiltered(healthy);
   assert.strictEqual(picked, "srv-a");
 });
-
 test("LoadBalancer - Least Response Time", () => {
   const lb = createLoadBalancer({
     strategy: "least-response-time",
@@ -97,10 +89,7 @@ test("LoadBalancer - Least Response Time", () => {
       { id: "srv-b" }
     ]
   });
-
   const healthy = new Set(["srv-a", "srv-b"]);
-
-  // Record mock response latencies (latency, bytes)
   lb.recordSuccess("srv-a", 100); // srv-a EWMA latency is ~100ms
   lb.recordSuccess("srv-b", 20);  // srv-b EWMA latency is ~20ms
 
@@ -165,7 +154,7 @@ test("LoadBalancer - Adaptive Weighted Round Robin", () => {
   const healthy = new Set(["srv-a", "srv-b"]);
 
   // Record extreme latency on srv-a so its effective weight drops
-  for (let i = 0; i < 20; i++) {
+  for (let i = 0; i < 20; i++){
     lb.recordSuccess("srv-a", 5000);
     lb.recordSuccess("srv-b", 5);
   }
@@ -173,7 +162,7 @@ test("LoadBalancer - Adaptive Weighted Round Robin", () => {
   // Count distribution over 100 picks
   let countA = 0;
   let countB = 0;
-  for (let i = 0; i < 100; i++) {
+  for (let i = 0; i < 100; i++){
     const picked = lb.pickFiltered(healthy);
     if (picked === "srv-a") countA++;
     if (picked === "srv-b") countB++;

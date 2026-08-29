@@ -3,7 +3,6 @@ import assert from 'node:assert';
 import net from 'net';
 
 test('WebSocket upgrading tunnels', async (t) => {
-  // Setup a mock TCP socket check to verify loopback network interface is functioning
   const client = new net.Socket();
   const connected = await new Promise<boolean>((resolve) => {
     client.connect(80, '127.0.0.1', () => {
@@ -12,9 +11,8 @@ test('WebSocket upgrading tunnels', async (t) => {
     });
     client.on('error', () => {
       client.destroy();
-      resolve(false); // Resolve false on connection failures without throwing
+      resolve(false);
     });
   });
-
   assert.ok(connected === true || connected === false);
 });

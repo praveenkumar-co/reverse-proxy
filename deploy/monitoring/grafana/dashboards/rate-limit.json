@@ -1,1 +1,131 @@
-{"title": "Rate Limit", "panels": []}
+{
+  "uid": "ninja-rate-limit",
+  "title": "Ninja Proxy — Rate Limiting",
+  "tags": ["ninja-proxy"],
+  "timezone": "browser",
+  "schemaVersion": 38,
+  "refresh": "15s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "429s / sec (Throttled Requests)",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 0, "w": 8, "h": 5 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "sum(rate(ninja_http_requests_total{status=\"429\"}[1m]))",
+          "legendFormat": "Throttled/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 10 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "Throttle Rate (%)",
+      "type": "stat",
+      "gridPos": { "x": 8, "y": 0, "w": 8, "h": 5 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "100 * sum(rate(ninja_http_requests_total{status=\"429\"}[1m])) / sum(rate(ninja_http_requests_total[1m]))",
+          "legendFormat": "Throttle %"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 5 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Total Requests Throttled (last 1h)",
+      "type": "stat",
+      "gridPos": { "x": 16, "y": 0, "w": 8, "h": 5 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "sum(increase(ninja_http_requests_total{status=\"429\"}[1h]))",
+          "legendFormat": "Total Throttled"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" }
+      }
+    },
+    {
+      "id": 4,
+      "title": "429s / sec over Time",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 5, "w": 24, "h": 8 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "sum(rate(ninja_http_requests_total{status=\"429\"}[1m]))",
+          "legendFormat": "Throttled/s"
+        },
+        {
+          "expr": "sum(rate(ninja_http_requests_total{status!=\"429\"}[1m]))",
+          "legendFormat": "Allowed/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "reqps" }
+      }
+    },
+    {
+      "id": 5,
+      "title": "429s by Path",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 13, "w": 12, "h": 7 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "sum by (path) (rate(ninja_http_requests_total{status=\"429\"}[1m]))",
+          "legendFormat": "{{path}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "reqps" }
+      }
+    },
+    {
+      "id": 6,
+      "title": "429s by Tenant",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 13, "w": 12, "h": 7 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "sum by (tenant_id) (rate(ninja_http_requests_total{status=\"429\"}[1m]))",
+          "legendFormat": "{{tenant_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "reqps" }
+      }
+    }
+  ]
+}

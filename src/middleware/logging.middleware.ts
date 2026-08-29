@@ -1,7 +1,7 @@
 import type { RequestContext } from '../core/pipeline/context.js';
 import { logger } from '../observability/logger/logger.js';
 
-export function loggingMiddleware() {
+export function loggingMiddleware(){
   return async (ctx: RequestContext, next: () => Promise<void>) => {
     await next();
     const latency = performance.now() - ctx.startTime;

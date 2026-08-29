@@ -5,7 +5,7 @@ export class SlidingWindowLogAlgorithm {
     const now = Date.now();
     let timestamps = this.store.get(key) ?? [];
     timestamps = timestamps.filter(t => now - t < windowMs);
-    if (timestamps.length < maxRequests) {
+    if(timestamps.length < maxRequests){
       timestamps.push(now);
       this.store.set(key, timestamps);
       return true;

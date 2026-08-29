@@ -8,21 +8,21 @@ export class Histogram {
   private sum = 0;
   private count = 0;
 
-  constructor(boundaries: number[]) {
+  constructor(boundaries: number[]){
     this.buckets = [...boundaries.map(le => ({ le, count: 0 })), { le: Infinity, count: 0 }];
   }
 
-  observe(value: number) {
+  observe(value: number){
     this.sum += value;
     this.count++;
-    for (const b of this.buckets) {
+    for (const b of this.buckets){
       if (value <= b.le) b.count++;
     }
   }
 
   toPrometheus(name: string, labels: string): string {
     let out = '';
-    for (const b of this.buckets) {
+    for (const b of this.buckets){
       const le = b.le === Infinity ? '+Inf' : String(b.le);
       out += `${name}_bucket{${labels},le="${le}"} ${b.count}\n`;
     }
@@ -31,7 +31,7 @@ export class Histogram {
     return out;
   }
 
-  getSnapshot() {
+  getSnapshot(){
     return {
       buckets: this.buckets.map(b => ({ le: b.le, count: b.count })),
       sum: this.sum,
@@ -39,13 +39,13 @@ export class Histogram {
     };
   }
 
-  merge(other: { buckets: HistogramBucket[]; sum: number; count: number }) {
+  merge(other: { buckets: HistogramBucket[]; sum: number; count: number }){
     this.sum += other.sum;
     this.count += other.count;
-    for (let i = 0; i < this.buckets.length; i++) {
+    for (let i = 0; i < this.buckets.length; i++){
       const b = this.buckets[i]!;
       const ob = other.buckets[i];
-      if (ob) {
+      if (ob){
         b.count += ob.count;
       }
     }
@@ -63,7 +63,7 @@ export class HistogramRegistry {
     name: string,
     boundaries = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000]
   ): Histogram {
-    if (!this.histograms.has(name)) {
+    if (!this.histograms.has(name)){
       this.histograms.set(name, new Histogram(boundaries));
     }
     return this.histograms.get(name)!;
@@ -76,7 +76,7 @@ export class HistogramRegistry {
    */
   toPrometheusAll(prefix: string): string {
     let out = '';
-    for (const [key, histogram] of this.histograms.entries()) {
+    for (const [key, histogram] of this.histograms.entries()){
       if (!key.startsWith(`${prefix}:`)) continue;
       const labels = key.slice(prefix.length + 1);
       out += histogram.toPrometheus(prefix, labels);
@@ -86,14 +86,14 @@ export class HistogramRegistry {
 
   getSnapshotAll(): Record<string, any> {
     const snapshots: Record<string, any> = {};
-    for (const [key, histogram] of this.histograms.entries()) {
+    for (const [key, histogram] of this.histograms.entries()){
       snapshots[key] = histogram.getSnapshot();
     }
     return snapshots;
   }
 
-  mergeAll(snapshots: Record<string, any>) {
-    for (const [key, snap] of Object.entries(snapshots)) {
+  mergeAll(snapshots: Record<string, any>){
+    for (const [key, snap] of Object.entries(snapshots)){
       const hist = this.getOrCreate(key);
       hist.merge(snap as any);
     }

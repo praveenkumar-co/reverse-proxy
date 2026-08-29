@@ -35,7 +35,7 @@ const workerConfig = await rootConfigSchema.parseAsync(
 const healthyUpstreams = new Set<string>(workerConfig.server.upstreams.map((u) => u.id));
 const metricsRegistry = new MetricsRegistry(healthyUpstreams);
 
-if (workerConfig.observability?.tenantDelivery?.mode === "webhook") {
+if (workerConfig.observability?.tenantDelivery?.mode === "webhook"){
   tenantLogStreamer.configure(workerConfig.observability.tenantDelivery.exportEndpoints);
 }
 
@@ -43,18 +43,18 @@ process.on("message", (rawMsg: any) => {
   try {
     const msg = typeof rawMsg === "string" ? JSON.parse(rawMsg) : rawMsg;
     if (!msg) return;
-    if (msg.type === "GRACEFUL_SHUTDOWN") {
+    if (msg.type === "GRACEFUL_SHUTDOWN"){
       logger.info(`Worker:${process.pid}`, "Gracefully draining connections");
-    } else if (msg.type === "DUMP_METRICS_REQUEST") {
+    } else if (msg.type === "DUMP_METRICS_REQUEST"){
       process.send?.(JSON.stringify({
         type: "DUMP_METRICS_RESPONSE",
         requestId: msg.requestId,
         data: metricsRegistry.getSnapshot(),
       }));
-    } else if (msg.type === "UPDATE_SERVICES") {
+    } else if (msg.type === "UPDATE_SERVICES"){
       healthyUpstreams.clear();
-      if (msg.healthyUpstreams && Array.isArray(msg.healthyUpstreams)) {
-        for (const id of msg.healthyUpstreams) {
+      if (msg.healthyUpstreams && Array.isArray(msg.healthyUpstreams)){
+        for (const id of msg.healthyUpstreams){
           healthyUpstreams.add(id);
         }
       }
@@ -65,7 +65,7 @@ process.on("message", (rawMsg: any) => {
 process.on("message", async (msgStr: string, handle?: any) => {
   try {
     const payload = JSON.parse(msgStr);
-    if (payload.type === "WEBSOCKET_UPGRADE" && handle) {
+    if (payload.type === "WEBSOCKET_UPGRADE" && handle){
       const clientSocket = handle as net.Socket;
       const head = Buffer.from(payload.head, "base64");
 
@@ -81,7 +81,7 @@ process.on("message", async (msgStr: string, handle?: any) => {
 
       tunnelWebSocket(clientSocket, payload.upstreamUrl, payload.reqFields, head, tlsConfig);
     }
-  } catch (err: any) {
+  } catch (err: any){
     logger.error(`Worker:${process.pid}`, `Websocket handoff failed: ${err.message}`);
   }
 });
@@ -107,7 +107,7 @@ process.on("message", async (message: string) => {
     requestUrl.startsWith(e.path),
   );
 
-  if (!rule) {
+  if (!rule){
     const reply: WorkerReplyMessageType = {
       requestId: raw.requestId,
       errorCode: "404",
@@ -119,13 +119,13 @@ process.on("message", async (message: string) => {
   }
 
   let finalUpstreamUrl: URL;
-  if (upstreamUrl) {
+  if (upstreamUrl){
     finalUpstreamUrl = new URL(upstreamUrl);
   } else {
     const upstream = workerConfig.server.upstreams.find(
       (e) => e.id === rule.upstream[0],
     );
-    if (!upstream) {
+    if (!upstream){
       const reply: WorkerReplyMessageType = {
         requestId: raw.requestId,
         errorCode: "500",
@@ -147,17 +147,17 @@ process.on("message", async (message: string) => {
   const tlsConfig = upstreamStaticConfig?.tls;
   const rejectUnauthorized = tlsConfig?.rejectUnauthorized ?? true;
 
-  if (isHttps && !rejectUnauthorized) {
+  if (isHttps && !rejectUnauthorized){
     logger.warn(`Worker:${process.pid}`, "TLS certificate verification DISABLED", {
       host: finalUpstreamUrl.host,
     });
   }
 
   let caBuffer: Buffer | undefined;
-  if (isHttps && tlsConfig?.ca) {
+  if (isHttps && tlsConfig?.ca){
     try {
       caBuffer = readFileSync(tlsConfig.ca);
-    } catch (err: any) {
+    } catch (err: any){
       logger.error(`Worker:${process.pid}`, `Failed to read CA file: ${err.message}`, { ca: tlsConfig.ca });
     }
   }
@@ -177,7 +177,7 @@ process.on("message", async (message: string) => {
       ? "logs/access.log"
       : (typeof workerConfig.observability?.logging?.accessLog === "string" ? workerConfig.observability.logging.accessLog : undefined);
 
-    if (logPath) {
+    if (logPath){
       void writeAccessLog(
         logPath,
         msg.clientIp || "unknown",
@@ -190,7 +190,7 @@ process.on("message", async (message: string) => {
       );
     }
 
-    if (workerConfig.observability?.tenantDelivery?.mode === "webhook") {
+    if (workerConfig.observability?.tenantDelivery?.mode === "webhook"){
       tenantLogStreamer.queueLog(tenantId, {
         timestamp: new Date().toISOString(),
         clientIp: msg.clientIp || "unknown",
@@ -260,7 +260,7 @@ process.on("message", async (message: string) => {
           workerConfig.server.compression &&
           isCompressible &&
           acceptEncoding.includes("gzip")
-        ) {
+        ){
           zlib.gzip(rawBody, (err, compressed) => {
             const reply = {
               requestId: raw.requestId,
@@ -287,9 +287,9 @@ process.on("message", async (message: string) => {
         }
       };
 
-      if (upstreamEncoding === "gzip") {
+      if (upstreamEncoding === "gzip"){
         zlib.gunzip(bodyBuffer, (err, decompressed) => {
-          if (err) {
+          if (err){
             const reply: WorkerReplyMessageType = {
               requestId: raw.requestId,
               data: bodyBuffer.toString("base64"),
@@ -347,7 +347,7 @@ process.on("message", async (message: string) => {
     if (process.send) process.send(JSON.stringify(reply));
   });
 
-  if (msg.body) {
+  if (msg.body){
     proxyReq.write(Buffer.from(msg.body, "binary"));
   }
   proxyReq.end();

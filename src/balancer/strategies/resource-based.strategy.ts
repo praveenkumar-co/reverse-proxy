@@ -4,7 +4,7 @@ import { registry } from "../../discovery/registry/dynamic.registry.js";
 
 export class ResourceBasedStrategy implements IStrategy {
   pick(candidates: UpstreamState[]): UpstreamState | null {
-    if (candidates.length === 0) return null;
+    if(candidates.length === 0) return null;
     return candidates.reduce((prev, curr) => {
       const prevScore = this.score(prev);
       const currScore = this.score(curr);
@@ -13,10 +13,10 @@ export class ResourceBasedStrategy implements IStrategy {
   }
   private score(state: UpstreamState): number {
     const svc = registry.get(state.id);
-    if (svc?.metadata) {
+    if(svc?.metadata){
       const cpu = parseFloat(svc.metadata["cpu"] ?? "0");
       const mem = parseFloat(svc.metadata["memory"] ?? "0");
-      if (!isNaN(cpu) && !isNaN(mem)) {
+      if (!isNaN(cpu) && !isNaN(mem)){
         return cpu * 0.7 + mem * 0.3;
       }
     }

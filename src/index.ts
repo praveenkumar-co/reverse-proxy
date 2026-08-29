@@ -7,25 +7,22 @@ import path from "node:path";
 import { logger } from "./observability/logger/logger.js";
 import cluster from "node:cluster";
 
-async function main() {
-  if (cluster.isPrimary) {
+async function main(){
+  if(cluster.isPrimary){
     program.option("--config <path>");
     program.parse();
-
     const options = program.opts();
-
     let configPath = (options && "config" in options) ? (options.config as string) : null;
-    if (!configPath) {
-      if (fs.existsSync("./config.yaml")) {
+    if(!configPath){
+      if(fs.existsSync("./config.yaml")){
         configPath = "./config.yaml";
-      } else if (fs.existsSync("/etc/ninja-proxy/config.yaml")) {
+      }else if (fs.existsSync("/etc/ninja-proxy/config.yaml")){
         configPath = "/etc/ninja-proxy/config.yaml";
-      } else {
+      }else {
         logger.error("Bootstrap", "No configuration file found. Please provide --config <path>");
         process.exit(1);
       }
     }
-
     const validatedConfig = await validateConfig(
       await parseYAMLConfig(configPath),
     );
@@ -35,56 +32,50 @@ async function main() {
       httpsPort: validatedConfig.server.httpsPort,
       workers: validatedConfig.server.workers ?? os.cpus().length,
     });
-
     process.on("SIGHUP", async () => {
       logger.info("Bootstrap", "SIGHUP received — reloading configuration");
-      try {
+      try{
         const rawConfig = await parseYAMLConfig(configPath);
         const newConfig = await validateConfig(rawConfig);
         await reloadServerConfig(newConfig);
         logger.configure({ eventLogPath: newConfig.server.eventLog });
         logger.info("Bootstrap", "Configuration reloaded successfully");
-      } catch (err: any) {
+      } catch (err: any){
         logger.error("Bootstrap", `Reload failed, keeping old config: ${err.message}`);
       }
     });
-
     await createServer({
       port: validatedConfig.server.listen,
       workerCount: validatedConfig.server.workers ?? os.cpus().length,
       config: validatedConfig,
     });
-
     let watchDebounceTimer: NodeJS.Timeout;
     const triggerReload = () => {
       clearTimeout(watchDebounceTimer);
       watchDebounceTimer = setTimeout(async () => {
-        try {
+        try{
           const rawConfig = await parseYAMLConfig(configPath);
           const newConfig = await validateConfig(rawConfig);
           await reloadServerConfig(newConfig);
           logger.configure({ eventLogPath: newConfig.server.eventLog });
           logger.info("Bootstrap", "Configuration reloaded automatically");
-        } catch (err: any) {
+        } catch (err: any){
           logger.error("Bootstrap", `Auto-reload failed: ${err.message}`);
         }
       }, 100);
     };
-
     fs.watch(configPath, (eventType) => {
-      if (eventType === "change") {
+      if(eventType === "change"){
         triggerReload();
       }
     });
-
     const configDir = path.join(path.dirname(configPath), "config.d");
-    if (fs.existsSync(configDir)) {
+    if(fs.existsSync(configDir)){
       fs.watch(configDir, () => {
         triggerReload();
       });
     }
   } else {
-    // Run worker logic in child processes
     await import("./core/cluster/worker.js");
   }
 }

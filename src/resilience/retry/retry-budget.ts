@@ -5,21 +5,21 @@ export class RetryBudget {
   constructor(
     private budgetPercent = 15,
     private decayFactor = 0.9,
-  ) {}
+  ){}
 
-  public setBudgetPercent(percent: number) {
+  public setBudgetPercent(percent: number){
     this.budgetPercent = percent;
   }
 
-  public recordRequest() {
+  public recordRequest(){
     this.totalRequests = this.totalRequests * this.decayFactor + 1;
     this.totalRetries = this.totalRetries * this.decayFactor;
   }
 
   public recordRetry(): boolean {
-    if (this.totalRequests >= 10) {
+    if (this.totalRequests >= 10){
       const ratio = (this.totalRetries + 1) / (this.totalRequests + 1);
-      if (ratio > this.budgetPercent / 100) {
+      if (ratio > this.budgetPercent / 100){
         return false;
       }
     }
@@ -28,7 +28,7 @@ export class RetryBudget {
     return true;
   }
 
-  public getStats() {
+  public getStats(){
     return {
       totalRequests: this.totalRequests,
       totalRetries: this.totalRetries,

@@ -4,11 +4,11 @@ export class FixedWindowAlgorithm {
   check(key: string, maxRequests: number, windowMs: number): boolean {
     const now = Date.now();
     const data = this.store.get(key);
-    if (!data || now >= data.resetTime) {
+    if(!data || now >= data.resetTime){
       this.store.set(key, { count: 1, resetTime: now + windowMs });
       return true;
     }
-    if (data.count < maxRequests) {
+    if(data.count < maxRequests){
       data.count++;
       return true;
     }

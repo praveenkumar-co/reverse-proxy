@@ -15,16 +15,10 @@ import { ResourceBasedStrategy } from "../strategies/resource-based.strategy.js"
 import { RandomStrategy } from "../strategies/random.strategy.js";
 import { AdaptiveWrrStrategy } from "../strategies/adaptive-wrr.strategy.js";
 
-/**
- * Registers every strategy once, then creates a fully wired LoadBalancer.
- * This is the only place that knows about concrete strategy classes.
- */
 export function createLoadBalancer(options: LoadBalancerOptions): LoadBalancer {
   const virtualNodes = options.virtualNodes ?? 150;
   const stickyCookieName = options.stickyCookieName ?? "NINJA_ROUTE";
   const slowStartSeconds = options.slowStartSeconds ?? 30;
-
-  // Register all strategies (idempotent — safe to call multiple times)
   strategyRegistry.register("round-robin", new RoundRobinStrategy());
   strategyRegistry.register(
     "weighted-round-robin",
@@ -56,6 +50,5 @@ export function createLoadBalancer(options: LoadBalancerOptions): LoadBalancer {
   const strategy =
     strategyRegistry.get(options.strategy) ??
     strategyRegistry.get("random")!;
-
   return new LoadBalancer(options, strategy);
 }

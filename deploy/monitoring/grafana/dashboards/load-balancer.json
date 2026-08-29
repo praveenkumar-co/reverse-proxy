@@ -1,1 +1,118 @@
-{"title": "Load Balancer", "panels": []}
+{
+  "uid": "ninja-load-balancer",
+  "title": "Ninja Proxy — Load Balancer",
+  "tags": ["ninja-proxy"],
+  "timezone": "browser",
+  "schemaVersion": 38,
+  "refresh": "15s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Requests / sec per Upstream",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "sum by (upstream_id) (rate(ninja_http_requests_total[1m]))",
+          "legendFormat": "{{upstream_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "reqps" }
+      }
+    },
+    {
+      "id": 2,
+      "title": "Active Connections per Upstream",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "ninja_active_connections",
+          "legendFormat": "{{upstream_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Upstream Health (1=UP, 0=DOWN)",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 8, "w": 8, "h": 6 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "ninja_upstream_status",
+          "legendFormat": "{{upstream_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } } }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "P95 Latency per Upstream (ms)",
+      "type": "timeseries",
+      "gridPos": { "x": 8, "y": 8, "w": 16, "h": 6 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (upstream_id, le) (rate(ninja_http_request_duration_ms_bucket[1m])))",
+          "legendFormat": "{{upstream_id}} P95"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ms" }
+      }
+    },
+    {
+      "id": 5,
+      "title": "5xx Errors per Upstream",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 14, "w": 12, "h": 7 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "sum by (upstream_id) (rate(ninja_http_requests_total{status=~\"5..\"}[1m]))",
+          "legendFormat": "{{upstream_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "color": { "fixedColor": "red", "mode": "fixed" } }
+      }
+    },
+    {
+      "id": 6,
+      "title": "Traffic Share by Upstream (%)",
+      "type": "piechart",
+      "gridPos": { "x": 12, "y": 14, "w": 12, "h": 7 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "sum by (upstream_id) (increase(ninja_http_requests_total[1h]))",
+          "legendFormat": "{{upstream_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" }
+      }
+    }
+  ]
+}

@@ -5,7 +5,7 @@ export class RedisCache implements ICache {
   constructor(
     private client: RedisClientType,
     private defaultTtl: number,
-  ) {}
+  ){}
 
   async get(key: string): Promise<string | null> {
     return this.client.get(key);
@@ -25,7 +25,7 @@ export class RedisCache implements ICache {
       : [`proxy:*:${pattern}`, `*${pattern}*`];
 
     const allKeys = new Set<string>();
-    for (const p of searchPatterns) {
+    for (const p of searchPatterns){
       try {
         const keys = await this.client.keys(p);
         keys.forEach((k) => allKeys.add(k));
@@ -34,7 +34,7 @@ export class RedisCache implements ICache {
       }
     }
 
-    if (allKeys.size > 0) {
+    if (allKeys.size > 0){
       await this.client.del([...allKeys]);
     }
   }

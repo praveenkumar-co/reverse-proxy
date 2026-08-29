@@ -1,7 +1,7 @@
 import type { RequestContext } from '../core/pipeline/context.js';
 import type { RateLimiter } from '../ratelimit/rate-limiter.js';
 
-export function rateLimitMiddleware(limiter: RateLimiter) {
+export function rateLimitMiddleware(limiter: RateLimiter){
   return async (ctx: RequestContext, next: () => Promise<void>) => {
     const apiKey = (ctx.req.headers['x-api-key'] as string) ?? undefined;
     const route = ctx.routePath ?? ctx.req.url ?? '';
@@ -21,7 +21,7 @@ export function rateLimitMiddleware(limiter: RateLimiter) {
     ctx.res.setHeader('X-RateLimit-Reset', String(reset));
     ctx.res.setHeader('X-RateLimit-Algorithm', algorithm);
 
-    if (!allowed) {
+    if (!allowed){
       ctx.res.writeHead(429, {
         'Content-Type': 'application/json',
         'Retry-After': '1',

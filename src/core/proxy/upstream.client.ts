@@ -3,15 +3,12 @@ export interface UpstreamClientConfig {
   readTimeoutMs: number;
   rejectUnauthorized?: boolean;
 }
-
 export class UpstreamClient {
-  constructor(private config: UpstreamClientConfig) {}
-
+  constructor(private config: UpstreamClientConfig){}
   getConfig(): UpstreamClientConfig {
     return this.config;
   }
-
-  updateConfig(partial: Partial<UpstreamClientConfig>) {
+  updateConfig(partial: Partial<UpstreamClientConfig>){
     Object.assign(this.config, partial);
   }
 }

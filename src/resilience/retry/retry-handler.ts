@@ -1,14 +1,14 @@
 import type { IRetryPolicy } from './contracts/retry.interface.js';
 
 export class RetryHandler {
-  constructor(private policy: IRetryPolicy) {}
+  constructor(private policy: IRetryPolicy){}
 
   async execute<T>(fn: () => Promise<T>, maxAttempts: number): Promise<T> {
     let lastError: Error | undefined;
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    for (let attempt = 0; attempt < maxAttempts; attempt++){
       try {
         return await fn();
-      } catch (err: any) {
+      } catch (err: any){
         lastError = err;
         if (!this.policy.shouldRetry(attempt, err)) break;
         const delay = this.policy.getDelay(attempt);

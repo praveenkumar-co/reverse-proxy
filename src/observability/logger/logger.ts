@@ -25,10 +25,10 @@ export class Logger {
   private minLevel: LogLevel = "INFO";
 
   configure(config: LoggerConfig): void {
-    if (config.eventLogPath !== undefined) {
+    if (config.eventLogPath !== undefined){
       this.eventLogPath = config.eventLogPath;
     }
-    if (config.minLevel !== undefined) {
+    if (config.minLevel !== undefined){
       this.minLevel = config.minLevel;
     }
   }
@@ -64,7 +64,7 @@ export class Logger {
       const fullPath = path.resolve(logPath);
       await fs.mkdir(path.dirname(fullPath), { recursive: true });
       await fs.appendFile(fullPath, line, "utf8");
-    } catch (err: any) {
+    } catch (err: any){
       this._emit("ERROR", "Logger", `Failed to write access log: ${err.message}`);
     }
   }
@@ -85,13 +85,13 @@ export class Logger {
       `${C.dim}[${ts}]${C.reset} ${C[level]}[${lvl}]${C.reset}` +
       ` ${C[level]}[${source}]${C.reset} ${message}${metaStr}`;
 
-    if (level === "ERROR") {
+    if (level === "ERROR"){
       process.stderr.write(termLine + "\n");
     } else {
       process.stdout.write(termLine + "\n");
     }
 
-    if (this.eventLogPath) {
+    if (this.eventLogPath){
       const fileLine = `[${ts}] [${lvl}] [${source}] ${message}${metaStr}\n`;
       void this._appendFile(fileLine);
     }

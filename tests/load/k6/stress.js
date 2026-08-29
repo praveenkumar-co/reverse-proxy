@@ -11,9 +11,7 @@ export const options = {
   ],
   insecureSkipTLSVerify: true,
 };
-
 const baseUrl = __ENV.BASE_URL || 'https://localhost:8443';
-
 export default function () {
   const res = http.get(baseUrl);
   check(res, { 'status ok': (r) => r.status < 500 });

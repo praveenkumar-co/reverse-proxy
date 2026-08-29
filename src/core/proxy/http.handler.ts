@@ -40,16 +40,13 @@ export function proxyRequest(opts: ProxyRequestOptions): Promise<ProxyResponse> 
         body: Buffer.concat(chunks),
       }));
     });
-
     const connectTimer = setTimeout(() => {
       req.destroy();
       reject(new Error('Connect timeout'));
     }, opts.connectTimeoutMs);
-
     req.on('response', () => clearTimeout(connectTimer));
     req.on('error', (err) => { clearTimeout(connectTimer); reject(err); });
-
-    if (opts.body) req.write(Buffer.from(opts.body, 'binary'));
+    if(opts.body) req.write(Buffer.from(opts.body, 'binary'));
     req.end();
   });
 }

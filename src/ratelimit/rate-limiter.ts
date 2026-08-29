@@ -134,45 +134,37 @@ export class RateLimiter {
   private algorithm: string;
   private storage: string;
   private redisClient?: RedisClientType | undefined;
-
-  // Delegated Algorithm instances
   private fwAlgo = new FixedWindowAlgorithm();
   private swLogAlgo = new SlidingWindowLogAlgorithm();
   private swCounterAlgo = new SlidingWindowCounterAlgorithm();
   private tbAlgo = new TokenBucketAlgorithm();
   private lbAlgo = new LeakingBucketAlgorithm();
-
-  // Integrated Policies
   private softLimitPolicy?: SoftLimitPolicy | undefined;
   private multiDimensionPolicy?: MultiDimensionPolicy | undefined;
-
-  constructor(options: RateLimiterOptions) {
+  constructor(options: RateLimiterOptions){
     this.windowMs = options.windowMs;
     this.maxRequests = options.maxRequests;
     this.algorithm = options.algorithm === "sliding-window" ? "sliding-window-log" : options.algorithm;
     this.storage = options.storage ?? "memory";
     this.redisClient = options.redisClient;
-
-    if (options.softLimit !== undefined) {
+    if(options.softLimit !== undefined){
       this.softLimitPolicy = new SoftLimitPolicy(
         this.maxRequests,
         options.softLimit,
         options.burstMultiplier ?? 1.5
       );
     }
-
-    if (options.dimensions !== undefined) {
+    if(options.dimensions !== undefined){
       this.multiDimensionPolicy = new MultiDimensionPolicy(options.dimensions);
     }
   }
-
   public getAlgorithm(): string {
     return this.algorithm;
   }
 
   public getResetTime(ip: string): number {
     const now = Date.now();
-    if (this.algorithm === "fixed-window") {
+    if(this.algorithm === "fixed-window"){
       return this.fwAlgo.getResetTime(ip);
     }
     return now + this.windowMs;
@@ -182,14 +174,14 @@ export class RateLimiter {
     ip: string,
     context?: { apiKey?: string; route?: string; headers?: Record<string, string | string[] | undefined> }
   ): boolean | Promise<boolean> {
-    if (this.multiDimensionPolicy && context) {
-      if (this.storage === 'redis' && this.redisClient) {
+    if(this.multiDimensionPolicy && context){
+      if(this.storage === 'redis' && this.redisClient){
         return this.isAllowedMultiDimensionRedis(ip, context).catch((err: any) => {
           logger.error("RateLimiter", `Redis multi-dimension limit failed, falling back to memory: ${err.message}`);
           return this.isAllowedMultiDimensionMemory(ip, context);
         });
       }
-      if (this.storage === 'hybrid' && this.redisClient) {
+      if(this.storage === 'hybrid' && this.redisClient){
         return this.isAllowedMultiDimensionHybrid(ip, context).catch((err: any) => {
           logger.error("RateLimiter", `Hybrid multi-dimension limit failed, falling back to memory: ${err.message}`);
           return this.isAllowedMultiDimensionMemory(ip, context);
@@ -198,13 +190,13 @@ export class RateLimiter {
       return this.isAllowedMultiDimensionMemory(ip, context);
     }
 
-    if (this.storage === 'redis' && this.redisClient) {
+    if (this.storage === 'redis' && this.redisClient){
       return this.isAllowedRedis(ip).catch((err: any) => {
         logger.error("RateLimiter", `Redis single-dimension limit failed, falling back to memory: ${err.message}`);
         return this.isAllowedMemory(ip);
       });
     }
-    if (this.storage === 'hybrid' && this.redisClient) {
+    if (this.storage === 'hybrid' && this.redisClient){
       return this.isAllowedHybrid(ip).catch((err: any) => {
         logger.error("RateLimiter", `Hybrid limit Redis check failed, falling back to memory: ${err.message}`);
         return this.isAllowedMemory(ip);
@@ -214,31 +206,23 @@ export class RateLimiter {
   }
 
   public getRemaining(ip: string): number | Promise<number> {
-    if ((this.storage === 'redis' || this.storage === 'hybrid') && this.redisClient) {
+    if ((this.storage === 'redis' || this.storage === 'hybrid') && this.redisClient){
       return this.getCurrentLoadRedis(ip).then((load) => Math.max(0, this.maxRequests - load));
     }
     return Math.max(0, this.maxRequests - this.getCurrentLoadMemory(ip));
   }
-
-  // ─── Hybrid (L1 memory + L2 Redis) ──────────────────────────────────────────
-
   private async isAllowedHybrid(ip: string): Promise<boolean> {
     let limit = this.maxRequests;
-    if (this.softLimitPolicy) {
+    if (this.softLimitPolicy){
       const localLoad = this.getCurrentLoadMemory(ip);
       limit = this.softLimitPolicy.effectiveLimit(localLoad);
     }
-
-    // Fast path: if L1 is already exhausted, skip Redis round-trip
     const localLoad = this.getCurrentLoadMemory(ip);
-    if (localLoad >= limit) {
+    if (localLoad >= limit){
       return false;
     }
-
-    // Slow path: check L2 Redis
     const allowed = await this.checkRedis(ip, limit, this.windowMs);
-    if (allowed) {
-      // Synchronize increment to L1
+    if (allowed){
       this.checkMemory(ip, limit, this.windowMs);
     }
     return allowed;
@@ -250,32 +234,28 @@ export class RateLimiter {
   ): Promise<boolean> {
     const dimensions = this.multiDimensionPolicy!.getDimensions();
 
-    // Fast path: check all dimensions in L1 first
-    for (const d of dimensions) {
+    for(const d of dimensions){
       const val = this.getDimensionValue(d, ip, context);
-      if (val === undefined) continue;
+      if(val === undefined) continue;
       const key = this.multiDimensionPolicy!.buildKey(d.dimension, val, context.route ?? '');
       let limit = d.maxRequests;
-      if (this.softLimitPolicy) {
+      if(this.softLimitPolicy){
         limit = this.softLimitPolicy.effectiveLimit(this.getCurrentLoadMemory(key));
       }
-      if (this.getCurrentLoadMemory(key) >= limit) {
-        return false; // L1 exhausted — fast block, no Redis needed
+      if(this.getCurrentLoadMemory(key) >= limit){
+        return false;
       }
     }
-
-    // Slow path: check all dimensions in Redis (L2)
-    for (const d of dimensions) {
+    for(const d of dimensions){
       const val = this.getDimensionValue(d, ip, context);
-      if (val === undefined) continue;
+      if(val === undefined) continue;
       const key = this.multiDimensionPolicy!.buildKey(d.dimension, val, context.route ?? '');
       let limit = d.maxRequests;
-      if (this.softLimitPolicy) {
+      if(this.softLimitPolicy){
         limit = this.softLimitPolicy.effectiveLimit(await this.getCurrentLoadRedis(key));
       }
       const allowed = await this.checkRedis(key, limit, d.windowMs);
-      if (!allowed) return false;
-      // Synchronize increment to L1
+      if(!allowed) return false;
       this.checkMemory(key, limit, d.windowMs);
     }
     return true;
@@ -283,7 +263,7 @@ export class RateLimiter {
 
   private isAllowedMemory(ip: string): boolean {
     let limit = this.maxRequests;
-    if (this.softLimitPolicy) {
+    if(this.softLimitPolicy){
       const load = this.getCurrentLoadMemory(ip);
       limit = this.softLimitPolicy.effectiveLimit(load);
     }
@@ -292,7 +272,7 @@ export class RateLimiter {
 
   private async isAllowedRedis(ip: string): Promise<boolean> {
     let limit = this.maxRequests;
-    if (this.softLimitPolicy) {
+    if(this.softLimitPolicy){
       const load = await this.getCurrentLoadRedis(ip);
       limit = this.softLimitPolicy.effectiveLimit(load);
     }
@@ -304,17 +284,17 @@ export class RateLimiter {
     context: { apiKey?: string; route?: string; headers?: Record<string, string | string[] | undefined> }
   ): boolean {
     const dimensions = this.multiDimensionPolicy!.getDimensions();
-    for (const d of dimensions) {
+    for(const d of dimensions){
       const val = this.getDimensionValue(d, ip, context);
-      if (val === undefined) continue;
+      if(val === undefined) continue;
       const key = this.multiDimensionPolicy!.buildKey(d.dimension, val, context.route ?? '');
       let limit = d.maxRequests;
-      if (this.softLimitPolicy) {
+      if(this.softLimitPolicy){
         const load = this.getCurrentLoadMemory(key);
         limit = this.softLimitPolicy.effectiveLimit(load);
       }
       const allowed = this.checkMemory(key, limit, d.windowMs);
-      if (!allowed) return false;
+      if(!allowed) return false;
     }
     return true;
   }
@@ -324,23 +304,23 @@ export class RateLimiter {
     context: { apiKey?: string; route?: string; headers?: Record<string, string | string[] | undefined> }
   ): Promise<boolean> {
     const dimensions = this.multiDimensionPolicy!.getDimensions();
-    for (const d of dimensions) {
+    for(const d of dimensions){
       const val = this.getDimensionValue(d, ip, context);
-      if (val === undefined) continue;
+      if(val === undefined) continue;
       const key = this.multiDimensionPolicy!.buildKey(d.dimension, val, context.route ?? '');
       let limit = d.maxRequests;
-      if (this.softLimitPolicy) {
+      if(this.softLimitPolicy){
         const load = await this.getCurrentLoadRedis(key);
         limit = this.softLimitPolicy.effectiveLimit(load);
       }
       const allowed = await this.checkRedis(key, limit, d.windowMs);
-      if (!allowed) return false;
+      if(!allowed) return false;
     }
     return true;
   }
 
   private checkMemory(key: string, limit: number, windowMs: number): boolean {
-    switch (this.algorithm) {
+    switch (this.algorithm){
       case "fixed-window":
         return this.fwAlgo.check(key, limit, windowMs);
       case "sliding-window-log":
@@ -361,7 +341,7 @@ export class RateLimiter {
     const now = Date.now();
     const redisKey = `rl:${this.algorithm}:${key}`;
 
-    switch (this.algorithm) {
+    switch (this.algorithm){
       case "fixed-window": {
         return (await this.evalRedisRateLimitScript(
           REDIS_RATE_LIMIT_SCRIPTS.fixedWindow,
@@ -421,7 +401,7 @@ export class RateLimiter {
 
   private getCurrentLoadMemory(key: string): number {
     const now = Date.now();
-    switch (this.algorithm) {
+    switch (this.algorithm){
       case "fixed-window": {
         const resetTime = this.fwAlgo.getResetTime(key);
         return now >= resetTime ? 0 : (this.fwAlgo["store"].get(key)?.count ?? 0);
@@ -453,7 +433,7 @@ export class RateLimiter {
     const client = this.redisClient!;
     const redisKey = `rl:${this.algorithm}:${key}`;
     try {
-      switch (this.algorithm) {
+      switch (this.algorithm){
         case "fixed-window": {
           const val = await client.get(redisKey);
           return val ? parseInt(val, 10) : 0;
@@ -473,7 +453,7 @@ export class RateLimiter {
         }
         case "sliding-window-counter": {
           const state = await client.hGetAll(redisKey);
-          if (!state || !state.currentCount) return 0;
+          if(!state || !state.currentCount) return 0;
           const currentCount = parseInt(state.currentCount, 10);
           const prevCount = parseInt(state.prevCount ?? "0", 10);
           const windowStart = parseInt(state.windowStart ?? "0", 10);
@@ -495,7 +475,7 @@ export class RateLimiter {
     ip: string,
     context: { apiKey?: string; route?: string; headers?: Record<string, string | string[] | undefined> }
   ): string | undefined {
-    switch (d.dimension) {
+    switch (d.dimension){
       case "ip":
         return ip;
       case "api-key":
@@ -503,7 +483,7 @@ export class RateLimiter {
       case "route":
         return context.route;
       case "header":
-        if (d.headerName) {
+        if(d.headerName){
           const raw = context.headers?.[d.headerName.toLowerCase()];
           return Array.isArray(raw) ? raw[0] : raw;
         }

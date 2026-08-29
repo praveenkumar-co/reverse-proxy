@@ -1,6 +1,7 @@
 name: Security Scan
 on:
   schedule:
+    # Every Monday at 12:00 AM (Midnight) UTC.GitHub will check it weekly to ensure no new security vulnerabilities have been discovered in your dependencies.
     - cron: '0 0 * * 1'
 jobs:
   audit:

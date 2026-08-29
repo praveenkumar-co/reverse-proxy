@@ -7,7 +7,7 @@ export class TokenBucketAlgorithm {
     const elapsed = now - bucket.lastRefill;
     const rate = maxRequests / windowMs;
     const newTokens = Math.min(maxRequests, bucket.tokens + elapsed * rate);
-    if (newTokens >= 1) {
+    if(newTokens >= 1){
       bucket = { tokens: newTokens - 1, lastRefill: now };
       this.store.set(key, bucket);
       return true;

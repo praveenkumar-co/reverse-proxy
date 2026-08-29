@@ -19,20 +19,20 @@ export class TenantLogStreamer {
   private readonly MAX_TENANT_QUEUE = 10000;
   private readonly MAX_GLOBAL_QUEUE = 50000;
 
-  public configure(endpoints: { tenantId: string; destination: string }[]) {
+  public configure(endpoints: { tenantId: string; destination: string }[]){
     this.endpoints.clear();
-    for (const ep of endpoints) {
+    for (const ep of endpoints){
       this.endpoints.set(ep.tenantId, ep.destination);
     }
     this.start();
   }
 
-  public queueLog(tenantId: string, log: TenantLogEntry) {
+  public queueLog(tenantId: string, log: TenantLogEntry){
     if (!this.endpoints.has(tenantId)) return; // Drop unmapped traffic immediately
     if (this.globalSize >= this.MAX_GLOBAL_QUEUE) return;
 
     let tenantQueue = this.queue.get(tenantId);
-    if (!tenantQueue) {
+    if (!tenantQueue){
       tenantQueue = [];
       this.queue.set(tenantId, tenantQueue);
     }
@@ -43,39 +43,39 @@ export class TenantLogStreamer {
     this.globalSize++;
   }
 
-  public start() {
+  public start(){
     if (this.intervalId !== null) return;
     this.intervalId = setInterval(() => this.flush(), 1000);
   }
 
-  public stop() {
-    if (this.intervalId !== null) {
+  public stop(){
+    if (this.intervalId !== null){
       clearInterval(this.intervalId);
       this.intervalId = null;
     }
   }
 
-  private async flush() {
+  private async flush(){
     if (this.globalSize === 0) return;
 
-    for (const [tenantId, entries] of this.queue.entries()) {
+    for (const [tenantId, entries] of this.queue.entries()){
       if (entries.length === 0) continue;
 
       const destination = this.endpoints.get(tenantId);
-      if (!destination) {
+      if (!destination){
         this.globalSize -= entries.length;
         this.queue.set(tenantId, []);
         continue;
       }
 
       const batch = entries.splice(0, entries.length);
-      this.globalSize -= batch.length; // Dynamic Queue Cleanup: subtract batch size
+      this.globalSize -= batch.length; 
 
       this.sendLogs(tenantId, destination, batch);
     }
   }
 
-  private async sendLogs(tenantId: string, destination: string, logs: TenantLogEntry[]) {
+  private async sendLogs(tenantId: string, destination: string, logs: TenantLogEntry[]){
     try {
       const response = await fetch(destination, {
         method: "POST",
@@ -85,10 +85,10 @@ export class TenantLogStreamer {
         },
         body: JSON.stringify({ tenantId, logs }),
       });
-      if (!response.ok) {
+      if (!response.ok){
         logger.warn(`TenantLogStreamer:${process.pid}`, `Webhook response failed for tenant ${tenantId}: ${response.statusText}`);
       }
-    } catch (err: any) {
+    } catch (err: any){
       logger.error(`TenantLogStreamer:${process.pid}`, `Failed to dispatch logs to tenant ${tenantId} webhook: ${err.message}`);
     }
   }

@@ -15,10 +15,10 @@ pipeline {
     agent { label "mylabel" }
     steps {
         echo "Installing dependencies..."
-        sh "npm install"
+        sh "corepack enable && pnpm install --frozen-lockfile"
 
         echo "Building TypeScript..."
-        sh "npm run build"
+        sh "pnpm run build"
     }
 }
         stage("SonarQube Analysis") {

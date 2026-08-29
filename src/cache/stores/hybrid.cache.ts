@@ -4,7 +4,7 @@ import { InMemoryLRU } from './in-memory-lru.js';
 export class HybridCache implements ICache {
   private l1: InMemoryLRU;
 
-  constructor(private l2: ICache, l1MaxSize: number, private defaultTtl: number) {
+  constructor(private l2: ICache, l1MaxSize: number, private defaultTtl: number){
     this.l1 = new InMemoryLRU(l1MaxSize);
   }
 
