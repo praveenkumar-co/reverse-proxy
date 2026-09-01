@@ -50,9 +50,8 @@ export class ServiceRegistry {
       logger.error("Registry", `Failed to load disk snapshot: ${err.message}`);
     }
   }
-
   private async saveSnapshot(){
-    try {
+    try{
       const plainObj: Record<string, ServiceInstance> = {};
       for(const [id, s] of this.services.entries()){
         plainObj[id] = s;
@@ -77,7 +76,6 @@ export class ServiceRegistry {
     this.saveSnapshot();
     return service;
   }
-
   deregister(id: string): boolean {
     const service = this.services.get(id);
     if(!service){
@@ -99,19 +97,15 @@ export class ServiceRegistry {
     service.status = "UP";
     return true;
   }
-
   getHealthy(): ServiceInstance[] {
     return [...this.services.values()].filter((s) => s.status === "UP");
   }
-
   getAll(): ServiceInstance[] {
     return [...this.services.values()];
   }
-
   get(id: string): ServiceInstance | undefined {
     return this.services.get(id);
   }
-
   private checkHeartbeats(): void {
     const now = Date.now();
     let changed = false;

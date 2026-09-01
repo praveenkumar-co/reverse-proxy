@@ -63,9 +63,9 @@ process.on("message", (rawMsg: any) => {
 });
 
 process.on("message", async (msgStr: string, handle?: any) => {
-  try {
+  try{
     const payload = JSON.parse(msgStr);
-    if (payload.type === "WEBSOCKET_UPGRADE" && handle){
+    if(payload.type === "WEBSOCKET_UPGRADE" && handle){
       const clientSocket = handle as net.Socket;
       const head = Buffer.from(payload.head, "base64");
 
@@ -79,9 +79,16 @@ process.on("message", async (msgStr: string, handle?: any) => {
         upstreamId: payload.upstreamId,
       });
 
-      tunnelWebSocket(clientSocket, payload.upstreamUrl, payload.reqFields, head, tlsConfig);
+      tunnelWebSocket(clientSocket, payload.upstreamUrl, payload.reqFields, head, tlsConfig, () => {
+        if(process.send){
+          process.send(JSON.stringify({
+            type: "WEBSOCKET_CLOSED",
+            upstreamId: payload.upstreamId,
+          }));
+        }
+      });
     }
-  } catch (err: any){
+  }catch(err: any){
     logger.error(`Worker:${process.pid}`, `Websocket handoff failed: ${err.message}`);
   }
 });

@@ -6,10 +6,8 @@ export interface Span {
   endMs?: number;
   attributes: Record<string, string>;
 }
-
 export class Tracer {
   private spans: Span[] = [];
-
   startSpan(name: string, traceId: string, attributes: Record<string, string> = {}): Span {
     const span: Span = {
       traceId,
@@ -21,11 +19,9 @@ export class Tracer {
     this.spans.push(span);
     return span;
   }
-
   endSpan(span: Span){
     span.endMs = Date.now();
   }
-
   flush(): Span[] {
     const out = [...this.spans];
     this.spans = [];

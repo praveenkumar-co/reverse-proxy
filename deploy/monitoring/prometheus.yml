@@ -3,7 +3,7 @@ global:
 scrape_configs:
   - job_name: ninja-proxy
     static_configs:
-      - targets: ['host.docker.internal:8443']
+      - targets: ['ninja-proxy:8443']
     scheme: https
     tls_config:
       insecure_skip_verify: true

@@ -2,6 +2,7 @@ import net from "net";
 import tls from "tls";
 import { readFileSync } from "fs";
 import { logger } from "../../observability/logger/logger.js";
+import { isCollection } from "yaml";
 
 export interface WebSocketRequestFields {
   method: string;
@@ -16,6 +17,7 @@ export function tunnelWebSocket(
   reqFields: WebSocketRequestFields,
   head: Buffer,
   tlsConfig?: { rejectUnauthorized?: boolean; ca?: string | undefined },
+  onClose?: () => void,
 ): void {
   const upstreamUrl = new URL(upstreamUrlStr);
   const isTls = upstreamUrl.protocol === "https:" || upstreamUrl.protocol === "wss:";
@@ -23,17 +25,26 @@ export function tunnelWebSocket(
   const port = parseInt(upstreamUrl.port || String(defaultPort), 10);
   const rejectUnauthorized = tlsConfig?.rejectUnauthorized ?? true;
 
-  if (isTls && !rejectUnauthorized){
+  if(isTls && !rejectUnauthorized){
     logger.warn("WebSocket", "TLS certificate verification is DISABLED", { upstreamUrl: upstreamUrlStr });
   }
   let caBuffer: Buffer | undefined;
-  if (isTls && tlsConfig?.ca){
-    try {
+  if(isTls && tlsConfig?.ca){
+    try{
       caBuffer = readFileSync(tlsConfig.ca);
-    } catch (err: any){
+    }catch(err: any){
       logger.error("WebSocket", `Failed to read CA file: ${err.message}`, { ca: tlsConfig.ca });
     }
   }
+
+  let isClosed = false;
+  const triggerClose = () => {
+    if(!isClosed){
+      isClosed = true;
+      onClose?.();
+    }
+  };
+
   let targetSocket: net.Socket;
   const onConnect = () => {
     let rawRequest = `${reqFields.method} ${reqFields.url} HTTP/${reqFields.httpVersion}\r\n`;
@@ -42,7 +53,7 @@ export function tunnelWebSocket(
         val.forEach((v) => {
           rawRequest += `${key}: ${v}\r\n`;
         });
-      } else if(val !== undefined){
+      }else if(val !== undefined){
         rawRequest += `${key}: ${val}\r\n`;
       }
     }
@@ -71,12 +82,19 @@ export function tunnelWebSocket(
       onConnect,
     );
   }
+
   targetSocket.on("error", (err) => {
     logger.error("WebSocket", `Upstream target socket error: ${err.message}`);
     clientSocket.destroy();
+    triggerClose();
   });
   clientSocket.on("error", (err) => {
     logger.error("WebSocket", `Client socket error: ${err.message}`);
     targetSocket.destroy();
+    triggerClose();
   });
+  targetSocket.on("close", triggerClose);
+  clientSocket.on("close", triggerClose);
+  targetSocket.on("end", triggerClose);
+  clientSocket.on("end", triggerClose);
 }

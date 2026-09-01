@@ -7,6 +7,21 @@ import path from "node:path";
 import { logger } from "./observability/logger/logger.js";
 import cluster from "node:cluster";
 
+// Exit code contract for watchdog / Docker restart policy:
+//   0 → intentional shutdown (SIGTERM/SIGINT) — do NOT restart
+//   1 → bad config at startup              — do NOT restart (fix config first)
+//   2 → unexpected crash                   → Docker RESTARTS the container
+process.on("uncaughtException", (err: Error) => {
+  logger.error("Bootstrap", `Uncaught exception — ${err.message}`);
+  process.exit(2);
+});
+
+process.on("unhandledRejection", (reason: unknown) => {
+  const msg = reason instanceof Error ? reason.message : String(reason);
+  logger.error("Bootstrap", `Unhandled rejection — ${msg}`);
+  process.exit(2);
+});
+
 async function main(){
   if(cluster.isPrimary){
     program.option("--config <path>");

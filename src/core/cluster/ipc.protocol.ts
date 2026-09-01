@@ -13,10 +13,7 @@ export const workerMessageReplySchema = z.object({
   requestId: z.string().optional(),
   data: z.string(),
   error: z.string().optional(),
-  errorCode: z.string().optional(),
-  statusCode: z.number().optional(),
-  isCompressed: z.boolean().optional(),
-  encoding: z.string().optional(),
+  errorCode: z.string().optional(),3
   headers: z.any().optional(),
 });
 

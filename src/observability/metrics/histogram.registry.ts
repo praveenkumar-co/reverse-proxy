@@ -11,7 +11,6 @@ export class Histogram {
   constructor(boundaries: number[]){
     this.buckets = [...boundaries.map(le => ({ le, count: 0 })), { le: Infinity, count: 0 }];
   }
-
   observe(value: number){
     this.sum += value;
     this.count++;
@@ -19,7 +18,6 @@ export class Histogram {
       if (value <= b.le) b.count++;
     }
   }
-
   toPrometheus(name: string, labels: string): string {
     let out = '';
     for (const b of this.buckets){

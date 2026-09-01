@@ -55,7 +55,7 @@ export class DebeziumInvalidator {
       const matched = this.mappings.filter((m) => m.table === tableName);
       if(matched.length > 0){
         for(const m of matched){
-          const resolvedPath = m.pathPattern.replace("{id}", recordId);
+          const resolvedPath = m.pathPattern.replace("{id}", recordId); 
           await this.invalidateFn(resolvedPath);
         }
       }
