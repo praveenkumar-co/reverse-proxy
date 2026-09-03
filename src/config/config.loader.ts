@@ -26,8 +26,10 @@ function mapBackwardCompatibleKeys(configParsed: any): any {
     configParsed.tls.httpsPort = configParsed.server.httpsPort;
   }
 
-  if (configParsed.server.upstreams !== undefined && configParsed.upstreams === undefined){
-    configParsed.upstreams = configParsed.server.upstreams;
+  const effectiveUpstreams = configParsed.upstreams || configParsed.server?.upstreams;
+  if(effectiveUpstreams){
+    configParsed.upstreams = effectiveUpstreams;
+    configParsed.server.upstreams = effectiveUpstreams;
   }
 
   if (configParsed.server.paths !== undefined && configParsed.routes === undefined){
@@ -49,6 +51,13 @@ function mapBackwardCompatibleKeys(configParsed: any): any {
         upstreams,
       };
     });
+    configParsed.server.paths = configParsed.routes.map((r: any) => ({
+      path: r.path,
+      upstream: r.upstreams,
+      rateLimit: r.rateLimit,
+      sticky: r.sticky,
+      cache: r.cache,
+    }));
   }
 
   const sections = ["loadBalancing", "cache", "resilience", "rateLimit", "discovery"];

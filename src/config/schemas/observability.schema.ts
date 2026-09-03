@@ -14,7 +14,6 @@ export const tenantDeliverySchema = z
     mode: "none",
     exportEndpoints: [],
   });
-
 export const observabilitySchema = z
   .object({
     logging: z

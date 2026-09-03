@@ -17,7 +17,7 @@ export class TenantLogStreamer {
   private intervalId: NodeJS.Timeout | null = null;
   private globalSize = 0;
   private readonly MAX_TENANT_QUEUE = 10000;
-  private readonly MAX_GLOBAL_QUEUE = 50000;
+  private readonly MAX_GLOBAL_QUEUE = 50000; 
 
   public configure(endpoints: { tenantId: string; destination: string }[]){
     this.endpoints.clear();

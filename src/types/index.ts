@@ -10,5 +10,4 @@ export type {
   DiscoveryConfigType,
 } from './config.types.js';
 export type { ResilienceTypes } from './resilience.types.js';
-
 export type { LoadBalancerOptions } from './balancer.types.js';

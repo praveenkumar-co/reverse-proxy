@@ -2,7 +2,6 @@ import net from "net";
 import tls from "tls";
 import { readFileSync } from "fs";
 import { logger } from "../../observability/logger/logger.js";
-import { isCollection } from "yaml";
 
 export interface WebSocketRequestFields {
   method: string;
@@ -24,7 +23,6 @@ export function tunnelWebSocket(
   const defaultPort = isTls ? 443 : 80;
   const port = parseInt(upstreamUrl.port || String(defaultPort), 10);
   const rejectUnauthorized = tlsConfig?.rejectUnauthorized ?? true;
-
   if(isTls && !rejectUnauthorized){
     logger.warn("WebSocket", "TLS certificate verification is DISABLED", { upstreamUrl: upstreamUrlStr });
   }
@@ -36,7 +34,6 @@ export function tunnelWebSocket(
       logger.error("WebSocket", `Failed to read CA file: ${err.message}`, { ca: tlsConfig.ca });
     }
   }
-
   let isClosed = false;
   const triggerClose = () => {
     if(!isClosed){
@@ -44,7 +41,6 @@ export function tunnelWebSocket(
       onClose?.();
     }
   };
-
   let targetSocket: net.Socket;
   const onConnect = () => {
     let rawRequest = `${reqFields.method} ${reqFields.url} HTTP/${reqFields.httpVersion}\r\n`;
@@ -65,7 +61,6 @@ export function tunnelWebSocket(
     clientSocket.pipe(targetSocket);
     targetSocket.pipe(clientSocket);
   };
-
   if(isTls){
     targetSocket = tls.connect(
       {
@@ -82,7 +77,6 @@ export function tunnelWebSocket(
       onConnect,
     );
   }
-
   targetSocket.on("error", (err) => {
     logger.error("WebSocket", `Upstream target socket error: ${err.message}`);
     clientSocket.destroy();

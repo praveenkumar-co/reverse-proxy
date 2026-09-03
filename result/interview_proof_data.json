@@ -1,0 +1,170 @@
+[
+  {
+    "category": "Load Balancer",
+    "feature": "Strategy: round-robin",
+    "status": "PASS",
+    "metrics": "Picked: node-a"
+  },
+  {
+    "category": "Load Balancer",
+    "feature": "Strategy: weighted-round-robin",
+    "status": "PASS",
+    "metrics": "Picked: node-a"
+  },
+  {
+    "category": "Load Balancer",
+    "feature": "Strategy: least-connections",
+    "status": "PASS",
+    "metrics": "Picked: node-a"
+  },
+  {
+    "category": "Load Balancer",
+    "feature": "Strategy: weighted-least-connections",
+    "status": "PASS",
+    "metrics": "Picked: node-a"
+  },
+  {
+    "category": "Load Balancer",
+    "feature": "Strategy: least-response-time",
+    "status": "PASS",
+    "metrics": "Picked: node-a"
+  },
+  {
+    "category": "Load Balancer",
+    "feature": "Strategy: power-of-two",
+    "status": "PASS",
+    "metrics": "Picked: node-b"
+  },
+  {
+    "category": "Load Balancer",
+    "feature": "Strategy: consistent-hashing",
+    "status": "PASS",
+    "metrics": "Picked: node-a"
+  },
+  {
+    "category": "Load Balancer",
+    "feature": "Strategy: ip-hash",
+    "status": "PASS",
+    "metrics": "Picked: node-a"
+  },
+  {
+    "category": "Load Balancer",
+    "feature": "Strategy: adaptive-wrr",
+    "status": "PASS",
+    "metrics": "Picked: node-a"
+  },
+  {
+    "category": "Load Balancer",
+    "feature": "Strategy: resource-based",
+    "status": "PASS",
+    "metrics": "Picked: node-a"
+  },
+  {
+    "category": "Load Balancer",
+    "feature": "Sticky Sessions (Cookie Affinity)",
+    "status": "PASS",
+    "metrics": "Honored cookie target: node-sticky-2"
+  },
+  {
+    "category": "Rate Limiting",
+    "feature": "Token Bucket Algorithm",
+    "status": "PASS",
+    "metrics": "Allowed 2, Blocked 3rd"
+  },
+  {
+    "category": "Rate Limiting",
+    "feature": "Leaking Bucket Algorithm",
+    "status": "PASS",
+    "metrics": "Allowed 1, Blocked 2nd"
+  },
+  {
+    "category": "Rate Limiting",
+    "feature": "Fixed Window Algorithm",
+    "status": "PASS",
+    "metrics": "Allowed 1, Blocked 2nd"
+  },
+  {
+    "category": "Rate Limiting",
+    "feature": "Sliding Window Log Algorithm",
+    "status": "PASS",
+    "metrics": "Allowed 1, Blocked 2nd"
+  },
+  {
+    "category": "Rate Limiting",
+    "feature": "Sliding Window Counter Algorithm",
+    "status": "PASS",
+    "metrics": "Window evaluated: true"
+  },
+  {
+    "category": "Rate Limiting",
+    "feature": "Soft Limit Warning & Burst Policy",
+    "status": "PASS",
+    "metrics": "Effective Burst Limit: 150 (1.5x)"
+  },
+  {
+    "category": "Rate Limiting",
+    "feature": "Multi-Dimension Policy (IP/Key/Route)",
+    "status": "PASS",
+    "metrics": "Generated key: rl:ip:/api/v1:10.0.0.1"
+  },
+  {
+    "category": "Resilience",
+    "feature": "Classic Circuit Breaker (CLOSED → OPEN)",
+    "status": "PASS",
+    "metrics": "State: OPEN"
+  },
+  {
+    "category": "Resilience",
+    "feature": "Adaptive Circuit Breaker (Google SRE EWMA)",
+    "status": "PASS",
+    "metrics": "Requests: 1.90, DropProb: 0.03448275862068961"
+  },
+  {
+    "category": "Resilience",
+    "feature": "Bulkhead Pattern (Concurrency Limiter)",
+    "status": "PASS",
+    "metrics": "Slot 1: true, Slot 2 Rejection: true, Slot 3: true"
+  },
+  {
+    "category": "Resilience",
+    "feature": "Exponential & Jitter Backoffs + Retry Budget",
+    "status": "PASS",
+    "metrics": "Exp: 400ms, FullJitter: 44.295920391096466ms, EqualJitter: 296.9397034664215ms, Decorrelated: 461.793509088378ms"
+  },
+  {
+    "category": "Cache & Storage",
+    "feature": "L1 In-Memory LRU Eviction & TTL",
+    "status": "PASS",
+    "metrics": "Evicted LRU 'a': Success, Retrieved 'c': true"
+  },
+  {
+    "category": "Cache & Storage",
+    "feature": "KeyBuilder & CacheControl Parser",
+    "status": "PASS",
+    "metrics": "Key Match: true, max-age: 300s"
+  },
+  {
+    "category": "Cache & Storage",
+    "feature": "Tag-based Cache Invalidation",
+    "status": "PASS",
+    "metrics": "Tagged Keys: [product:123]"
+  },
+  {
+    "category": "Cache & Storage",
+    "feature": "Debezium CDC Invalidation Engine",
+    "status": "PASS",
+    "metrics": "Invalidated: /api/orders/999"
+  },
+  {
+    "category": "Service Discovery",
+    "feature": "Dynamic Service Registry & Passive Probes",
+    "status": "PASS",
+    "metrics": "Dynamic Services: 1, Passive Probe Fired: true"
+  },
+  {
+    "category": "Observability",
+    "feature": "Prometheus Metrics Exporter & Histogram Buckets",
+    "status": "PASS",
+    "metrics": "Histogram Scrape OK, Metrics Exporter OK"
+  }
+]

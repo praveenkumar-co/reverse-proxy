@@ -28,7 +28,6 @@ export class RedisCache implements ICache {
         // ignore individual pattern failures
       }
     }
-
     if (allKeys.size > 0){
       await this.client.del([...allKeys]);
     }

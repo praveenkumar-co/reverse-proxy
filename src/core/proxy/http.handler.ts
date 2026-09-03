@@ -11,19 +11,16 @@ export interface ProxyRequestOptions {
   readTimeoutMs: number;
   rejectUnauthorized?: boolean;
 }
-
 export interface ProxyResponse {
   statusCode: number;
   headers: http.IncomingHttpHeaders;
   body: Buffer;
 }
-
 export function proxyRequest(opts: ProxyRequestOptions): Promise<ProxyResponse> {
   return new Promise((resolve, reject) => {
     const url = new URL(opts.upstreamUrl);
     const isHttps = url.protocol === 'https:';
     const transport = isHttps ? https : http;
-
     const req = transport.request({
       host: url.hostname,
       port: url.port || (isHttps ? '443' : '80'),

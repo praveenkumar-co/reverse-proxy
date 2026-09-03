@@ -1,0 +1,1 @@
+npx tsx scripts/benchmark.ts https://localhost:8443/ 1000 20

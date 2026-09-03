@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 const rateLimitDimensionSchema = z.object({
-  dimension: z.enum(["ip", "route"]),
+  dimension: z.enum(["ip", "route", "api-key"]),
   maxRequests: z.number(),
   windowMs: z.number(),
 });

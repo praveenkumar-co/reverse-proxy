@@ -6,7 +6,7 @@ export class ConsistentHashingStrategy implements IStrategy {
   private virtualNodes: number;
   constructor(virtualNodes: number = 150){
     this.virtualNodes = virtualNodes;
-  }
+  } 
   onUpstreamsChanged(upstreams: UpstreamState[]): void {
     this.ring = [];
     for(const u of upstreams){
@@ -40,7 +40,7 @@ export class ConsistentHashingStrategy implements IStrategy {
   ): UpstreamState | null {
     if(candidates.length === 0) return null;
     if(!clientIp) return candidates[0]!;
-    const hash = this.fnv1a(clientIp);
+    const hash = this.fnv1a(clientIp);1
     const ringMatch =
       this.ring.find((node) => node.hash >= hash) ?? this.ring[0];
     if(!ringMatch) return candidates[0]!;

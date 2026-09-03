@@ -12,7 +12,7 @@ export class DebeziumInvalidator {
       const op = event.op;
       if(op && !["c", "u", "d", "r"].includes(op)) return;
       const tableName =
-        event.source?.table ?? event.source?.collection ?? "";
+      event.source?.table ?? event.source?.collection ?? "";
       if(!tableName) return;
       const parseObj = (val: any) => {
         if(typeof val === "string"){

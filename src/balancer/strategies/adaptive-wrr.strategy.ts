@@ -19,7 +19,7 @@ export class AdaptiveWrrStrategy implements IStrategy {
         const progress = 1 - timeLeft / (this.slowStartSeconds * 1000);
         weight = Math.max(1, Math.round(weight * progress));
       }
-      total += weight;
+      total += weight;  
       return weight;
     });
     let randomWeight = Math.floor(Math.random() * total);
