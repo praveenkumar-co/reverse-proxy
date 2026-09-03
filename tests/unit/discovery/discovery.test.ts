@@ -34,19 +34,20 @@ test("ActiveProbe - checkUpstream returns true for 200 OK and false for 500", as
     }
   });
 
-  await new Promise<void>((resolve) => server.listen(9876, resolve));
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as any).port;
 
   try {
     const isHealthy = await checkUpstream({
       id: "test-node",
-      url: "http://127.0.0.1:9876",
+      url: `http://127.0.0.1:${port}`,
       healthPath: "/health",
     });
     assert.strictEqual(isHealthy, true);
 
     const isUnhealthy = await checkUpstream({
       id: "test-node",
-      url: "http://127.0.0.1:9876",
+      url: `http://127.0.0.1:${port}`,
       healthPath: "/bad-path",
     });
     assert.strictEqual(isUnhealthy, false);

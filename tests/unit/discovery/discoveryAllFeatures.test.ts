@@ -41,13 +41,14 @@ test("Discovery 3: Active Probe Upstream Ping (200 OK vs 500 FAIL)", async () =>
     }
   });
 
-  await new Promise<void>(r => server.listen(9870, r));
+  await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
+  const port = (server.address() as any).port;
 
   try {
-    const isOk = await checkUpstream({ id: "node1", url: "http://127.0.0.1:9870", healthPath: "/health" });
+    const isOk = await checkUpstream({ id: "node1", url: `http://127.0.0.1:${port}`, healthPath: "/health" });
     assert.strictEqual(isOk, true);
 
-    const isFail = await checkUpstream({ id: "node1", url: "http://127.0.0.1:9870", healthPath: "/bad" });
+    const isFail = await checkUpstream({ id: "node1", url: `http://127.0.0.1:${port}`, healthPath: "/bad" });
     assert.strictEqual(isFail, false);
   } finally {
     await new Promise<void>(r => server.close(() => r()));
