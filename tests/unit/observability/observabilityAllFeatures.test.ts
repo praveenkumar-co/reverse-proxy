@@ -32,10 +32,11 @@ test("Observability 3: Tenant Log Streamer Queueing & Webhook Endpoint Mapping",
     res.end(JSON.stringify({ status: "ok" }));
   });
 
-  await new Promise<void>((r) => webhookServer.listen(9871, r));
+  await new Promise<void>((r) => webhookServer.listen(0, r));
+  const port = (webhookServer.address() as any).port;
 
   try {
-    tenantLogStreamer.configure([{ tenantId: "acme-corp", destination: "http://127.0.0.1:9871/webhook" }]);
+    tenantLogStreamer.configure([{ tenantId: "acme-corp", destination: `http://127.0.0.1:${port}/webhook` }]);
 
     tenantLogStreamer.queueLog("acme-corp", {
       timestamp: new Date().toISOString(),
@@ -48,10 +49,11 @@ test("Observability 3: Tenant Log Streamer Queueing & Webhook Endpoint Mapping",
       userAgent: "Mozilla/5.0",
     });
 
-    // Allow background flush to dispatch log to webhook
-    await new Promise((r) => setTimeout(r, 1100));
+    // Explicitly flush to dispatch log immediately without waiting for interval
+    await tenantLogStreamer.flush();
     assert.strictEqual(webhookReceived, true);
   } finally {
+    tenantLogStreamer.stop();
     await new Promise<void>((r) => webhookServer.close(() => r()));
   }
 });

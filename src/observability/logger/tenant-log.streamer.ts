@@ -46,6 +46,7 @@ export class TenantLogStreamer {
   public start(){
     if (this.intervalId !== null) return;
     this.intervalId = setInterval(() => this.flush(), 1000);
+    this.intervalId.unref();
   }
 
   public stop(){
@@ -55,7 +56,7 @@ export class TenantLogStreamer {
     }
   }
 
-  private async flush(){
+  public async flush(){
     if (this.globalSize === 0) return;
 
     for (const [tenantId, entries] of this.queue.entries()){
@@ -71,7 +72,7 @@ export class TenantLogStreamer {
       const batch = entries.splice(0, entries.length);
       this.globalSize -= batch.length; 
 
-      this.sendLogs(tenantId, destination, batch);
+      await this.sendLogs(tenantId, destination, batch);
     }
   }
 

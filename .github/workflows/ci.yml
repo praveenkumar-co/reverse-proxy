@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, develop, refactor/modular-restructure]
+    branches: [main, refactor/modular-restructure]
   pull_request:
-    branches: [main, develop]
+    branches: [main, refactor/modular-restructure]
 jobs:
   test:
     name: Build & Unit Tests

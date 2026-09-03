@@ -370,9 +370,10 @@ async function runComprehensiveVerification() {
     res.writeHead(200);
     res.end("OK");
   });
-  await new Promise<void>((r) => webhookServer.listen(9872, r));
+  await new Promise<void>((r) => webhookServer.listen(0, r));
+  const webhookPort = (webhookServer.address() as any).port;
 
-  tenantLogStreamer.configure([{ tenantId: "tenant-acme", destination: "http://127.0.0.1:9872/webhook" }]);
+  tenantLogStreamer.configure([{ tenantId: "tenant-acme", destination: `http://127.0.0.1:${webhookPort}/webhook` }]);
   tenantLogStreamer.queueLog("tenant-acme", {
     timestamp: new Date().toISOString(),
     clientIp: "127.0.0.1",
@@ -383,6 +384,9 @@ async function runComprehensiveVerification() {
     latencyMs: 4,
     userAgent: "curl/8.7.1",
   });
+  await tenantLogStreamer.flush();
+  tenantLogStreamer.stop();
+  await new Promise<void>((r) => webhookServer.close(() => r()));
 
   results.push({
     category: "Observability",
