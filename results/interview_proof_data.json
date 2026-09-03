@@ -129,7 +129,7 @@
     "category": "Resilience",
     "feature": "Exponential & Jitter Backoffs + Retry Budget",
     "status": "PASS",
-    "metrics": "Exp: 400ms, FullJitter: 44ms, EqualJitter: 275ms, Decorrelated: 101ms"
+    "metrics": "Exp: 400ms, FullJitter: 115ms, EqualJitter: 218ms, Decorrelated: 578ms"
   },
   {
     "category": "Cache & Storage",

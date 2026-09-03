@@ -7,6 +7,10 @@
   "bin": {
     "ninja-proxy": "./dist/index.js"
   },
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "start": "node dist/index.js",
     "build": "tsc -p .",

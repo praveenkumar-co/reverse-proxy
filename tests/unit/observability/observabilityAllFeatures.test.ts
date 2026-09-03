@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert";
+import http from "node:http";
 import { MetricsRegistry } from "../../../src/observability/metrics/prometheus.exporter.js";
-import { Histogram, histogramRegistry } from "../../../src/observability/metrics/histogram.registry.js";
+import { Histogram } from "../../../src/observability/metrics/histogram.registry.js";
 import { tenantLogStreamer } from "../../../src/observability/logger/tenant-log.streamer.js";
 
 test("Observability 1: Histogram Buckets & Prometheus Formatting", () => {
@@ -23,20 +24,34 @@ test("Observability 2: MetricsRegistry Exposition Format", () => {
   assert.ok(scrape.includes('ninja_active_connections{upstream_id="node-1"} 0'));
 });
 
-test("Observability 3: Tenant Log Streamer Queueing & Webhook Endpoint Mapping", () => {
-  tenantLogStreamer.configure([{ tenantId: "acme-corp", destination: "http://webhook.dummy/logs" }]);
-
-  tenantLogStreamer.queueLog("acme-corp", {
-    timestamp: new Date().toISOString(),
-    clientIp: "192.168.1.1",
-    method: "POST",
-    url: "/api/checkout",
-    statusCode: 201,
-    bytesSent: 512,
-    latencyMs: 18,
-    userAgent: "Mozilla/5.0",
+test("Observability 3: Tenant Log Streamer Queueing & Webhook Endpoint Mapping", async () => {
+  let webhookReceived = false;
+  const webhookServer = http.createServer((req, res) => {
+    webhookReceived = true;
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ status: "ok" }));
   });
 
-  // Verify queuing logic operates without exception
-  assert.ok(true);
+  await new Promise<void>((r) => webhookServer.listen(9871, r));
+
+  try {
+    tenantLogStreamer.configure([{ tenantId: "acme-corp", destination: "http://127.0.0.1:9871/webhook" }]);
+
+    tenantLogStreamer.queueLog("acme-corp", {
+      timestamp: new Date().toISOString(),
+      clientIp: "192.168.1.1",
+      method: "POST",
+      url: "/api/checkout",
+      statusCode: 201,
+      bytesSent: 512,
+      latencyMs: 18,
+      userAgent: "Mozilla/5.0",
+    });
+
+    // Allow background flush to dispatch log to webhook
+    await new Promise((r) => setTimeout(r, 1100));
+    assert.strictEqual(webhookReceived, true);
+  } finally {
+    await new Promise<void>((r) => webhookServer.close(() => r()));
+  }
 });

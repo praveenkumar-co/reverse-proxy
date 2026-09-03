@@ -365,8 +365,14 @@ async function runComprehensiveVerification() {
   metricsReg.recordRequest("GET", "/test", 200, "node-a", 15);
   const promOutput = metricsReg.getExpositionFormat(["node-a"]);
 
-  // Tenant Log Streamer
-  tenantLogStreamer.configure([{ tenantId: "tenant-acme", destination: "http://webhook.dummy/logs" }]);
+  // Tenant Log Streamer with Mock Webhook Endpoint
+  const webhookServer = (await import("http")).createServer((req, res) => {
+    res.writeHead(200);
+    res.end("OK");
+  });
+  await new Promise<void>((r) => webhookServer.listen(9872, r));
+
+  tenantLogStreamer.configure([{ tenantId: "tenant-acme", destination: "http://127.0.0.1:9872/webhook" }]);
   tenantLogStreamer.queueLog("tenant-acme", {
     timestamp: new Date().toISOString(),
     clientIp: "127.0.0.1",

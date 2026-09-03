@@ -51,7 +51,7 @@
     "category": "Load Balancer",
     "feature": "Strategy: adaptive-wrr",
     "status": "PASS",
-    "metrics": "Picked: node-a"
+    "metrics": "Picked: node-b"
   },
   {
     "category": "Load Balancer",
@@ -117,7 +117,7 @@
     "category": "Resilience",
     "feature": "Adaptive Circuit Breaker (Google SRE EWMA)",
     "status": "PASS",
-    "metrics": "Requests: 1.90, DropProb: 0.03448275862068961"
+    "metrics": "Requests: 1.90, DropProb: 0.0345"
   },
   {
     "category": "Resilience",
@@ -129,7 +129,7 @@
     "category": "Resilience",
     "feature": "Exponential & Jitter Backoffs + Retry Budget",
     "status": "PASS",
-    "metrics": "Exp: 400ms, FullJitter: 44.295920391096466ms, EqualJitter: 296.9397034664215ms, Decorrelated: 461.793509088378ms"
+    "metrics": "Exp: 400ms, FullJitter: 1ms, EqualJitter: 241ms, Decorrelated: 152ms"
   },
   {
     "category": "Cache & Storage",
@@ -139,21 +139,33 @@
   },
   {
     "category": "Cache & Storage",
+    "feature": "Hybrid Cache (L1 Memory + L2 Redis Sync)",
+    "status": "PASS",
+    "metrics": "Retrieved & Warmed L1: value-from-redis"
+  },
+  {
+    "category": "Cache & Storage",
+    "feature": "Stale-If-Error Cache Policy",
+    "status": "PASS",
+    "metrics": "Served Stale on 503 Upstream Failure: true"
+  },
+  {
+    "category": "Cache & Storage",
     "feature": "KeyBuilder & CacheControl Parser",
     "status": "PASS",
     "metrics": "Key Match: true, max-age: 300s"
   },
   {
     "category": "Cache & Storage",
-    "feature": "Tag-based Cache Invalidation",
+    "feature": "Pattern & Tag-based Cache Invalidation",
     "status": "PASS",
     "metrics": "Tagged Keys: [product:123]"
   },
   {
     "category": "Cache & Storage",
-    "feature": "Debezium CDC Invalidation Engine",
+    "feature": "Debezium CDC Invalidation Engine (SQL/NoSQL)",
     "status": "PASS",
-    "metrics": "Invalidated: /api/orders/999"
+    "metrics": "Invalidated Path: /api/orders/999"
   },
   {
     "category": "Service Discovery",
@@ -163,8 +175,8 @@
   },
   {
     "category": "Observability",
-    "feature": "Prometheus Metrics Exporter & Histogram Buckets",
+    "feature": "Prometheus Metrics Exporter & Tenant Log Streamer",
     "status": "PASS",
-    "metrics": "Histogram Scrape OK, Metrics Exporter OK"
+    "metrics": "Prometheus Scrape OK, Tenant Log Streamer Queued OK"
   }
 ]

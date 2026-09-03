@@ -1,10 +1,13 @@
 name: CI
+
 on:
   push:
-    branches: [main, develop]
+    branches: [main, develop, refactor/modular-restructure]
   pull_request:
+    branches: [main, develop]
 jobs:
   test:
+    name: Build & Unit Tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -15,5 +18,11 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm test
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+      - name: TypeScript Build Check
+        run: pnpm build
+      - name: Run Unit & Integration Tests
+        run: pnpm test
+      - name: Run Master Feature Audit
+        run: node node_modules/typescript/bin/tsc -p tsconfig.test.json && node dist-test/scripts/verify-all-features.js

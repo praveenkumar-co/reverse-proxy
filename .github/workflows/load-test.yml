@@ -1,4 +1,5 @@
 name: Load Test
+
 on:
   workflow_dispatch:
     inputs:
@@ -6,10 +7,37 @@ on:
         description: 'Base URL of the reverse proxy to test'
         required: true
         default: 'https://localhost:8443'
+      vus:
+        description: 'Number of Virtual Users (VUs)'
+        required: false
+        default: '50'
+      duration:
+        description: 'Test duration (e.g. 30s, 1m, 5m)'
+        required: false
+        default: '30s'
+
 jobs:
   k6:
+    name: k6 Load Test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: grafana/setup-k6-action@v1
-      - run: k6 run -e BASE_URL=${{ github.event.inputs.base_url }} tests/load/k6/smoke.js
+
+      - name: Setup k6
+        uses: grafana/setup-k6-action@v1
+
+      - name: Run k6 Smoke Load Test
+        run: |
+          k6 run \
+            -e BASE_URL=${{ github.event.inputs.base_url }} \
+            --vus ${{ github.event.inputs.vus }} \
+            --duration ${{ github.event.inputs.duration }} \
+            tests/load/k6/smoke.js
+
+      - name: Upload k6 Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k6-load-test-results
+          path: results/
+          retention-days: 30

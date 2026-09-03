@@ -207,7 +207,7 @@ export class LoadBalancer {
     if(candidates.length === 0) return null;
     const halfOpenCandidates = candidates.filter((s) => {
       const cb = circuitBreakerManager.getOrCreate(
-        s.id,
+        s.id, 
         this.circuitBreakerConfig.mode,
         this.circuitBreakerConfig,
       );
