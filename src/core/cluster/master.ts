@@ -1,8 +1,10 @@
 import http from "http";
 import https from "https";
+import tls from "tls";
 import { readFileSync } from "fs";
 import fs from "node:fs";
 import net from "net";
+import { tunnelWebSocket } from "../proxy/websocket.handler.js";
 import cluster, { type Worker } from "node:cluster";
 import { createClient } from "redis";
 import type { RedisClientType } from "redis";
@@ -331,17 +333,24 @@ export async function createServer(config: CreateServerConfig){
     ACTIVE_CONFIG.server.upstreams.forEach((u) => {
       registry.register({ id: u.id, url: u.url });
     });
-    let sslOptions: { key: Buffer; cert: Buffer };
+    let sslOptions: { key: Buffer; cert: Buffer } = { key: Buffer.alloc(0), cert: Buffer.alloc(0) };
+    const tlsExplicitlyEnabled = Boolean(ACTIVE_CONFIG.tls?.enabled || ACTIVE_CONFIG.server.sslKeyPath);
     try{
-      const keyPath = ACTIVE_CONFIG.server.sslKeyPath || (fs.existsSync("/etc/ninja-proxy/certs/key.pem") ? "/etc/ninja-proxy/certs/key.pem" : "./key.pem");
-      const certPath = ACTIVE_CONFIG.server.sslCertPath || (fs.existsSync("/etc/ninja-proxy/certs/cert.pem") ? "/etc/ninja-proxy/certs/cert.pem" : "./cert.pem");
-      sslOptions = {
-        key: readFileSync(keyPath),
-        cert: readFileSync(certPath),
-      };
+      const keyPath = ACTIVE_CONFIG.server.sslKeyPath || ACTIVE_CONFIG.tls?.key || (fs.existsSync("/etc/ninja-proxy/certs/key.pem") ? "/etc/ninja-proxy/certs/key.pem" : "./key.pem");
+      const certPath = ACTIVE_CONFIG.server.sslCertPath || ACTIVE_CONFIG.tls?.cert || (fs.existsSync("/etc/ninja-proxy/certs/cert.pem") ? "/etc/ninja-proxy/certs/cert.pem" : "./cert.pem");
+      if(fs.existsSync(keyPath) && fs.existsSync(certPath)){
+        sslOptions = {
+          key: readFileSync(keyPath),
+          cert: readFileSync(certPath),
+        };
+      } else if (tlsExplicitlyEnabled) {
+        throw new Error(`Certificate files not found: ${keyPath} or ${certPath}`);
+      }
     } catch (err: any){
-      logger.error("Master", `Failed to load TLS certificates: ${err.message}`);
-      throw err;
+      if(tlsExplicitlyEnabled){
+        logger.error("Master", `Failed to load TLS certificates: ${err.message}`);
+        throw err;
+      }
     }
     cluster.on("exit", (worker) => {
       const idx = WORKER_POOL.indexOf(worker);
@@ -647,7 +656,7 @@ export async function createServer(config: CreateServerConfig){
     }
     const httpServer = http.createServer((req, res) => {
       if(req.url?.startsWith("/__registry")){
-        httpsServer.emit("request", req, res);
+        httpsServer?.emit("request", req, res);
         return;
       }
       const httpsUrl = `https://${req.headers.host?.replace(
@@ -722,12 +731,34 @@ export async function createServer(config: CreateServerConfig){
       };
       lb.incrementConnection(upstreamId);
       metricsRegistry.recordActiveConnection(upstreamId, 1);
-      worker.send(JSON.stringify(payload), socket);
-      socket.pause();
-      socket.removeAllListeners();
+
+      if (socket instanceof tls.TLSSocket) {
+        const upstreamStaticConfig = ACTIVE_CONFIG.server.upstreams.find(
+          (u) => u.id === upstreamId,
+        );
+        const tlsConfig = upstreamStaticConfig?.tls;
+        tunnelWebSocket(socket as any, serviceInstance.url, reqFields, head, tlsConfig, () => {
+          lb.releaseConnection(upstreamId);
+          metricsRegistry.recordActiveConnection(upstreamId, -1);
+        });
+        return;
+      }
+
+      try {
+        worker.send(JSON.stringify(payload), socket);
+        socket.pause();
+        socket.removeAllListeners();
+      } catch (err: any) {
+        logger.error("Master", `Failed to send socket to worker: ${err.message}, tunneling directly in master`);
+        tunnelWebSocket(socket as any, serviceInstance.url, reqFields, head, undefined, () => {
+          lb.releaseConnection(upstreamId);
+          metricsRegistry.recordActiveConnection(upstreamId, -1);
+        });
+      }
     };
-    httpServer.on("upgrade", wsUpgradeHandler);
-    const httpsServer = https.createServer(sslOptions, async (req, res) => {
+    let httpsServer: https.Server | undefined;
+    if (sslOptions.key.length > 0) {
+      httpsServer = https.createServer(sslOptions, async (req, res) => {
       const clientIP =
         (req.headers["x-forwarded-for"] as string) ??
         req.socket.remoteAddress ??
@@ -966,7 +997,10 @@ export async function createServer(config: CreateServerConfig){
         dispatchToWorker(payload, clientIP, res);
       });
     });
-    httpsServer.on("upgrade", wsUpgradeHandler);
+    }
+    if(httpsServer){
+      httpsServer.on("upgrade", wsUpgradeHandler);
+    }
     let isShuttingDown = false;
     async function gracefulShutdown(signal: string){
       if(isShuttingDown) return;
@@ -974,36 +1008,41 @@ export async function createServer(config: CreateServerConfig){
       logger.info("Master", `Received ${signal} — draining and shutting down`);
       await cache.disconnect();
       httpServer.close();
-      httpsServer.close(() => {
+      if(httpsServer){
+        httpsServer.close(() => {
+          process.exit(0);
+        });
+      } else {
         process.exit(0);
-      });
+      }
     }
     process.on("SIGTERM", () => void gracefulShutdown("SIGTERM"));
     process.on("SIGINT", () => void gracefulShutdown("SIGINT"));
     await new Promise((r) => setTimeout(r, 3000));
     await initialHealthCheck(ACTIVE_CONFIG.server.upstreams, HEALTHY_UPSTREAMS, lb);
     httpServer.listen(port);
-    httpsServer.listen(ACTIVE_CONFIG.server.httpsPort ?? 8443, () => {
-      if(healthCheckInterval) clearInterval(healthCheckInterval);
-      healthCheckInterval = startHealthChecks(ACTIVE_CONFIG.server.upstreams, HEALTHY_UPSTREAMS, lb);
-      if(!passiveProbeRegistered){
-        registerPassiveProbeListener(HEALTHY_UPSTREAMS, lb);
-        passiveProbeRegistered = true;
-      }
-      readinessProbe.register({
-        name: "upstream-available",
-        check: async () => HEALTHY_UPSTREAMS.size > 0,
-      });
-      readinessProbe.register({
-        name: "cache-connected",
-        check: async () => {
-          try{
-            return cache.isConnected?.() ?? true;
-          } catch {
-            return false;
-          }
-        },
-      });
+    if(httpsServer){
+      httpsServer.listen(ACTIVE_CONFIG.tls?.httpsPort ?? ACTIVE_CONFIG.server.httpsPort ?? 8443);
+    }
+    if(healthCheckInterval) clearInterval(healthCheckInterval);
+    healthCheckInterval = startHealthChecks(ACTIVE_CONFIG.server.upstreams, HEALTHY_UPSTREAMS, lb);
+    if(!passiveProbeRegistered){
+      registerPassiveProbeListener(HEALTHY_UPSTREAMS, lb);
+      passiveProbeRegistered = true;
+    }
+    readinessProbe.register({
+      name: "upstream-available",
+      check: async () => HEALTHY_UPSTREAMS.size > 0,
+    });
+    readinessProbe.register({
+      name: "cache-connected",
+      check: async () => {
+        try{
+          return cache.isConnected?.() ?? true;
+        } catch {
+          return false;
+        }
+      },
     });
   }
 }
