@@ -1,11 +1,11 @@
 {
   "name": "ninja-reverse-proxy",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "A production-grade reverse proxy with load balancing, circuit breaker, sticky sessions, and dynamic service registry.",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "ninja-proxy": "./dist/index.js"
+    "ninja-reverse-proxy": "./dist/index.js"
   },
   "files": [
     "dist",
