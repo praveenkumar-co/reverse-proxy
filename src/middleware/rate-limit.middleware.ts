@@ -21,7 +21,7 @@ export function rateLimitMiddleware(limiter: RateLimiter){
     ctx.res.setHeader('X-RateLimit-Reset', String(reset));
     ctx.res.setHeader('X-RateLimit-Algorithm', algorithm);
 
-    if (!allowed){
+    if(!allowed){
       ctx.res.writeHead(429, {
         'Content-Type': 'application/json',
         'Retry-After': '1',
@@ -29,7 +29,6 @@ export function rateLimitMiddleware(limiter: RateLimiter){
       ctx.res.end(JSON.stringify({ error: 'Too Many Requests' }));
       return;
     }
-
     await next();
   };
 }

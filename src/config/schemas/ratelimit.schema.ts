@@ -18,9 +18,9 @@ export const rateLimitSchema = z
         "token-bucket",
         "leaking-bucket",
       ])
-      .default("fixed-window"),
+      .default("token-bucket"),
     windowMs: z.number().default(60000),
-    maxRequests: z.number().default(5),
+    maxRequests: z.number().default(1000),
     softLimit: z.boolean().default(false),
     redis: z
       .object({
@@ -39,9 +39,9 @@ export const rateLimitSchema = z
   .default({
     enabled: true,
     storage: "memory",
-    algorithm: "fixed-window",
+    algorithm: "token-bucket",
     windowMs: 60000,
-    maxRequests: 5,
+    maxRequests: 1000,
     softLimit: false,
     redis: {
       host: "127.0.0.1",

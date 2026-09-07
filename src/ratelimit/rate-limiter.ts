@@ -381,7 +381,6 @@ export class RateLimiter {
           [limit, now, windowMs],
         )) === 1;
       }
-
       default:
         return true;
     }

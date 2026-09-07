@@ -64,6 +64,8 @@ function mapBackwardCompatibleKeys(configParsed: any): any {
   for (const section of sections){
     if (configParsed.server[section] !== undefined && configParsed[section] === undefined){
       configParsed[section] = configParsed.server[section];
+    } else if (configParsed[section] !== undefined && configParsed.server[section] === undefined){
+      configParsed.server[section] = configParsed[section];
     }
   }
 

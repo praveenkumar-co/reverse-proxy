@@ -49,6 +49,7 @@ let healthCheckInterval: NodeJS.Timeout | undefined;
 let passiveProbeRegistered = false;
 const HEALTHY_UPSTREAMS: Set<string> = new Set();
 const rateLimiters = new Map<string, RateLimiter>();
+let globalRateLimiter: RateLimiter | undefined;
 const upstreamBulkheads = new Map<string, Bulkhead>();
 let nextWorkerIndex = 0;
 
@@ -199,16 +200,17 @@ export async function reloadServerConfig(newConfig: RootConfigType){
   if(cache){
     await cache.disconnect().catch(() => {});
   }
+  const effectiveCache = newConfig.cache ?? newConfig.server.cache;
   cache = new Cache({
-    enabled: newConfig.server.cache.enabled,
-    host: newConfig.server.cache.host,
-    port: newConfig.server.cache.port,
-    ttlSeconds: newConfig.server.cache.ttlSeconds,
-    l1Enabled: newConfig.server.cache.l1Enabled,
-    l1MaxSize: newConfig.server.cache.l1MaxSize,
-    staleWhileRevalidate: newConfig.server.cache.staleWhileRevalidate,
-    staleIfError: newConfig.server.cache.staleIfError,
-    debezium: newConfig.server.cache.debezium,
+    enabled: effectiveCache.enabled,
+    host: effectiveCache.host,
+    port: effectiveCache.port,
+    ttlSeconds: effectiveCache.ttlSeconds,
+    l1Enabled: effectiveCache.l1Enabled,
+    l1MaxSize: effectiveCache.l1MaxSize,
+    staleWhileRevalidate: effectiveCache.staleWhileRevalidate,
+    staleIfError: effectiveCache.staleIfError,
+    debezium: effectiveCache.debezium,
   });
   await cache.connect().catch(() => {});
   rateLimiters.clear();
@@ -223,17 +225,27 @@ export async function reloadServerConfig(newConfig: RootConfigType){
       await rlRedisClient.connect().catch(() => {});
     }
   }
+  if (newConfig.server.rateLimit) {
+    globalRateLimiter = new RateLimiter({
+      windowMs: newConfig.server.rateLimit.windowMs,
+      maxRequests: newConfig.server.rateLimit.maxRequests,
+      algorithm: newConfig.server.rateLimit.algorithm,
+      storage: newConfig.server.rateLimit.storage,
+      redisClient: newConfig.server.rateLimit.storage === "redis" ? rlRedisClient : undefined,
+    });
+  } else {
+    globalRateLimiter = undefined;
+  }
   newConfig.server.paths.forEach((p) => {
-    const rlConfig = p.rateLimit ?? newConfig.server.rateLimit;
-    if(rlConfig){
+    if(p.rateLimit){
       rateLimiters.set(
         p.path,
         new RateLimiter({
-          windowMs: rlConfig.windowMs,
-          maxRequests: rlConfig.maxRequests,
-          algorithm: rlConfig.algorithm,
-          storage: rlConfig.storage,
-          redisClient: rlConfig.storage === "redis" ? rlRedisClient : undefined,
+          windowMs: p.rateLimit.windowMs,
+          maxRequests: p.rateLimit.maxRequests,
+          algorithm: p.rateLimit.algorithm,
+          storage: p.rateLimit.storage,
+          redisClient: p.rateLimit.storage === "redis" ? rlRedisClient : undefined,
         }),
       );
     }
@@ -271,16 +283,17 @@ export async function createServer(config: CreateServerConfig){
   const { port, workerCount } = config;
   ACTIVE_CONFIG.server.upstreams.forEach((e) => HEALTHY_UPSTREAMS.add(e.id));
   if(cluster.isPrimary){
+    const effectiveCache = ACTIVE_CONFIG.cache ?? ACTIVE_CONFIG.server.cache;
     cache = new Cache({
-      enabled: ACTIVE_CONFIG.server.cache.enabled,
-      host: ACTIVE_CONFIG.server.cache.host,
-      port: ACTIVE_CONFIG.server.cache.port,
-      ttlSeconds: ACTIVE_CONFIG.server.cache.ttlSeconds,
-      l1Enabled: ACTIVE_CONFIG.server.cache.l1Enabled,
-      l1MaxSize: ACTIVE_CONFIG.server.cache.l1MaxSize,
-      staleWhileRevalidate: ACTIVE_CONFIG.server.cache.staleWhileRevalidate,
-      staleIfError: ACTIVE_CONFIG.server.cache.staleIfError,
-      debezium: ACTIVE_CONFIG.server.cache.debezium,
+      enabled: effectiveCache.enabled,
+      host: effectiveCache.host,
+      port: effectiveCache.port,
+      ttlSeconds: effectiveCache.ttlSeconds,
+      l1Enabled: effectiveCache.l1Enabled,
+      l1MaxSize: effectiveCache.l1MaxSize,
+      staleWhileRevalidate: effectiveCache.staleWhileRevalidate,
+      staleIfError: effectiveCache.staleIfError,
+      debezium: effectiveCache.debezium,
     });
     await cache.connect();
     // Decouple rate-limiter Redis from the cache Redis connection
@@ -293,17 +306,29 @@ export async function createServer(config: CreateServerConfig){
         await rlRedisClient.connect().catch(() => {});
       }
     }
+    const effectiveRateLimit = ACTIVE_CONFIG.rateLimit ?? ACTIVE_CONFIG.server.rateLimit;
+    if (effectiveRateLimit) {
+      globalRateLimiter = new RateLimiter({
+        windowMs: effectiveRateLimit.windowMs,
+        maxRequests: effectiveRateLimit.maxRequests,
+        algorithm: effectiveRateLimit.algorithm,
+        storage: effectiveRateLimit.storage,
+        redisClient: effectiveRateLimit.storage === "redis" ? rlRedisClient : undefined,
+      });
+    } else {
+      globalRateLimiter = undefined;
+    }
+    rateLimiters.clear();
     ACTIVE_CONFIG.server.paths.forEach((p) => {
-      const rlConfig = p.rateLimit ?? ACTIVE_CONFIG.server.rateLimit;
-      if(rlConfig){
+      if(p.rateLimit){
         rateLimiters.set(
           p.path,
           new RateLimiter({
-            windowMs: rlConfig.windowMs,
-            maxRequests: rlConfig.maxRequests,
-            algorithm: rlConfig.algorithm,
-            storage: rlConfig.storage,
-            redisClient: rlConfig.storage === "redis" ? rlRedisClient : undefined,
+            windowMs: p.rateLimit.windowMs,
+            maxRequests: p.rateLimit.maxRequests,
+            algorithm: p.rateLimit.algorithm,
+            storage: p.rateLimit.storage,
+            redisClient: p.rateLimit.storage === "redis" ? rlRedisClient : undefined,
           }),
         );
       }
@@ -624,6 +649,7 @@ export async function createServer(config: CreateServerConfig){
               const ttlOverride = pathRule?.cache?.ttlSeconds;
               await cache.set(cacheKey, cachePayload, ttlOverride);
             }
+            const effectiveCache = ACTIVE_CONFIG.cache ?? ACTIVE_CONFIG.server.cache;
             const responseHeaders: Record<string, any> = {
               "Access-Control-Allow-Origin": "*",
               "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
@@ -631,6 +657,9 @@ export async function createServer(config: CreateServerConfig){
               "Access-Control-Allow-Credentials": "true",
               ...(reply.headers || {}),
             };
+            if (effectiveCache?.enabled && payload.requestType === "GET") {
+              responseHeaders["X-Cache"] = "MISS";
+            }
             delete responseHeaders["content-length"];
             delete responseHeaders["transfer-encoding"];
             delete responseHeaders["connection"];
@@ -891,17 +920,46 @@ export async function createServer(config: CreateServerConfig){
       const pathRule = ACTIVE_CONFIG.server.paths.find((p) =>
         url.pathname.startsWith(p.path),
       );
-      const activeLimitConfig = pathRule?.rateLimit ?? ACTIVE_CONFIG.server.rateLimit;
-      if(activeLimitConfig && pathRule){
+      // 1. Global Rate Limiter Check (Server Perimeter Defense)
+      const effectiveGlobalRateLimit = ACTIVE_CONFIG.rateLimit ?? ACTIVE_CONFIG.server.rateLimit;
+      if (globalRateLimiter && effectiveGlobalRateLimit) {
+        if (!(await globalRateLimiter.isAllowed(clientIP))) {
+          const retryAfter = Math.ceil(
+            (globalRateLimiter.getResetTime(clientIP) - Date.now()) / 1000,
+          );
+          res.writeHead(429, {
+            "Content-Type": "application/json",
+            "Retry-After": retryAfter.toString(),
+            "X-RateLimit-Scope": "global",
+            "X-RateLimit-Limit": effectiveGlobalRateLimit.maxRequests.toString(),
+            "X-RateLimit-Remaining": "0",
+            "X-RateLimit-Reset": globalRateLimiter.getResetTime(clientIP).toString(),
+            "X-RateLimit-Algorithm": globalRateLimiter.getAlgorithm(),
+          });
+          res.end(
+            JSON.stringify({
+              error: "Too Many Requests",
+              scope: "global",
+              retryAfter: `${retryAfter}s`,
+              algorithm: globalRateLimiter.getAlgorithm(),
+            }),
+          );
+          return;
+        }
+      }
+
+      // 2. Route-Level Rate Limiter Check (Endpoint Specific Defense)
+      if (pathRule?.rateLimit) {
         const routeLimiter = rateLimiters.get(pathRule.path);
-        if(routeLimiter && !(await routeLimiter.isAllowed(clientIP))){
+        if (routeLimiter && !(await routeLimiter.isAllowed(clientIP))) {
           const retryAfter = Math.ceil(
             (routeLimiter.getResetTime(clientIP) - Date.now()) / 1000,
           );
           res.writeHead(429, {
             "Content-Type": "application/json",
             "Retry-After": retryAfter.toString(),
-            "X-RateLimit-Limit": activeLimitConfig.maxRequests.toString(),
+            "X-RateLimit-Scope": "route",
+            "X-RateLimit-Limit": pathRule.rateLimit.maxRequests.toString(),
             "X-RateLimit-Remaining": "0",
             "X-RateLimit-Reset": routeLimiter.getResetTime(clientIP).toString(),
             "X-RateLimit-Algorithm": routeLimiter.getAlgorithm(),
@@ -909,6 +967,7 @@ export async function createServer(config: CreateServerConfig){
           res.end(
             JSON.stringify({
               error: "Too Many Requests",
+              scope: "route",
               retryAfter: `${retryAfter}s`,
               algorithm: routeLimiter.getAlgorithm(),
             }),
