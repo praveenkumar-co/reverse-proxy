@@ -216,22 +216,29 @@ export async function reloadServerConfig(newConfig: RootConfigType){
   rateLimiters.clear();
   upstreamBulkheads.clear();
   // Decouple rate-limiter Redis from the cache Redis connection
-  if (newConfig.server.rateLimit?.storage === "redis" || newConfig.server.paths.some(p => p.rateLimit?.storage === "redis")){
+  const effectiveRateLimit = newConfig.rateLimit ?? newConfig.server.rateLimit;
+  const isRedisStorage = effectiveRateLimit?.storage === "redis" || newConfig.server.rateLimit?.storage === "redis" || newConfig.server.paths.some(p => p.rateLimit?.storage === "redis");
+  if (isRedisStorage){
     if (!rlRedisClient){
+      const redisHost = (effectiveRateLimit as any)?.redis?.host ?? newConfig.server.cache?.host ?? "127.0.0.1";
+      const redisPort = (effectiveRateLimit as any)?.redis?.port ?? newConfig.server.cache?.port ?? 6379;
       rlRedisClient = createClient({
-        socket: { host: newConfig.server.cache.host, port: newConfig.server.cache.port },
+        socket: { host: redisHost, port: redisPort },
       }) as RedisClientType;
       rlRedisClient.on("error", (err) => logger.error("RateLimiterRedis", err.message));
-      await rlRedisClient.connect().catch(() => {});
+      await rlRedisClient.connect().catch((err) => logger.error("RateLimiterRedis", `Connection failed: ${err.message}`));
+      logger.info("RateLimiterRedis", "Connected to Redis for distributed rate limiting");
     }
   }
-  if (newConfig.server.rateLimit) {
+  if (effectiveRateLimit && effectiveRateLimit.enabled !== false) {
     globalRateLimiter = new RateLimiter({
-      windowMs: newConfig.server.rateLimit.windowMs,
-      maxRequests: newConfig.server.rateLimit.maxRequests,
-      algorithm: newConfig.server.rateLimit.algorithm,
-      storage: newConfig.server.rateLimit.storage,
-      redisClient: newConfig.server.rateLimit.storage === "redis" ? rlRedisClient : undefined,
+      windowMs: effectiveRateLimit.windowMs,
+      maxRequests: effectiveRateLimit.maxRequests,
+      algorithm: effectiveRateLimit.algorithm,
+      storage: effectiveRateLimit.storage,
+      redisClient: effectiveRateLimit.storage === "redis" ? rlRedisClient : undefined,
+      softLimit: effectiveRateLimit.softLimit,
+      burstMultiplier: effectiveRateLimit.burstMultiplier,
     });
   } else {
     globalRateLimiter = undefined;
@@ -297,23 +304,29 @@ export async function createServer(config: CreateServerConfig){
     });
     await cache.connect();
     // Decouple rate-limiter Redis from the cache Redis connection
-    if(ACTIVE_CONFIG.server.rateLimit?.storage === "redis" || ACTIVE_CONFIG.server.paths.some(p => p.rateLimit?.storage === "redis")){
+    const effectiveRateLimit = ACTIVE_CONFIG.rateLimit ?? ACTIVE_CONFIG.server.rateLimit;
+    const isRedisStorage = effectiveRateLimit?.storage === "redis" || ACTIVE_CONFIG.server.rateLimit?.storage === "redis" || ACTIVE_CONFIG.server.paths.some(p => p.rateLimit?.storage === "redis");
+    if(isRedisStorage){
       if(!rlRedisClient){
+        const redisHost = (effectiveRateLimit as any)?.redis?.host ?? ACTIVE_CONFIG.server.cache?.host ?? "127.0.0.1";
+        const redisPort = (effectiveRateLimit as any)?.redis?.port ?? ACTIVE_CONFIG.server.cache?.port ?? 6379;
         rlRedisClient = createClient({
-          socket: { host: ACTIVE_CONFIG.server.cache.host, port: ACTIVE_CONFIG.server.cache.port },
+          socket: { host: redisHost, port: redisPort },
         }) as RedisClientType;
         rlRedisClient.on("error", (err) => logger.error("RateLimiterRedis", err.message));
-        await rlRedisClient.connect().catch(() => {});
+        await rlRedisClient.connect().catch((err) => logger.error("RateLimiterRedis", `Connection failed: ${err.message}`));
+        logger.info("RateLimiterRedis", "Connected to Redis for distributed rate limiting");
       }
     }
-    const effectiveRateLimit = ACTIVE_CONFIG.rateLimit ?? ACTIVE_CONFIG.server.rateLimit;
-    if (effectiveRateLimit) {
+    if (effectiveRateLimit && effectiveRateLimit.enabled !== false) {
       globalRateLimiter = new RateLimiter({
         windowMs: effectiveRateLimit.windowMs,
         maxRequests: effectiveRateLimit.maxRequests,
         algorithm: effectiveRateLimit.algorithm,
         storage: effectiveRateLimit.storage,
         redisClient: effectiveRateLimit.storage === "redis" ? rlRedisClient : undefined,
+        softLimit: effectiveRateLimit.softLimit,
+        burstMultiplier: effectiveRateLimit.burstMultiplier,
       });
     } else {
       globalRateLimiter = undefined;
@@ -429,12 +442,21 @@ export async function createServer(config: CreateServerConfig){
         }
       }
       if(!upstreamId){
+        const candidateSet = routeHealthyUpstreams.size > 0 ? routeHealthyUpstreams : HEALTHY_UPSTREAMS;
         upstreamId = lb.pickFiltered(
-          routeHealthyUpstreams.size > 0 ? routeHealthyUpstreams : HEALTHY_UPSTREAMS,
+          candidateSet,
           clientIp,
           attemptedUpstreams,
           payload.headers.cookie,
         );
+        if(!upstreamId && attempt > 0){
+          upstreamId = lb.pickFiltered(
+            candidateSet,
+            clientIp,
+            new Set(),
+            payload.headers.cookie,
+          );
+        }
       }
       if(!upstreamId){
         res.writeHead(503, { "Content-Type": "application/json" });
@@ -816,6 +838,7 @@ export async function createServer(config: CreateServerConfig){
               strategy: ACTIVE_CONFIG.server.loadBalancing.strategy,
               upstreams: lb.getStats(),
               healthyUpstreams: [...HEALTHY_UPSTREAMS],
+              retryBudget: globalRetryBudget.getStats(),
             },
             null,
             2,
@@ -928,9 +951,9 @@ export async function createServer(config: CreateServerConfig){
       );
       // 1. Global Rate Limiter Check (Server Perimeter Defense)
       const effectiveGlobalRateLimit = ACTIVE_CONFIG.rateLimit ?? ACTIVE_CONFIG.server.rateLimit;
-      if (globalRateLimiter && effectiveGlobalRateLimit) {
+      if (globalRateLimiter && effectiveGlobalRateLimit && effectiveGlobalRateLimit.enabled !== false) {
         const allowed = await globalRateLimiter.isAllowed(clientIP);
-        const algoState = globalRateLimiter.getAlgorithmState(clientIP);
+        const algoState = await globalRateLimiter.getAlgorithmState(clientIP);
         if (!allowed) {
           logger.warn(
             "RateLimit",

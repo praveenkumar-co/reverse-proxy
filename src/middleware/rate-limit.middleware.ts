@@ -3,13 +3,7 @@ import type { RateLimiter } from '../ratelimit/rate-limiter.js';
 
 export function rateLimitMiddleware(limiter: RateLimiter){
   return async (ctx: RequestContext, next: () => Promise<void>) => {
-    const apiKey = (ctx.req.headers['x-api-key'] as string) ?? undefined;
-    const route = ctx.routePath ?? ctx.req.url ?? '';
-    const allowed = await limiter.isAllowed(ctx.clientIp, {
-      apiKey,
-      route,
-      headers: ctx.req.headers,
-    });
+    const allowed = await limiter.isAllowed(ctx.clientIp);
 
     const limit = limiter['maxRequests'];
     const remaining = await limiter.getRemaining(ctx.clientIp);

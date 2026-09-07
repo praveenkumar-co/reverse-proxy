@@ -11,7 +11,6 @@ import { FixedWindowAlgorithm } from "../src/ratelimit/algorithms/fixed-window.j
 import { SlidingWindowLogAlgorithm } from "../src/ratelimit/algorithms/sliding-window-log.js";
 import { SlidingWindowCounterAlgorithm } from "../src/ratelimit/algorithms/sliding-window-counter.js";
 import { SoftLimitPolicy } from "../src/ratelimit/policies/soft-limit.policy.js";
-import { MultiDimensionPolicy } from "../src/ratelimit/policies/multi-dimension.policy.js";
 
 // 3. Resilience Imports
 import { ClassicCircuitBreaker } from "../src/resilience/circuit-breaker/classic.circuit-breaker.js";
@@ -183,18 +182,6 @@ async function runComprehensiveVerification() {
     feature: "Soft Limit Warning & Burst Policy",
     status: limitValue === 150 ? "PASS" : "FAIL",
     metrics: `Effective Burst Limit: ${limitValue} (1.5x)`,
-  });
-
-  const multi = new MultiDimensionPolicy([
-    { dimension: "ip", maxRequests: 10, windowMs: 60000 },
-    { dimension: "api-key", maxRequests: 100, windowMs: 60000 },
-  ]);
-  const key = multi.buildKey("ip", "10.0.0.1", "/api/v1");
-  results.push({
-    category: "Rate Limiting",
-    feature: "Multi-Dimension Policy (IP/Key/Route)",
-    status: key === "rl:ip:/api/v1:10.0.0.1" ? "PASS" : "FAIL",
-    metrics: `Generated key: ${key}`,
   });
 
   // -------------------------------------------------------------

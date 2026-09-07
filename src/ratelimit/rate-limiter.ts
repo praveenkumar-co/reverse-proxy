@@ -5,7 +5,6 @@ import { SlidingWindowCounterAlgorithm } from "./algorithms/sliding-window-count
 import { TokenBucketAlgorithm } from "./algorithms/token-bucket.js";
 import { LeakingBucketAlgorithm } from "./algorithms/leaking-bucket.js";
 import { SoftLimitPolicy } from "./policies/soft-limit.policy.js";
-import { MultiDimensionPolicy, type DimensionConfig } from "./policies/multi-dimension.policy.js";
 import { logger } from "../observability/logger/logger.js";
 
 const REDIS_RATE_LIMIT_SCRIPTS = {
@@ -99,7 +98,7 @@ const REDIS_RATE_LIMIT_SCRIPTS = {
     local leaked = elapsed * leakRate
     local waterLevel = math.max(0, water - leaked)
 
-    if waterLevel < limit then
+    if waterLevel + 1 <= limit then
       redis.call("HSET", KEYS[1], "water", waterLevel + 1, "lastLeak", now)
       redis.call("PEXPIRE", KEYS[1], windowMs)
       return 1
@@ -125,7 +124,6 @@ export interface RateLimiterOptions {
   redisClient?: RedisClientType | undefined;
   softLimit?: number | undefined;
   burstMultiplier?: number | undefined;
-  dimensions?: DimensionConfig[] | undefined;
 }
 
 export class RateLimiter {
@@ -140,7 +138,6 @@ export class RateLimiter {
   private tbAlgo = new TokenBucketAlgorithm();
   private lbAlgo = new LeakingBucketAlgorithm();
   private softLimitPolicy?: SoftLimitPolicy | undefined;
-  private multiDimensionPolicy?: MultiDimensionPolicy | undefined;
   constructor(options: RateLimiterOptions){
     this.windowMs = options.windowMs;
     this.maxRequests = options.maxRequests;
@@ -154,9 +151,6 @@ export class RateLimiter {
         options.burstMultiplier ?? 1.5
       );
     }
-    if(options.dimensions !== undefined){
-      this.multiDimensionPolicy = new MultiDimensionPolicy(options.dimensions);
-    }
   }
   public getAlgorithm(): string {
     return this.algorithm;
@@ -164,35 +158,16 @@ export class RateLimiter {
 
   public getResetTime(ip: string): number {
     const now = Date.now();
-    if(this.algorithm === "fixed-window"){
+    if(this.storage === "memory" && this.algorithm === "fixed-window"){
       return this.fwAlgo.getResetTime(ip);
     }
     return now + this.windowMs;
   }
 
-  public isAllowed(
-    ip: string,
-    context?: { apiKey?: string; route?: string; headers?: Record<string, string | string[] | undefined> }
-  ): boolean | Promise<boolean> {
-    if(this.multiDimensionPolicy && context){
-      if(this.storage === 'redis' && this.redisClient){
-        return this.isAllowedMultiDimensionRedis(ip, context).catch((err: any) => {
-          logger.error("RateLimiter", `Redis multi-dimension limit failed, falling back to memory: ${err.message}`);
-          return this.isAllowedMultiDimensionMemory(ip, context);
-        });
-      }
-      if(this.storage === 'hybrid' && this.redisClient){
-        return this.isAllowedMultiDimensionHybrid(ip, context).catch((err: any) => {
-          logger.error("RateLimiter", `Hybrid multi-dimension limit failed, falling back to memory: ${err.message}`);
-          return this.isAllowedMultiDimensionMemory(ip, context);
-        });
-      }
-      return this.isAllowedMultiDimensionMemory(ip, context);
-    }
-
+  public isAllowed(ip: string): boolean | Promise<boolean> {
     if (this.storage === 'redis' && this.redisClient){
       return this.isAllowedRedis(ip).catch((err: any) => {
-        logger.error("RateLimiter", `Redis single-dimension limit failed, falling back to memory: ${err.message}`);
+        logger.error("RateLimiter", `Redis rate limit failed, falling back to memory: ${err.message}`);
         return this.isAllowedMemory(ip);
       });
     }
@@ -211,6 +186,7 @@ export class RateLimiter {
     }
     return Math.max(0, this.maxRequests - this.getCurrentLoadMemory(ip));
   }
+
   private async isAllowedHybrid(ip: string): Promise<boolean> {
     let limit = this.maxRequests;
     if (this.softLimitPolicy){
@@ -226,39 +202,6 @@ export class RateLimiter {
       this.checkMemory(ip, limit, this.windowMs);
     }
     return allowed;
-  }
-
-  private async isAllowedMultiDimensionHybrid(
-    ip: string,
-    context: { apiKey?: string; route?: string; headers?: Record<string, string | string[] | undefined> }
-  ): Promise<boolean> {
-    const dimensions = this.multiDimensionPolicy!.getDimensions();
-
-    for(const d of dimensions){
-      const val = this.getDimensionValue(d, ip, context);
-      if(val === undefined) continue;
-      const key = this.multiDimensionPolicy!.buildKey(d.dimension, val, context.route ?? '');
-      let limit = d.maxRequests;
-      if(this.softLimitPolicy){
-        limit = this.softLimitPolicy.effectiveLimit(this.getCurrentLoadMemory(key));
-      }
-      if(this.getCurrentLoadMemory(key) >= limit){
-        return false;
-      }
-    }
-    for(const d of dimensions){
-      const val = this.getDimensionValue(d, ip, context);
-      if(val === undefined) continue;
-      const key = this.multiDimensionPolicy!.buildKey(d.dimension, val, context.route ?? '');
-      let limit = d.maxRequests;
-      if(this.softLimitPolicy){
-        limit = this.softLimitPolicy.effectiveLimit(await this.getCurrentLoadRedis(key));
-      }
-      const allowed = await this.checkRedis(key, limit, d.windowMs);
-      if(!allowed) return false;
-      this.checkMemory(key, limit, d.windowMs);
-    }
-    return true;
   }
 
   private isAllowedMemory(ip: string): boolean {
@@ -277,46 +220,6 @@ export class RateLimiter {
       limit = this.softLimitPolicy.effectiveLimit(load);
     }
     return this.checkRedis(ip, limit, this.windowMs);
-  }
-
-  private isAllowedMultiDimensionMemory(
-    ip: string,
-    context: { apiKey?: string; route?: string; headers?: Record<string, string | string[] | undefined> }
-  ): boolean {
-    const dimensions = this.multiDimensionPolicy!.getDimensions();
-    for(const d of dimensions){
-      const val = this.getDimensionValue(d, ip, context);
-      if(val === undefined) continue;
-      const key = this.multiDimensionPolicy!.buildKey(d.dimension, val, context.route ?? '');
-      let limit = d.maxRequests;
-      if(this.softLimitPolicy){
-        const load = this.getCurrentLoadMemory(key);
-        limit = this.softLimitPolicy.effectiveLimit(load);
-      }
-      const allowed = this.checkMemory(key, limit, d.windowMs);
-      if(!allowed) return false;
-    }
-    return true;
-  }
-
-  private async isAllowedMultiDimensionRedis(
-    ip: string,
-    context: { apiKey?: string; route?: string; headers?: Record<string, string | string[] | undefined> }
-  ): Promise<boolean> {
-    const dimensions = this.multiDimensionPolicy!.getDimensions();
-    for(const d of dimensions){
-      const val = this.getDimensionValue(d, ip, context);
-      if(val === undefined) continue;
-      const key = this.multiDimensionPolicy!.buildKey(d.dimension, val, context.route ?? '');
-      let limit = d.maxRequests;
-      if(this.softLimitPolicy){
-        const load = await this.getCurrentLoadRedis(key);
-        limit = this.softLimitPolicy.effectiveLimit(load);
-      }
-      const allowed = await this.checkRedis(key, limit, d.windowMs);
-      if(!allowed) return false;
-    }
-    return true;
   }
 
   private checkMemory(key: string, limit: number, windowMs: number): boolean {
@@ -469,43 +372,105 @@ export class RateLimiter {
     }
   }
 
-  private getDimensionValue(
-    d: DimensionConfig,
-    ip: string,
-    context: { apiKey?: string; route?: string; headers?: Record<string, string | string[] | undefined> }
-  ): string | undefined {
-    switch (d.dimension){
-      case "ip":
-        return ip;
-      case "api-key":
-        return context.apiKey;
-      case "route":
-        return context.route;
-      case "header":
-        if(d.headerName){
-          const raw = context.headers?.[d.headerName.toLowerCase()];
-          return Array.isArray(raw) ? raw[0] : raw;
-        }
-        return undefined;
-      default:
-        return undefined;
+  public async getAlgorithmState(key: string): Promise<Record<string, any>> {
+    let state: Record<string, any> = {};
+    if (this.storage === "redis" && this.redisClient) {
+      state = await this.getAlgorithmStateRedis(key);
+    } else {
+      switch (this.algorithm) {
+        case "fixed-window":
+          state = this.fwAlgo.getState(key);
+          break;
+        case "sliding-window-log":
+          state = this.swLogAlgo.getState(key, this.windowMs);
+          break;
+        case "sliding-window-counter":
+          state = this.swCounterAlgo.getState(key, this.windowMs);
+          break;
+        case "leaking-bucket":
+          state = this.lbAlgo.getState(key, this.maxRequests, this.windowMs);
+          break;
+        case "token-bucket":
+          state = this.tbAlgo.getState(key, this.maxRequests, this.windowMs);
+          break;
+        default:
+          state = {};
+      }
     }
+    if (this.softLimitPolicy) {
+      const load = (this.storage === "redis" && this.redisClient)
+        ? await this.getCurrentLoadRedis(key)
+        : this.getCurrentLoadMemory(key);
+      const effectiveLimit = this.softLimitPolicy.effectiveLimit(load);
+      state.softLimitEnabled = true;
+      state.currentLoad = load;
+      state.effectiveLimit = effectiveLimit;
+      state.hardLimit = this.maxRequests;
+    }
+    return state;
   }
 
-  public getAlgorithmState(key: string): Record<string, any> {
-    switch (this.algorithm) {
-      case "fixed-window":
-        return this.fwAlgo.getState(key);
-      case "sliding-window-log":
-        return this.swLogAlgo.getState(key, this.windowMs);
-      case "sliding-window-counter":
-        return this.swCounterAlgo.getState(key, this.windowMs);
-      case "leaking-bucket":
-        return this.lbAlgo.getState(key, this.maxRequests, this.windowMs);
-      case "token-bucket":
-        return this.tbAlgo.getState(key, this.maxRequests, this.windowMs);
-      default:
-        return {};
+  private async getAlgorithmStateRedis(key: string): Promise<Record<string, any>> {
+    const client = this.redisClient!;
+    const redisKey = `rl:${this.algorithm}:${key}`;
+    try {
+      switch (this.algorithm) {
+        case "fixed-window": {
+          const val = await client.get(redisKey);
+          const pttl = await client.pTTL(redisKey);
+          return {
+            storage: "redis",
+            currentCount: val ? parseInt(val, 10) : 0,
+            resetInSec: pttl > 0 ? Math.ceil(pttl / 1000) : 0,
+          };
+        }
+        case "sliding-window-log": {
+          const threshold = Date.now() - this.windowMs;
+          await client.zRemRangeByScore(redisKey, "-inf", threshold);
+          const count = await client.zCard(redisKey);
+          return {
+            storage: "redis",
+            activeTimestampsCount: count,
+          };
+        }
+        case "sliding-window-counter": {
+          const state = await client.hGetAll(redisKey);
+          const currentCount = parseInt(state?.currentCount ?? "0", 10);
+          const prevCount = parseInt(state?.prevCount ?? "0", 10);
+          const windowStart = parseInt(state?.windowStart ?? "0", 10);
+          const now = Date.now();
+          const timeIntoCurrentWindow = now - windowStart;
+          const weight = Math.max(0, (this.windowMs - timeIntoCurrentWindow) / this.windowMs);
+          const estimated = Math.floor(prevCount * weight + currentCount);
+          return {
+            storage: "redis",
+            currentCount,
+            prevCount,
+            previousWindowWeight: parseFloat(weight.toFixed(2)),
+            estimatedTotalCount: estimated,
+          };
+        }
+        case "token-bucket": {
+          const tokens = await client.hGet(redisKey, "tokens");
+          return {
+            storage: "redis",
+            tokensRemaining: tokens ? parseFloat(parseFloat(tokens).toFixed(2)) : 0,
+            capacity: this.maxRequests,
+          };
+        }
+        case "leaking-bucket": {
+          const water = await client.hGet(redisKey, "water");
+          return {
+            storage: "redis",
+            waterLevel: water ? parseFloat(parseFloat(water).toFixed(2)) : 0,
+            capacity: this.maxRequests,
+          };
+        }
+        default:
+          return { storage: "redis" };
+      }
+    } catch {
+      return { storage: "redis" };
     }
   }
 }

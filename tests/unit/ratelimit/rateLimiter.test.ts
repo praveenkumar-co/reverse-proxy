@@ -5,7 +5,6 @@ import { LeakingBucketAlgorithm } from "../../../src/ratelimit/algorithms/leakin
 import { FixedWindowAlgorithm } from "../../../src/ratelimit/algorithms/fixed-window.js";
 import { SlidingWindowLogAlgorithm } from "../../../src/ratelimit/algorithms/sliding-window-log.js";
 import { RateLimiter } from "../../../src/ratelimit/rate-limiter.js";
-import { MultiDimensionPolicy } from "../../../src/ratelimit/policies/multi-dimension.policy.js";
 
 test("TokenBucketAlgorithm - capacity and consumption", () => {
   const algo = new TokenBucketAlgorithm();
@@ -78,15 +77,4 @@ test("RateLimiter Facade - integrates memory storage", async () => {
 
   allowed = await rl.isAllowed("user-1");
   assert.strictEqual(allowed, false);
-});
-
-test("MultiDimensionPolicy - builds key correctly", () => {
-  const policy = new MultiDimensionPolicy([
-    { dimension: "ip", maxRequests: 100, windowMs: 60000 },
-    { dimension: "api-key", maxRequests: 500, windowMs: 60000 },
-  ]);
-
-  const key = policy.buildKey("ip", "192.168.1.1", "/api");
-  assert.strictEqual(key, "rl:ip:/api:192.168.1.1");
-  assert.strictEqual(policy.getDimensions().length, 2);
 });

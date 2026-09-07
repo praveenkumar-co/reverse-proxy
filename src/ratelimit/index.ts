@@ -11,5 +11,3 @@ export { SlidingWindowCounterAlgorithm } from './algorithms/sliding-window-count
 export { TokenBucketAlgorithm } from './algorithms/token-bucket.js';
 export { LeakingBucketAlgorithm } from './algorithms/leaking-bucket.js';
 export { SoftLimitPolicy } from './policies/soft-limit.policy.js';
-export { MultiDimensionPolicy } from './policies/multi-dimension.policy.js';
-export type { DimensionConfig, Dimension } from './policies/multi-dimension.policy.js';

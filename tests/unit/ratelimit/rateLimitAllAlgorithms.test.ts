@@ -7,7 +7,6 @@ import { SlidingWindowLogAlgorithm } from "../../../src/ratelimit/algorithms/sli
 import { SlidingWindowCounterAlgorithm } from "../../../src/ratelimit/algorithms/sliding-window-counter.js";
 import { RateLimiter } from "../../../src/ratelimit/rate-limiter.js";
 import { SoftLimitPolicy } from "../../../src/ratelimit/policies/soft-limit.policy.js";
-import { MultiDimensionPolicy } from "../../../src/ratelimit/policies/multi-dimension.policy.js";
 
 test("RateLimit Algo 1: Token Bucket Capacity & Exhaustion", () => {
   const algo = new TokenBucketAlgorithm();
@@ -49,21 +48,6 @@ test("RateLimit Policy: Soft Limit Warning & Burst Allowance", () => {
   assert.strictEqual(policy.effectiveLimit(50), 150);
   // Current load 90 >= 80 soft limit -> normal limit (100)
   assert.strictEqual(policy.effectiveLimit(90), 100);
-});
-
-test("RateLimit Policy: Multi-Dimension Key Builder (IP, Route, API-Key)", () => {
-  const policy = new MultiDimensionPolicy([
-    { dimension: "ip", maxRequests: 100, windowMs: 60000 },
-    { dimension: "api-key", maxRequests: 500, windowMs: 60000 },
-    { dimension: "route", maxRequests: 50, windowMs: 60000 },
-  ]);
-
-  const ipKey = policy.buildKey("ip", "10.0.0.1", "/api/v1");
-  const apiKey = policy.buildKey("api-key", "key_secret_123", "/api/v1");
-
-  assert.strictEqual(ipKey, "rl:ip:/api/v1:10.0.0.1");
-  assert.strictEqual(apiKey, "rl:api-key:/api/v1:key_secret_123");
-  assert.strictEqual(policy.getDimensions().length, 3);
 });
 
 test("RateLimiter Facade: Memory Storage Integration", async () => {

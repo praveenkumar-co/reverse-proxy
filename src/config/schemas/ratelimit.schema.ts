@@ -1,11 +1,5 @@
 import { z } from "zod";
 
-const rateLimitDimensionSchema = z.object({
-  dimension: z.enum(["ip", "route", "api-key"]),
-  maxRequests: z.number(),
-  windowMs: z.number(),
-});
-
 export const rateLimitSchema = z
   .object({
     enabled: z.boolean().default(true),
@@ -21,7 +15,8 @@ export const rateLimitSchema = z
       .default("token-bucket"),
     windowMs: z.number().default(60000),
     maxRequests: z.number().default(1000),
-    softLimit: z.boolean().default(false),
+    softLimit: z.union([z.number(), z.boolean()]).transform((v) => (typeof v === "number" ? v : undefined)).optional(),
+    burstMultiplier: z.number().default(1.5).optional(),
     redis: z
       .object({
         host: z.string().default("127.0.0.1"),
@@ -33,7 +28,6 @@ export const rateLimitSchema = z
         port: 6379,
         keyPrefix: "rl:",
       }),
-    dimensions: z.array(rateLimitDimensionSchema).optional(),
     headers: z.boolean().default(true),
   })
   .default({
@@ -42,7 +36,7 @@ export const rateLimitSchema = z
     algorithm: "token-bucket",
     windowMs: 60000,
     maxRequests: 1000,
-    softLimit: false,
+    burstMultiplier: 1.5,
     redis: {
       host: "127.0.0.1",
       port: 6379,
