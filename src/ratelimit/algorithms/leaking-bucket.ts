@@ -14,4 +14,15 @@ export class LeakingBucketAlgorithm {
     this.store.set(key, { water: level, lastLeak: now });
     return false;
   }
+  getState(key: string, maxRequests: number, windowMs: number) {
+    const now = Date.now();
+    const bucket = this.store.get(key) ?? { water: 0, lastLeak: now };
+    const elapsed = now - bucket.lastLeak;
+    const leaked = elapsed * (maxRequests / windowMs);
+    const level = Math.max(0, bucket.water - leaked);
+    return {
+      waterLevel: parseFloat(level.toFixed(2)),
+      capacity: maxRequests,
+    };
+  }
 }

@@ -14,6 +14,13 @@ export class FixedWindowAlgorithm {
     }
     return false;
   }
+  getState(key: string) {
+    const data = this.store.get(key);
+    return {
+      currentCount: data?.count ?? 0,
+      resetInSec: data ? Math.max(0, Math.ceil((data.resetTime - Date.now()) / 1000)) : 0,
+    };
+  }
   getResetTime(key: string): number {
     return this.store.get(key)?.resetTime ?? Date.now();
   }

@@ -20,4 +20,17 @@ export class SlidingWindowCounterAlgorithm {
     }
     return false;
   }
+  getState(key: string, windowMs: number) {
+    const now = Date.now();
+    const data = this.store.get(key) ?? { currentCount: 0, prevCount: 0, windowStart: now };
+    const timeIntoWindow = now - data.windowStart;
+    const weight = Math.max(0, (windowMs - timeIntoWindow) / windowMs);
+    const estimated = Math.floor(data.prevCount * weight + data.currentCount);
+    return {
+      currentCount: data.currentCount,
+      prevCount: data.prevCount,
+      previousWindowWeight: parseFloat(weight.toFixed(2)),
+      estimatedTotalCount: estimated,
+    };
+  }
 }

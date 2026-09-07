@@ -449,25 +449,30 @@ export async function createServer(config: CreateServerConfig){
         return;
       }
       attemptedUpstreams.add(upstreamId);
-      let bulkhead = upstreamBulkheads.get(upstreamId);
-      if(!bulkhead){
-        const upstreamConf = ACTIVE_CONFIG.server.upstreams.find((u) => u.id === upstreamId);
-        const maxConcurrent = upstreamConf?.maxConnections ?? 1000;
-        bulkhead = new Bulkhead(maxConcurrent);
-        upstreamBulkheads.set(upstreamId, bulkhead);
-      }
-      if(!bulkhead.enter()){
-        logger.warn("Resilience", `Bulkhead capacity reached for upstream: ${upstreamId}`);
-        const retryConfig = ACTIVE_CONFIG.server.loadBalancing.retry;
-        const retryAllowed = globalRetryBudget.recordRetry();
-        if(retryAllowed && attempt < retryConfig.maxAttempts){
-          dispatchToWorker(payload, clientIp, res, attempt + 1, attemptedUpstreams, startTime);
-        }else {
-          res.writeHead(503, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: "Service unavailable — upstream concurrency limit reached" }));
-          metricsRegistry.recordRequest(payload.requestType, payload.url, 503, upstreamId, performance.now() - startTime);
+      const effectiveResilience = ACTIVE_CONFIG.resilience ?? ACTIVE_CONFIG.server.resilience;
+      const bulkheadConf = effectiveResilience?.bulkhead;
+      const isBulkheadEnabled = bulkheadConf?.enabled ?? false;
+      if(isBulkheadEnabled){
+        let bulkhead = upstreamBulkheads.get(upstreamId);
+        if(!bulkhead){
+          const upstreamConf = ACTIVE_CONFIG.server.upstreams.find((u) => u.id === upstreamId);
+          const maxConcurrent = bulkheadConf?.maxConcurrentPerUpstream ?? upstreamConf?.maxConnections ?? 1000;
+          bulkhead = new Bulkhead(maxConcurrent);
+          upstreamBulkheads.set(upstreamId, bulkhead);
         }
-        return;
+        if(!bulkhead.enter()){
+          logger.warn("Resilience", `Bulkhead capacity reached for upstream: ${upstreamId}`);
+          const retryConfig = ACTIVE_CONFIG.server.loadBalancing.retry;
+          const retryAllowed = globalRetryBudget.recordRetry();
+          if(retryAllowed && attempt < retryConfig.maxAttempts){
+            dispatchToWorker(payload, clientIp, res, attempt + 1, attemptedUpstreams, startTime);
+          }else {
+            res.writeHead(503, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Service unavailable — upstream concurrency limit reached" }));
+            metricsRegistry.recordRequest(payload.requestType, payload.url, 503, upstreamId, performance.now() - startTime);
+          }
+          return;
+        }
       }
       metricsRegistry.recordActiveConnection(upstreamId, 1);
       lb.incrementConnection(upstreamId);
@@ -623,7 +628,8 @@ export async function createServer(config: CreateServerConfig){
             upstreamBulkheads.get(upstreamId!)?.leave();
             metricsRegistry.recordActiveConnection(upstreamId!, -1);
             lb.releaseConnection(upstreamId!);
-            if(payload.requestType === "GET"){
+            const isCacheMethod = payload.requestType === "GET" || payload.requestType === "HEAD";
+            if(isCacheMethod){
               metricsRegistry.recordCacheOp("miss");
             }
             const cacheControl = reply.headers?.["cache-control"] || "";
@@ -633,10 +639,10 @@ export async function createServer(config: CreateServerConfig){
               !payload.headers["authorization"] &&
               !hasSetCookie &&
               !isPrivate;
-            if(isCacheable && payload.requestType === "GET"){
+            if(isCacheable && isCacheMethod){
               const parsedUrl = new URL(payload.url, "http://dummy");
               const cacheKey = cache.buildKey(
-                payload.requestType,
+                "GET",
                 parsedUrl.pathname + parsedUrl.search,
               );
               const cachePayload = JSON.stringify({
@@ -657,7 +663,7 @@ export async function createServer(config: CreateServerConfig){
               "Access-Control-Allow-Credentials": "true",
               ...(reply.headers || {}),
             };
-            if (effectiveCache?.enabled && payload.requestType === "GET") {
+            if (effectiveCache?.enabled && isCacheMethod) {
               responseHeaders["X-Cache"] = "MISS";
             }
             delete responseHeaders["content-length"];
@@ -923,7 +929,14 @@ export async function createServer(config: CreateServerConfig){
       // 1. Global Rate Limiter Check (Server Perimeter Defense)
       const effectiveGlobalRateLimit = ACTIVE_CONFIG.rateLimit ?? ACTIVE_CONFIG.server.rateLimit;
       if (globalRateLimiter && effectiveGlobalRateLimit) {
-        if (!(await globalRateLimiter.isAllowed(clientIP))) {
+        const allowed = await globalRateLimiter.isAllowed(clientIP);
+        const algoState = globalRateLimiter.getAlgorithmState(clientIP);
+        if (!allowed) {
+          logger.warn(
+            "RateLimit",
+            `BLOCKED ${clientIP} via [${globalRateLimiter.getAlgorithm()}]`,
+            { ...algoState, limit: effectiveGlobalRateLimit.maxRequests },
+          );
           const retryAfter = Math.ceil(
             (globalRateLimiter.getResetTime(clientIP) - Date.now()) / 1000,
           );
@@ -940,11 +953,18 @@ export async function createServer(config: CreateServerConfig){
             JSON.stringify({
               error: "Too Many Requests",
               scope: "global",
-              retryAfter: `${retryAfter}s`,
               algorithm: globalRateLimiter.getAlgorithm(),
+              state: algoState,
+              retryAfter: `${retryAfter}s`,
             }),
           );
           return;
+        } else {
+          logger.info(
+            "RateLimit",
+            `ALLOWED ${clientIP} via [${globalRateLimiter.getAlgorithm()}]`,
+            { ...algoState, limit: effectiveGlobalRateLimit.maxRequests },
+          );
         }
       }
 
@@ -975,7 +995,7 @@ export async function createServer(config: CreateServerConfig){
           return;
         }
       }
-      if(req.method === "GET"){
+      if(req.method === "GET" || req.method === "HEAD"){
         const skipCache = url.pathname.startsWith("/api/upload/") || (pathRule?.cache?.enabled === false);
         if(!skipCache){
           const cacheKey = cache.buildKey("GET", url.pathname + url.search);
@@ -989,12 +1009,16 @@ export async function createServer(config: CreateServerConfig){
               });
               const bodyBuf = cached.isCompressed && cached.encoding === "gzip"
                 ? Buffer.from(cached.body, "base64")
-                : cached.body;
-              res.end(bodyBuf);
+                : (typeof cached.body === "string" ? Buffer.from(cached.body) : cached.body);
+              if (req.method === "HEAD") {
+                res.end();
+              } else {
+                res.end(bodyBuf);
+              }
               const tenantId = (req.headers["x-tenant-id"] as string) ?? "none";
               metricsRegistry.recordCacheOp("hit");
               metricsRegistry.recordRequest(
-                "GET",
+                req.method,
                 req.url ?? "",
                 cached.statusCode ?? 200,
                 "cache",
@@ -1007,7 +1031,7 @@ export async function createServer(config: CreateServerConfig){
                 req.method,
                 req.url ?? "",
                 cached.statusCode ?? 200,
-                Buffer.byteLength(bodyBuf),
+                req.method === "HEAD" ? 0 : Buffer.byteLength(bodyBuf),
                 0,
                 (req.headers["user-agent"] as string) ?? "-",
               );

@@ -16,4 +16,15 @@ export class TokenBucketAlgorithm {
     this.store.set(key, bucket);
     return false;
   }
+  getState(key: string, maxRequests: number, windowMs: number) {
+    const now = Date.now();
+    const bucket = this.store.get(key) ?? { tokens: maxRequests, lastRefill: now };
+    const elapsed = now - bucket.lastRefill;
+    const rate = maxRequests / windowMs;
+    const currentTokens = Math.min(maxRequests, bucket.tokens + elapsed * rate);
+    return {
+      tokensRemaining: parseFloat(currentTokens.toFixed(2)),
+      capacity: maxRequests,
+    };
+  }
 }

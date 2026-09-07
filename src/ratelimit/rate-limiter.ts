@@ -491,4 +491,21 @@ export class RateLimiter {
         return undefined;
     }
   }
+
+  public getAlgorithmState(key: string): Record<string, any> {
+    switch (this.algorithm) {
+      case "fixed-window":
+        return this.fwAlgo.getState(key);
+      case "sliding-window-log":
+        return this.swLogAlgo.getState(key, this.windowMs);
+      case "sliding-window-counter":
+        return this.swCounterAlgo.getState(key, this.windowMs);
+      case "leaking-bucket":
+        return this.lbAlgo.getState(key, this.maxRequests, this.windowMs);
+      case "token-bucket":
+        return this.tbAlgo.getState(key, this.maxRequests, this.windowMs);
+      default:
+        return {};
+    }
+  }
 }

@@ -13,4 +13,12 @@ export class SlidingWindowLogAlgorithm {
     this.store.set(key, timestamps);
     return false;
   }
+  getState(key: string, windowMs: number) {
+    const now = Date.now();
+    const timestamps = (this.store.get(key) ?? []).filter(t => now - t < windowMs);
+    return {
+      activeTimestampsCount: timestamps.length,
+      oldestRequestAgeMs: timestamps.length > 0 && timestamps[0] !== undefined ? now - timestamps[0] : 0,
+    };
+  }
 }
