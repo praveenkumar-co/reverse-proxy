@@ -8,7 +8,7 @@ export class ClassicCircuitBreaker implements ICircuitBreaker {
     private failureThreshold: number,
     private recoveryTimeMs: number,
   ){}
-  public recordSuccess(latencyMs: number){
+  public recordSuccess(_latencyMs: number){
     this.failures = 0;
     this.state = "CLOSED";
   }

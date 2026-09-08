@@ -459,6 +459,7 @@ export async function createServer(config: CreateServerConfig){
         }
       }
       if(!upstreamId){
+        logger.warn("Master", "No healthy upstream available to dispatch request", { attempt });
         res.writeHead(503, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "No healthy upstreams available" }));
         metricsRegistry.recordRequest(
@@ -627,6 +628,9 @@ export async function createServer(config: CreateServerConfig){
                 }, jitterDelay);
               }
             } else {
+              if(!retryAllowed){
+                logger.warn("Master", "Retry budget exhausted — dropping retry to protect backend from retry storm");
+              }
               upstreamBulkheads.get(upstreamId!)?.leave();
               metricsRegistry.recordActiveConnection(upstreamId!, -1);
               lb.releaseConnection(upstreamId!);

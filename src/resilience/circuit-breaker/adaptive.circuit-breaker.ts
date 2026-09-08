@@ -9,7 +9,7 @@ export class AdaptiveCircuitBreaker implements ICircuitBreaker {
     private decayFactor = 0.9,
   ){}
 
-  public recordSuccess(latencyMs: number){
+  public recordSuccess(_latencyMs: number){
     this.requests = this.requests * this.decayFactor + 1;
     this.accepts = this.accepts * this.decayFactor + 1;
   }
