@@ -72,7 +72,7 @@ export class LoadBalancer {
       slowStartEndTime: 0,
       maxConnections,
       currentWeight: 0,
-    } as any);
+    });
     circuitBreakerManager.getOrCreate(
       id,
       this.circuitBreakerConfig.mode,

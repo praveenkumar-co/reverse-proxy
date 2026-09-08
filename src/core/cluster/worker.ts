@@ -34,70 +34,94 @@ const metricsRegistry = new MetricsRegistry(healthyUpstreams);
 if(workerConfig.observability?.tenantDelivery?.mode === "webhook"){
   tenantLogStreamer.configure(workerConfig.observability.tenantDelivery.exportEndpoints);
 }
-process.on("message", (rawMsg: any) => {
+process.on("message", async (rawMsg: any, handle?: any) => {
   try {
-    const msg = typeof rawMsg === "string" ? JSON.parse(rawMsg) : rawMsg;
-    if(!msg){
-      return ; 
+    const parsed = typeof rawMsg === "string" ? JSON.parse(rawMsg) : rawMsg;
+    if (!parsed) {
+      return;
     }
-    if(msg.type === "GRACEFUL_SHUTDOWN"){
+
+    if (parsed.type === "GRACEFUL_SHUTDOWN") {
       logger.info(`Worker:${process.pid}`, "Gracefully draining connections");
-    }else if(msg.type === "DUMP_METRICS_REQUEST"){
-      process.send?.(JSON.stringify({
-        type: "DUMP_METRICS_RESPONSE",
-        requestId: msg.requestId,
-        data: metricsRegistry.getSnapshot(),
-      }));
-    }else if (msg.type === "UPDATE_SERVICES"){
+      return;
+    }
+
+    if (parsed.type === "DUMP_METRICS_REQUEST") {
+      process.send?.(
+        JSON.stringify({
+          type: "DUMP_METRICS_RESPONSE",
+          requestId: parsed.requestId,
+          data: metricsRegistry.getSnapshot(),
+        }),
+      );
+      return;
+    }
+
+    if (parsed.type === "UPDATE_SERVICES") {
       healthyUpstreams.clear();
-      if(msg.healthyUpstreams && Array.isArray(msg.healthyUpstreams)){
-        for(const id of msg.healthyUpstreams){
+      if (parsed.healthyUpstreams && Array.isArray(parsed.healthyUpstreams)) {
+        for (const id of parsed.healthyUpstreams) {
           healthyUpstreams.add(id);
         }
       }
+      return;
     }
-  } catch {}
-});
-process.on("message", async (msgStr: string, handle?: any) => {
-  try{
-    const payload = JSON.parse(msgStr);
-    if(payload.type === "WEBSOCKET_UPGRADE" && handle){
-      const clientSocket = handle as net.Socket;
-      const head = Buffer.from(payload.head, "base64");
-      const upstreamStaticConfig = workerConfig.server.upstreams.find(
-        (u) => u.id === payload.upstreamId,
-      );
-      const tlsConfig = upstreamStaticConfig?.tls;
-      logger.info(`Worker:${process.pid}`, "Received WebSocket socket handle handoff from master", {
-        url: payload.reqFields.url,
-        upstreamId: payload.upstreamId,
-      });
-      tunnelWebSocket(clientSocket, payload.upstreamUrl, payload.reqFields, head, tlsConfig, () => {
-        if(process.send){
-          process.send(JSON.stringify({
-            type: "WEBSOCKET_CLOSED",
-            upstreamId: payload.upstreamId,
-          }));
-        }
-      });
+
+    if (parsed.type === "WEBSOCKET_UPGRADE" && handle) {
+      try {
+        const clientSocket = handle as net.Socket;
+        const head = Buffer.from(parsed.head, "base64");
+        const upstreamStaticConfig = workerConfig.server.upstreams.find(
+          (u) => u.id === parsed.upstreamId,
+        );
+        const tlsConfig = upstreamStaticConfig?.tls;
+        logger.info(
+          `Worker:${process.pid}`,
+          "Received WebSocket socket handle handoff from master",
+          {
+            url: parsed.reqFields.url,
+            upstreamId: parsed.upstreamId,
+          },
+        );
+        tunnelWebSocket(
+          clientSocket,
+          parsed.upstreamUrl,
+          parsed.reqFields,
+          head,
+          tlsConfig,
+          () => {
+            if (process.send) {
+              process.send(
+                JSON.stringify({
+                  type: "WEBSOCKET_CLOSED",
+                  upstreamId: parsed.upstreamId,
+                }),
+              );
+            }
+          },
+        );
+      } catch (err: any) {
+        logger.error(
+          `Worker:${process.pid}`,
+          `Websocket handoff failed: ${err.message}`,
+        );
+      }
+      return;
     }
-  }catch(err: any){
-    logger.error(`Worker:${process.pid}`, `Websocket handoff failed: ${err.message}`);
-  }
-});
-process.on("message", async (message: string) => {
-  let msg;
-  try {
-    msg = await workerMessageSchema.parseAsync(JSON.parse(message));
-  } catch {
-    return;
-  }
-  const raw = JSON.parse(message) as {
-    upstreamId?: string;
-    upstreamUrl?: string;
-    requestId?: string;
-  };
-  const upstreamUrl: string | undefined = raw.upstreamUrl;
+
+    let msg;
+    try {
+      msg = await workerMessageSchema.parseAsync(parsed);
+    } catch {
+      return;
+    }
+
+    const raw = parsed as {
+      upstreamId?: string;
+      upstreamUrl?: string;
+      requestId?: string;
+    };
+    const upstreamUrl: string | undefined = raw.upstreamUrl;
   const requestUrl = msg.url;
   const startTime = performance.now();
   const rule = workerConfig.server.paths.find((e) =>
@@ -327,4 +351,7 @@ process.on("message", async (message: string) => {
     proxyReq.write(Buffer.from(msg.body, "binary"));
   }
   proxyReq.end();
+  } catch (err: any) {
+    logger.error(`Worker:${process.pid}`, `Error processing message: ${err.message}`);
+  }
 });

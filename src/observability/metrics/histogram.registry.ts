@@ -50,6 +50,12 @@ export class Histogram {
   }
 }
 
+export interface HistogramSnapshot {
+  buckets: HistogramBucket[];
+  sum: number;
+  count: number;
+}
+
 export class HistogramRegistry {
   private histograms = new Map<string, Histogram>();
 
@@ -82,20 +88,21 @@ export class HistogramRegistry {
     return out;
   }
 
-  getSnapshotAll(): Record<string, any> {
-    const snapshots: Record<string, any> = {};
+  getSnapshotAll(): Record<string, HistogramSnapshot> {
+    const snapshots: Record<string, HistogramSnapshot> = {};
     for (const [key, histogram] of this.histograms.entries()){
       snapshots[key] = histogram.getSnapshot();
     }
     return snapshots;
   }
 
-  mergeAll(snapshots: Record<string, any>){
+  mergeAll(snapshots: Record<string, HistogramSnapshot>){
     for (const [key, snap] of Object.entries(snapshots)){
       const hist = this.getOrCreate(key);
-      hist.merge(snap as any);
+      hist.merge(snap);
     }
   }
 }
+
 
 export const histogramRegistry = new HistogramRegistry();

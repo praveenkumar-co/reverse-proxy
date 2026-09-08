@@ -30,14 +30,37 @@ import { calculateEqualJitterBackoff } from "../../resilience/retry/backoff/equa
 import { calculateDecorrelatedJitterBackoff } from "../../resilience/retry/backoff/decorrelated-jitter.backoff.js";
 import { passiveProbe } from "../../discovery/health/passive.probe.js";
 import { readinessProbe } from "../../observability/health/readiness.js";
+import { handleAdminRequest } from "../admin/admin.handler.js";
+import { MiddlewarePipeline } from "../pipeline/middleware.pipeline.js";
+import { createContext } from "../pipeline/context.js";
+import { corsMiddleware } from "../../middleware/cors.middleware.js";
+import { bodyLimitMiddleware } from "../../middleware/body-limit.middleware.js";
+import { tracingMiddleware } from "../../middleware/tracing.middleware.js";
 
 import type { RootConfigType } from "../../config/schemas/server.schema.js";
+
+function getEffectiveCache(config: RootConfigType) {
+  return config.cache ?? config.server.cache;
+}
+
+function getEffectiveRateLimit(config: RootConfigType) {
+  return config.rateLimit ?? config.server.rateLimit;
+}
+
+function getEffectiveResilience(config: RootConfigType) {
+  return config.resilience ?? config.server.resilience;
+}
+
+function getEffectiveLoadBalancing(config: RootConfigType) {
+  return config.loadBalancing ?? config.server.loadBalancing;
+}
 
 interface CreateServerConfig {
   port: number;
   workerCount: number;
   config: RootConfigType;
 }
+
 
 let WORKER_POOL: Worker[] = [];
 let ACTIVE_CONFIG: RootConfigType;
@@ -76,7 +99,7 @@ function setupWorkerMessageHandling(worker: Worker){
   worker.on("message", async (raw: string) => {
     try{
       const parsed = JSON.parse(raw);
-      if(parsed.type === "WEBSOCKET_CLOSED"){3
+      if(parsed.type === "WEBSOCKET_CLOSED"){
         lb.releaseConnection(parsed.upstreamId);
         metricsRegistry.recordActiveConnection(parsed.upstreamId, -1);
         return;
@@ -200,7 +223,7 @@ export async function reloadServerConfig(newConfig: RootConfigType){
   if(cache){
     await cache.disconnect().catch(() => {});
   }
-  const effectiveCache = newConfig.cache ?? newConfig.server.cache;
+  const effectiveCache = getEffectiveCache(newConfig);
   cache = new Cache({
     enabled: effectiveCache.enabled,
     host: effectiveCache.host,
@@ -216,12 +239,12 @@ export async function reloadServerConfig(newConfig: RootConfigType){
   rateLimiters.clear();
   upstreamBulkheads.clear();
   // Decouple rate-limiter Redis from the cache Redis connection
-  const effectiveRateLimit = newConfig.rateLimit ?? newConfig.server.rateLimit;
+  const effectiveRateLimit = getEffectiveRateLimit(newConfig);
   const isRedisStorage = effectiveRateLimit?.storage === "redis" || newConfig.server.rateLimit?.storage === "redis" || newConfig.server.paths.some(p => p.rateLimit?.storage === "redis");
   if (isRedisStorage){
     if (!rlRedisClient){
-      const redisHost = (effectiveRateLimit as any)?.redis?.host ?? newConfig.server.cache?.host ?? "127.0.0.1";
-      const redisPort = (effectiveRateLimit as any)?.redis?.port ?? newConfig.server.cache?.port ?? 6379;
+      const redisHost = effectiveRateLimit?.redis?.host ?? newConfig.server.cache?.host ?? "127.0.0.1";
+      const redisPort = effectiveRateLimit?.redis?.port ?? newConfig.server.cache?.port ?? 6379;
       rlRedisClient = createClient({
         socket: { host: redisHost, port: redisPort },
       }) as RedisClientType;
@@ -290,7 +313,7 @@ export async function createServer(config: CreateServerConfig){
   const { port, workerCount } = config;
   ACTIVE_CONFIG.server.upstreams.forEach((e) => HEALTHY_UPSTREAMS.add(e.id));
   if(cluster.isPrimary){
-    const effectiveCache = ACTIVE_CONFIG.cache ?? ACTIVE_CONFIG.server.cache;
+    const effectiveCache = getEffectiveCache(ACTIVE_CONFIG);
     cache = new Cache({
       enabled: effectiveCache.enabled,
       host: effectiveCache.host,
@@ -304,12 +327,12 @@ export async function createServer(config: CreateServerConfig){
     });
     await cache.connect();
     // Decouple rate-limiter Redis from the cache Redis connection
-    const effectiveRateLimit = ACTIVE_CONFIG.rateLimit ?? ACTIVE_CONFIG.server.rateLimit;
+    const effectiveRateLimit = getEffectiveRateLimit(ACTIVE_CONFIG);
     const isRedisStorage = effectiveRateLimit?.storage === "redis" || ACTIVE_CONFIG.server.rateLimit?.storage === "redis" || ACTIVE_CONFIG.server.paths.some(p => p.rateLimit?.storage === "redis");
     if(isRedisStorage){
       if(!rlRedisClient){
-        const redisHost = (effectiveRateLimit as any)?.redis?.host ?? ACTIVE_CONFIG.server.cache?.host ?? "127.0.0.1";
-        const redisPort = (effectiveRateLimit as any)?.redis?.port ?? ACTIVE_CONFIG.server.cache?.port ?? 6379;
+        const redisHost = effectiveRateLimit?.redis?.host ?? ACTIVE_CONFIG.server.cache?.host ?? "127.0.0.1";
+        const redisPort = effectiveRateLimit?.redis?.port ?? ACTIVE_CONFIG.server.cache?.port ?? 6379;
         rlRedisClient = createClient({
           socket: { host: redisHost, port: redisPort },
         }) as RedisClientType;
@@ -800,7 +823,7 @@ export async function createServer(config: CreateServerConfig){
           (u) => u.id === upstreamId,
         );
         const tlsConfig = upstreamStaticConfig?.tls;
-        tunnelWebSocket(socket as any, serviceInstance.url, reqFields, head, tlsConfig, () => {
+        tunnelWebSocket(socket, serviceInstance.url, reqFields, head, tlsConfig, () => {
           lb.releaseConnection(upstreamId);
           metricsRegistry.recordActiveConnection(upstreamId, -1);
         });
@@ -813,302 +836,222 @@ export async function createServer(config: CreateServerConfig){
         socket.removeAllListeners();
       } catch (err: any) {
         logger.error("Master", `Failed to send socket to worker: ${err.message}, tunneling directly in master`);
-        tunnelWebSocket(socket as any, serviceInstance.url, reqFields, head, undefined, () => {
+        tunnelWebSocket(socket, serviceInstance.url, reqFields, head, undefined, () => {
           lb.releaseConnection(upstreamId);
           metricsRegistry.recordActiveConnection(upstreamId, -1);
         });
       }
     };
     let httpsServer: https.Server | undefined;
-    if (sslOptions.key.length > 0) {
-      httpsServer = https.createServer(sslOptions, async (req, res) => {
-      const clientIP =
-        (req.headers["x-forwarded-for"] as string) ??
-        req.socket.remoteAddress ??
-        "unknown";
-      if (req.method === "OPTIONS"){
-        res.writeHead(204, {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
-          "Access-Control-Allow-Headers": "*",
-          "Access-Control-Allow-Credentials": "true",
-        });
-        res.end();
-        return;
-      }
-      if(req.url === "/__lb-stats"){
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(
-          JSON.stringify(
-            {
-              strategy: ACTIVE_CONFIG.server.loadBalancing.strategy,
-              upstreams: lb.getStats(),
-              healthyUpstreams: [...HEALTHY_UPSTREAMS],
-              retryBudget: globalRetryBudget.getStats(),
-            },
-            null,
-            2,
-          ),
+    const proxyRequestHandler = async (req: http.IncomingMessage, res: http.ServerResponse) => {
+      // 1. Admin and monitoring endpoints
+      const isAdmin = await handleAdminRequest({
+        req,
+        res,
+        config: ACTIVE_CONFIG,
+        lb,
+        healthyUpstreams: HEALTHY_UPSTREAMS,
+        retryBudget: globalRetryBudget,
+        metricsRegistry,
+        cache,
+        collectWorkerMetricSnapshots,
+      });
+      if (isAdmin) return;
+
+      // 2. Request context & middleware pipeline
+      const ctx = createContext(req, res);
+      const pipeline = new MiddlewarePipeline();
+
+      // CORS middleware
+      pipeline.use(corsMiddleware());
+
+      // Tracing middleware
+      pipeline.use(tracingMiddleware());
+
+      // Body limit middleware (10MB limit)
+      pipeline.use(bodyLimitMiddleware(10 * 1024 * 1024));
+
+      // Rate limiting middleware
+      pipeline.use(async (c, next) => {
+        const clientIP = c.clientIp;
+        const url = new URL(c.req.url!, `https://${c.req.headers.host}`);
+        const pathRule = ACTIVE_CONFIG.server.paths.find((p) =>
+          url.pathname.startsWith(p.path),
         );
-        return;
-      }
-      if(req.url?.startsWith("/metrics") || req.url?.startsWith("/__metrics")){
-        const parsedUrl = new URL(req.url, `http://${req.headers.host || "localhost"}`);
-        const tenantFilter = parsedUrl.searchParams.get("tenant") || undefined;
-        res.writeHead(200, {
-          "Content-Type": "text/plain; version=0.0.4; charset=utf-8",
-        });
-        const snapshots = await collectWorkerMetricSnapshots();
-        const allUpstreams = [
-          ...new Set([
-            ...ACTIVE_CONFIG.server.upstreams.map((u) => u.id),
-            ...registry.getAll().map((s) => s.id),
-          ]),
-        ];
-        const aggregatedRegistry = new MetricsRegistry(HEALTHY_UPSTREAMS);
-        aggregatedRegistry.mergeSnapshot(metricsRegistry.getSnapshot());
-        for(const snap of snapshots){
-          aggregatedRegistry.mergeSnapshot(snap);
-        }
-        res.end(aggregatedRegistry.getExpositionFormat(allUpstreams, tenantFilter));
-        return;
-      }
-      if(req.url === "/__registry"){
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify(registry.getStats(), null, 2));
-        return;
-      }
-      if(req.url === "/__ready"){
-        const result = await readinessProbe.isReady();
-        res.writeHead(result.ready ? 200 : 503, { "Content-Type": "application/json" });
-        res.end(JSON.stringify(result));
-        return;
-      }
-      if(req.url === "/__cache-stats"){
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify(cache.getStats(), null, 2));
-        return;
-      }
-      if(req.url === "/__registry/register" && req.method === "POST"){
-        let body = "";
-        req.on("data", (chunk) => {
-          body += chunk;
-        });
-        req.on("end", () => {
-          try{
-            const { id, url, metadata } = JSON.parse(body);
-            if(!id || !url){
-              res.writeHead(400);
-              res.end(JSON.stringify({ error: "id and url are required" }));
-              return;
-            }
-            const service = registry.register({ id, url, metadata });
-            res.writeHead(201, { "Content-Type": "application/json" });
-            res.end(
+
+        // Global Rate Limiter Check
+        const effectiveGlobalRateLimit = getEffectiveRateLimit(ACTIVE_CONFIG);
+        if (globalRateLimiter && effectiveGlobalRateLimit && effectiveGlobalRateLimit.enabled !== false) {
+          const allowed = await globalRateLimiter.isAllowed(clientIP);
+          const algoState = await globalRateLimiter.getAlgorithmState(clientIP);
+          if (!allowed) {
+            logger.warn(
+              "RateLimit",
+              `BLOCKED ${clientIP} via [${globalRateLimiter.getAlgorithm()}]`,
+              { ...algoState, limit: effectiveGlobalRateLimit.maxRequests },
+            );
+            const retryAfter = Math.ceil(
+              (globalRateLimiter.getResetTime(clientIP) - Date.now()) / 1000,
+            );
+            c.res.writeHead(429, {
+              "Content-Type": "application/json",
+              "Retry-After": retryAfter.toString(),
+              "X-RateLimit-Scope": "global",
+              "X-RateLimit-Limit": effectiveGlobalRateLimit.maxRequests.toString(),
+              "X-RateLimit-Remaining": "0",
+              "X-RateLimit-Reset": globalRateLimiter.getResetTime(clientIP).toString(),
+              "X-RateLimit-Algorithm": globalRateLimiter.getAlgorithm(),
+            });
+            c.res.end(
               JSON.stringify({
-                message: `Service ${id} registered!`,
-                service,
+                error: "Too Many Requests",
+                scope: "global",
+                algorithm: globalRateLimiter.getAlgorithm(),
+                state: algoState,
+                retryAfter: `${retryAfter}s`,
               }),
             );
-          } catch {
-            res.writeHead(400);
-            res.end(JSON.stringify({ error: "Invalid JSON body" }));
+            return;
+          } else {
+            logger.info(
+              "RateLimit",
+              `ALLOWED ${clientIP} via [${globalRateLimiter.getAlgorithm()}]`,
+              { ...algoState, limit: effectiveGlobalRateLimit.maxRequests },
+            );
           }
-        });
-        return;
-      }
-      if(req.url?.startsWith("/__registry/heartbeat/") && req.method === "PUT"){
-        const id = req.url.substring("/__registry/heartbeat/".length);
-        if(id){
-          const success = registry.heartbeat(id);
-          if(success){
-            res.writeHead(200, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ status: "OK", message: `Heartbeat for ${id} recorded` }));
-          }else {
-            res.writeHead(404, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: `Service ${id} not found` }));
-          }
-        }else {
-          res.writeHead(400, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: "Service id is required" }));
         }
-        return;
-      }
-      if(req.url?.startsWith("/__registry/deregister/") && req.method === "DELETE"){
-        const id = req.url.substring("/__registry/deregister/".length);
-        if(id){
-          const success = registry.deregister(id);
-          if(success){
-            res.writeHead(200, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ message: `Service ${id} deregistered` }));
-          }else {
-            res.writeHead(404, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: `Service ${id} not found` }));
-          }
-        }else {
-          res.writeHead(400, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: "Service id is required" }));
-        }
-        return;
-      }
-      const url = new URL(req.url!, `https://${req.headers.host}`);
-      const pathRule = ACTIVE_CONFIG.server.paths.find((p) =>
-        url.pathname.startsWith(p.path),
-      );
-      // 1. Global Rate Limiter Check (Server Perimeter Defense)
-      const effectiveGlobalRateLimit = ACTIVE_CONFIG.rateLimit ?? ACTIVE_CONFIG.server.rateLimit;
-      if (globalRateLimiter && effectiveGlobalRateLimit && effectiveGlobalRateLimit.enabled !== false) {
-        const allowed = await globalRateLimiter.isAllowed(clientIP);
-        const algoState = await globalRateLimiter.getAlgorithmState(clientIP);
-        if (!allowed) {
-          logger.warn(
-            "RateLimit",
-            `BLOCKED ${clientIP} via [${globalRateLimiter.getAlgorithm()}]`,
-            { ...algoState, limit: effectiveGlobalRateLimit.maxRequests },
-          );
-          const retryAfter = Math.ceil(
-            (globalRateLimiter.getResetTime(clientIP) - Date.now()) / 1000,
-          );
-          res.writeHead(429, {
-            "Content-Type": "application/json",
-            "Retry-After": retryAfter.toString(),
-            "X-RateLimit-Scope": "global",
-            "X-RateLimit-Limit": effectiveGlobalRateLimit.maxRequests.toString(),
-            "X-RateLimit-Remaining": "0",
-            "X-RateLimit-Reset": globalRateLimiter.getResetTime(clientIP).toString(),
-            "X-RateLimit-Algorithm": globalRateLimiter.getAlgorithm(),
-          });
-          res.end(
-            JSON.stringify({
-              error: "Too Many Requests",
-              scope: "global",
-              algorithm: globalRateLimiter.getAlgorithm(),
-              state: algoState,
-              retryAfter: `${retryAfter}s`,
-            }),
-          );
-          return;
-        } else {
-          logger.info(
-            "RateLimit",
-            `ALLOWED ${clientIP} via [${globalRateLimiter.getAlgorithm()}]`,
-            { ...algoState, limit: effectiveGlobalRateLimit.maxRequests },
-          );
-        }
-      }
 
-      // 2. Route-Level Rate Limiter Check (Endpoint Specific Defense)
-      if (pathRule?.rateLimit) {
-        const routeLimiter = rateLimiters.get(pathRule.path);
-        if (routeLimiter && !(await routeLimiter.isAllowed(clientIP))) {
-          const retryAfter = Math.ceil(
-            (routeLimiter.getResetTime(clientIP) - Date.now()) / 1000,
-          );
-          res.writeHead(429, {
-            "Content-Type": "application/json",
-            "Retry-After": retryAfter.toString(),
-            "X-RateLimit-Scope": "route",
-            "X-RateLimit-Limit": pathRule.rateLimit.maxRequests.toString(),
-            "X-RateLimit-Remaining": "0",
-            "X-RateLimit-Reset": routeLimiter.getResetTime(clientIP).toString(),
-            "X-RateLimit-Algorithm": routeLimiter.getAlgorithm(),
-          });
-          res.end(
-            JSON.stringify({
-              error: "Too Many Requests",
-              scope: "route",
-              retryAfter: `${retryAfter}s`,
-              algorithm: routeLimiter.getAlgorithm(),
-            }),
-          );
-          return;
+        // Route-Level Rate Limiter Check
+        if (pathRule?.rateLimit) {
+          const routeLimiter = rateLimiters.get(pathRule.path);
+          if (routeLimiter && !(await routeLimiter.isAllowed(clientIP))) {
+            const retryAfter = Math.ceil(
+              (routeLimiter.getResetTime(clientIP) - Date.now()) / 1000,
+            );
+            c.res.writeHead(429, {
+              "Content-Type": "application/json",
+              "Retry-After": retryAfter.toString(),
+              "X-RateLimit-Scope": "route",
+              "X-RateLimit-Limit": pathRule.rateLimit.maxRequests.toString(),
+              "X-RateLimit-Remaining": "0",
+              "X-RateLimit-Reset": routeLimiter.getResetTime(clientIP).toString(),
+              "X-RateLimit-Algorithm": routeLimiter.getAlgorithm(),
+            });
+            c.res.end(
+              JSON.stringify({
+                error: "Too Many Requests",
+                scope: "route",
+                retryAfter: `${retryAfter}s`,
+                algorithm: routeLimiter.getAlgorithm(),
+              }),
+            );
+            return;
+          }
         }
-      }
-      if(req.method === "GET" || req.method === "HEAD"){
-        const skipCache = url.pathname.startsWith("/api/upload/") || (pathRule?.cache?.enabled === false);
-        if(!skipCache){
-          const cacheKey = cache.buildKey("GET", url.pathname + url.search);
-          const cachedJson = await cache.get(cacheKey);
-          if(cachedJson){
-            try {
-              const cached = JSON.parse(cachedJson);
-              res.writeHead(cached.statusCode ?? 200, {
-                ...(cached.headers || {}),
-                "X-Cache": "HIT",
-              });
-              const bodyBuf = cached.isCompressed && cached.encoding === "gzip"
-                ? Buffer.from(cached.body, "base64")
-                : (typeof cached.body === "string" ? Buffer.from(cached.body) : cached.body);
-              if (req.method === "HEAD") {
-                res.end();
-              } else {
-                res.end(bodyBuf);
-              }
-              const tenantId = (req.headers["x-tenant-id"] as string) ?? "none";
-              metricsRegistry.recordCacheOp("hit");
-              metricsRegistry.recordRequest(
-                req.method,
-                req.url ?? "",
-                cached.statusCode ?? 200,
-                "cache",
-                0,
-                tenantId,
-              );
-              writeAccessLog(
-                ACTIVE_CONFIG.server.accessLog,
-                clientIP,
-                req.method,
-                req.url ?? "",
-                cached.statusCode ?? 200,
-                req.method === "HEAD" ? 0 : Buffer.byteLength(bodyBuf),
-                0,
-                (req.headers["user-agent"] as string) ?? "-",
-              );
-              if(ACTIVE_CONFIG.observability?.tenantDelivery?.mode === "webhook"){
-                tenantLogStreamer.queueLog(tenantId, {
-                  timestamp: new Date().toISOString(),
-                  clientIp: clientIP,
-                  method: "GET",
-                  url: req.url ?? "",
-                  statusCode: cached.statusCode ?? 200,
-                  bytesSent: Buffer.byteLength(bodyBuf),
-                  latencyMs: 0,
-                  userAgent: (req.headers["user-agent"] as string) ?? "-",
+
+        await next();
+      });
+
+      // Cache middleware
+      pipeline.use(async (c, next) => {
+        const clientIP = c.clientIp;
+        const url = new URL(c.req.url!, `https://${c.req.headers.host}`);
+        const pathRule = ACTIVE_CONFIG.server.paths.find((p) =>
+          url.pathname.startsWith(p.path),
+        );
+
+        if (c.req.method === "GET" || c.req.method === "HEAD") {
+          const skipCache = url.pathname.startsWith("/api/upload/") || (pathRule?.cache?.enabled === false);
+          if (!skipCache) {
+            const cacheKey = cache.buildKey("GET", url.pathname + url.search);
+            const cachedJson = await cache.get(cacheKey);
+            if (cachedJson) {
+              try {
+                const cached = JSON.parse(cachedJson);
+                c.res.writeHead(cached.statusCode ?? 200, {
+                  ...(cached.headers || {}),
+                  "X-Cache": "HIT",
                 });
+                const bodyBuf = cached.isCompressed && cached.encoding === "gzip"
+                  ? Buffer.from(cached.body, "base64")
+                  : (typeof cached.body === "string" ? Buffer.from(cached.body) : cached.body);
+                if (c.req.method === "HEAD") {
+                  c.res.end();
+                } else {
+                  c.res.end(bodyBuf);
+                }
+                const tenantId = (c.req.headers["x-tenant-id"] as string) ?? "none";
+                metricsRegistry.recordCacheOp("hit");
+                metricsRegistry.recordRequest(
+                  c.req.method,
+                  c.req.url ?? "",
+                  cached.statusCode ?? 200,
+                  "cache",
+                  0,
+                  tenantId,
+                );
+                writeAccessLog(
+                  ACTIVE_CONFIG.server.accessLog,
+                  clientIP,
+                  c.req.method,
+                  c.req.url ?? "",
+                  cached.statusCode ?? 200,
+                  c.req.method === "HEAD" ? 0 : Buffer.byteLength(bodyBuf),
+                  0,
+                  (c.req.headers["user-agent"] as string) ?? "-",
+                );
+                if (ACTIVE_CONFIG.observability?.tenantDelivery?.mode === "webhook") {
+                  tenantLogStreamer.queueLog(tenantId, {
+                    timestamp: new Date().toISOString(),
+                    clientIp: clientIP,
+                    method: "GET",
+                    url: c.req.url ?? "",
+                    statusCode: cached.statusCode ?? 200,
+                    bytesSent: Buffer.byteLength(bodyBuf),
+                    latencyMs: 0,
+                    userAgent: (c.req.headers["user-agent"] as string) ?? "-",
+                  });
+                }
+                return;
+              } catch {
+                // fallback if cache corrupt
               }
-              return;
-            } catch {
-              // fallback if cache corrup
             }
           }
         }
-      }
-      if(["POST", "PUT", "PATCH", "DELETE"].includes(req.method ?? "")){
-        await cache.invalidate(url.pathname);
-      }
-      const contentLength = parseInt(req.headers["content-length"] ?? "0", 10);
-      if(contentLength > 10 * 1024 * 1024){ 
-        res.writeHead(413, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Payload Too Large" }));
-        return;
-      }
-      const chunks: Buffer[] = [];
-      req.on("data", (chunk: Buffer) => {
-        chunks.push(chunk);
+
+        if (["POST", "PUT", "PATCH", "DELETE"].includes(c.req.method ?? "")) {
+          await cache.invalidate(url.pathname);
+        }
+
+        await next();
       });
-      req.on("end", () => {
-        const bodyBuffer = Buffer.concat(chunks);
-        const body =
-          bodyBuffer.length > 0 ? bodyBuffer.toString("binary") : null;
-        const payload: WorkerMessageType = {
-          requestType: req.method ?? "GET",
-          headers: req.headers,
-          body: body,
-          url: `${req.url}`,
-        };
-        dispatchToWorker(payload, clientIP, res);
+
+      // Dispatch to worker
+      pipeline.use(async (c) => {
+        const clientIP = c.clientIp;
+        const chunks: Buffer[] = [];
+        c.req.on("data", (chunk: Buffer) => {
+          chunks.push(chunk);
+        });
+        c.req.on("end", () => {
+          const bodyBuffer = Buffer.concat(chunks);
+          const body = bodyBuffer.length > 0 ? bodyBuffer.toString("binary") : null;
+          const payload: WorkerMessageType = {
+            requestType: c.req.method ?? "GET",
+            headers: c.req.headers,
+            body: body,
+            url: `${c.req.url}`,
+          };
+          dispatchToWorker(payload, clientIP, c.res);
+        });
       });
-    });
+
+      await pipeline.run(ctx);
+    };
+
+    if (sslOptions.key.length > 0) {
+      httpsServer = https.createServer(sslOptions, proxyRequestHandler);
     }
     if(httpsServer){
       httpsServer.on("upgrade", wsUpgradeHandler);

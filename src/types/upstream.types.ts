@@ -25,4 +25,6 @@ export interface UpstreamState {
   slowStartEndTime: number;
   maxConnections?: number | undefined;
   currentWeight: number;
+  url?: string;
+  totalBytes?: number;
 }

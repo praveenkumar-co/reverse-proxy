@@ -13,7 +13,7 @@ export class MiddlewarePipeline {
   async run(ctx: RequestContext): Promise<void> {
     let index = 0;
     const next = async (): Promise<void> => {
-      if (index >= this.stack.length) return;
+      if (ctx.res.writableEnded || index >= this.stack.length) return;
       const fn = this.stack[index++]!;
       await fn(ctx, next);
     };

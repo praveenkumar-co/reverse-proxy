@@ -33,14 +33,13 @@ export class ConsistentHashingStrategy implements IStrategy {
     }
     return hash >>> 0;
   }
-
   pick(
     candidates: UpstreamState[],
     clientIp?: string,
   ): UpstreamState | null {
     if(candidates.length === 0) return null;
     if(!clientIp) return candidates[0]!;
-    const hash = this.fnv1a(clientIp);1
+    const hash = this.fnv1a(clientIp);
     const ringMatch =
       this.ring.find((node) => node.hash >= hash) ?? this.ring[0];
     if(!ringMatch) return candidates[0]!;
