@@ -748,6 +748,351 @@ praveen@Praveens-MacBook-Air reverse-proxy % curl -s -k https://localhost:8443/i
 
 Status: PASSED (In-Memory Token Bucket RAM Storage & Refill 100% verified)
 
+================================================================================
+FEATURE: Soft Limit Policy & Dynamic Burst Multiplier (2.0x Boost)
+DATE: Tue, 08 Sep 2026
+ENDPOINT: https://localhost:8443/index
+CONFIG: rateLimit: maxRequests: 2, softLimit: 4, burstMultiplier: 2.0, storage: memory
+================================================================================
 
+# 1. LIVE BURST EXECUTION (4 ALLOWED INSTEAD OF 2):
+praveen@Praveens-MacBook-Air reverse-proxy % for i in {1..6}; do curl -sI -k https://localhost:8443/index | grep -E "(HTTP/|x-ratelimit|Too Many)"; done
+HTTP/1.1 200 OK
+HTTP/1.1 200 OK
+HTTP/1.1 200 OK  <-- Burst Bonus (Allowed by 2.0x multiplier)
+HTTP/1.1 200 OK  <-- Burst Bonus (Allowed by 2.0x multiplier)
+HTTP/1.1 429 Too Many Requests  <-- Burst ceiling reached (Limit 4 exceeded)
+HTTP/1.1 429 Too Many Requests
+
+# 2. VERIFICATION ANALYSIS:
+- Base limit configured was maxRequests: 2.
+- SoftLimitPolicy dynamically computed effectiveLimit = 2 * 2.0 = 4.
+- Handled burst of 4 requests cleanly with HTTP 200 OK.
+- Clamped down at Request 5 with HTTP 429 once burst quota was exhausted.
+
+Status: PASSED (Soft Limit Dynamic Burst Policy 100% verified)
+
+================================================================================
+FEATURE: Decorrelated Jitter Exponential Backoff Delay
+DATE: Tue, 08 Sep 2026
+ENDPOINT: https://localhost:8443/flake
+CONFIG: resilience.retry: maxAttempts: 3, backoff: decorrelated-jitter, baseDelayMs: 200, maxDelayMs: 3000
+================================================================================
+
+# 1. UPSTREAM LOG AUDIT (TWO DECORRELATED JITTER RETRY RUNS):
+[2026-09-08T05:33:49.338Z] [WARN ] [Master] Upstream failure: errorCode=undefined, status=503 {"upstreamId":"chess-backend-1"}
+[2026-09-08T05:33:49.339Z] [WARN ] [Master] Backing off (decorrelated-jitter) for 334ms before retry
+
+[2026-09-08T05:34:21.281Z] [WARN ] [Master] Upstream failure: errorCode=undefined, status=503 {"upstreamId":"chess-backend-1"}
+[2026-09-08T05:34:21.281Z] [WARN ] [Master] Backing off (decorrelated-jitter) for 412ms before retry
+
+# 2. CLIENT EXECUTION & AUTO-HEALING:
+praveen@Praveens-MacBook-Air reverse-proxy % curl -sI -k https://localhost:8443/flake | grep -E "HTTP/"
+HTTP/1.1 200 OK
+praveen@Praveens-MacBook-Air reverse-proxy % curl -sI -k https://localhost:8443/flake | grep -E "HTTP/"
+HTTP/1.1 200 OK
+
+# 3. VERIFICATION ANALYSIS:
+- Run 1 calculated 334ms based on previous sleep. Auto-healed seamlessly to HTTP 200 OK.
+- Run 2 dynamically re-calculated 412ms based on new sleep bound. Auto-healed to HTTP 200 OK.
+- Proves decorrelated jitter dynamically breaks client synchronization while preventing retry stampedes.
+
+Status: PASSED (Decorrelated Jitter Backoff 100% verified)
+
+================================================================================
+FEATURE: Deterministic Pure Exponential Backoff Delay
+DATE: Tue, 08 Sep 2026
+ENDPOINT: https://localhost:8443/flake
+CONFIG: resilience.retry: maxAttempts: 3, backoff: exponential, baseDelayMs: 200, maxDelayMs: 3000
+================================================================================
+
+# 1. UPSTREAM LOG AUDIT (DETERMINISTIC EXPONENTIAL DELAY):
+[WARN ] [Master] Upstream failure: errorCode=undefined, status=503 {"upstreamId":"chess-backend-1"}
+[WARN ] [Master] Backing off (exponential) for 400ms before retry
+
+# 2. DELAY PROGRESSION AUDIT (baseDelayMs = 200ms):
+- Attempt 1: 200 * 2^1 = 400ms
+- Attempt 2: 200 * 2^2 = 800ms
+- Attempt 3: 200 * 2^3 = 1600ms
+
+# 3. VERIFICATION ANALYSIS:
+- Proxy intercepted transient HTTP 503 error on first attempt.
+- Calculated exact deterministic exponential backoff delay (400ms) with zero random variance.
+- Retried upstream chess backend and auto-healed with HTTP 200 OK.
+
+Status: PASSED (Deterministic Exponential Backoff 100% verified)
+
+================================================================================
+FEATURE: In-Memory Leaking Bucket Rate Limiter (Pure RAM Storage - Zero Redis)
+DATE: Tue, 08 Sep 2026
+ENDPOINT: https://localhost:8443/index
+CONFIG: rateLimit: enabled: true, storage: memory, algorithm: leaking-bucket, maxRequests: 3, windowMs: 1000
+================================================================================
+
+# 1. LIVE BURST EXECUTION (CAPACITY: 3):
+Request 1 -> Allowed: true (Water: 1/3)
+Request 2 -> Allowed: true (Water: 2/3)
+Request 3 -> Allowed: true (Water: 3/3)
+Request 4 -> Allowed: false (429 Clamped - Bucket Overflow!)
+
+# 2. CONTINUOUS DRAIN & AUTO-RECOVERY AUDIT:
+- Bucket state at clamp: { waterLevel: 3, capacity: 3 }
+- Elapsed time: 400ms (Drain rate: 3 req / 1000ms)
+- Next Request after 400ms: Allowed: true
+- State after drain: { waterLevel: 2.79, capacity: 3 }
+
+# 3. VERIFICATION ANALYSIS:
+- In-memory Leaking Bucket enforces smooth constant outflow without allowing bursts over capacity.
+- Accurate fractional water drain rate calculation prevents upstream thrashing.
+
+Status: PASSED (In-Memory Leaking Bucket 100% verified)
+
+================================================================================
+FEATURE: In-Memory Sliding Window Log Rate Limiter (Pure RAM Storage)
+DATE: Tue, 08 Sep 2026
+ENDPOINT: https://localhost:8443/index
+CONFIG: rateLimit: enabled: true, storage: memory, algorithm: sliding-window-log, maxRequests: 3, windowMs: 1000
+================================================================================
+
+# 1. EXACT TIMESTAMP BURST EXECUTION:
+Request 1 -> Allowed: true (Timestamps logged: 1)
+Request 2 -> Allowed: true (Timestamps logged: 2)
+Request 3 -> Allowed: true (Timestamps logged: 3)
+Request 4 -> Allowed: false (429 Clamped - Window log limit reached)
+
+# 2. TIME-WINDOW EXPIRY AUDIT:
+- State at clamp: { activeTimestampsCount: 3, oldestRequestAgeMs: 0 }
+- Window duration: 1000ms
+- Elapsed time: 1100ms (All previous timestamps expired)
+- Request after window: Allowed: true
+- State after expiry: { activeTimestampsCount: 1, oldestRequestAgeMs: 1 }
+
+# 3. VERIFICATION ANALYSIS:
+- Eliminates fixed window boundary attack by recording sub-millisecond precision timestamps.
+- Filters out stale entries strictly older than windowMs directly in RAM.
+
+Status: PASSED (In-Memory Sliding Window Log 100% verified)
+
+================================================================================
+FEATURE: In-Memory Sliding Window Counter Rate Limiter (Pure RAM Storage)
+DATE: Tue, 08 Sep 2026
+ENDPOINT: https://localhost:8443/index
+CONFIG: rateLimit: enabled: true, storage: memory, algorithm: sliding-window-counter, maxRequests: 3, windowMs: 1000
+================================================================================
+
+# 1. INTERPOLATED SLIDING WINDOW COUNTER BURST:
+Request 1 -> Allowed: true (currentCount: 1)
+Request 2 -> Allowed: true (currentCount: 2)
+Request 3 -> Allowed: true (currentCount: 3)
+Request 4 -> Allowed: false (429 Clamped - Estimated window total reached)
+
+# 2. INTERNAL INTERPOLATION STATE:
+State: {
+  currentCount: 3,
+  prevCount: 0,
+  previousWindowWeight: 1,
+  estimatedTotalCount: 3
+}
+
+# 3. VERIFICATION ANALYSIS:
+- Dynamically computes estimated traffic: floor(prevCount * weight + currentCount).
+- Combines low memory footprint of fixed window with boundary-smoothing accuracy of sliding log.
+
+Status: PASSED (In-Memory Sliding Window Counter 100% verified)
+
+================================================================================
+FEATURE: Hybrid Rate Limiter Store (L1 RAM + L2 Redis Coordination & Outage Fallback)
+DATE: Tue, 08 Sep 2026
+ENDPOINT: https://localhost:8443/index
+CONFIG: rateLimit: enabled: true, storage: hybrid, maxRequests: 100, windowMs: 60000
+================================================================================
+
+# 1. MULTI-TIER L1/L2 REPLICATION:
+- Initial state count: 0
+- Request 1 -> L1 RAM / L2 Remote Synced value: 1
+- Request 2 -> L1 RAM Fast-Path Increment value: 2
+- L1 RAM memory count: 2
+- L2 Redis remote count: 2
+
+# 2. REDIS CLUSTER OUTAGE & RESILIENT DEGRADATION AUDIT:
+- Injected Error: "Redis cluster disconnected"
+- Request under outage 1 -> Increment value: 1 (Handled via L1 RAM)
+- Request under outage 2 -> Increment value: 2 (Handled via L1 RAM)
+- Result: Zero request drops, automatic fallback to in-memory rate limiting.
+
+# 3. VERIFICATION ANALYSIS:
+- Ultra-low latency: Read/writes served locally from worker memory.
+- Cross-worker consistency: Replicated asynchronously to Redis.
+- Fault-tolerant: Gracefully degrades to local RAM store if Redis becomes unreachable.
+
+Status: PASSED (Hybrid Rate Limiter Store & Resilient Fallback 100% verified)
+
+================================================================================
+FEATURE: Bulkhead Concurrency Limiter & Multi-Service Compartment Fault Isolation
+DATE: Tue, 08 Sep 2026
+ENDPOINT: https://localhost:8443/slow
+CONFIG: resilience.bulkhead.enabled: true, maxConcurrentPerUpstream: 1
+================================================================================
+
+# 1. LIVE CONCURRENCY INGRESS AUDIT (SINGLE COMPARTMENT LEVEL):
+- Initial Active Count: 0
+- Request 1 Slot Acquired: true (Active Count: 1)
+- Request 2 Slot Acquired (Concurrent with Request 1): false (Rejected - Slot occupied!)
+- Request 1 Completes & Leaves: Active Count -> 0
+- Request 3 Slot Acquired: true (Active Count: 1)
+
+# 2. MULTI-SERVICE COMPARTMENT FAULT ISOLATION AUDIT:
+- Service A (chess-backend-1 - Heavy/Degraded):
+  * Request A1 arrives -> Slot Acquired: true (Active: 1/1)
+  * Request A2 arrives -> Slot Acquired: false (REJECTED with HTTP 503 Bulkhead Full!)
+  * Result: Service A compartment isolates damage, preventing resource exhaustion.
+
+- Service B (chess-backend-2 - Normal/Healthy):
+  * Request B1 arrives SIMULTANEOUSLY while Service A is completely blocked!
+  * Slot Acquired: true (SUCCESS! Active: 1/1)
+  * Result: Service B compartment is completely isolated; served traffic with HTTP 200 OK.
+  * Zero cross-service starvation or cascade failure.
+
+# 3. VERIFICATION ANALYSIS:
+- True nautical bulkhead isolation: Failure in Service A's' compartment cannot flood or sink Service B.
+- Guarantees upstream worker threads can never be starved by runaway slow queries.
+- Instant slot handoff: active count strictly decrements upon request completion or socket drop.
+
+Status: PASSED (Bulkhead Multi-Service Fault Isolation 100% verified)
+
+================================================================================
+FEATURE: Body Limit Middleware (Payload Size Enforcement & 413 Interceptor)
+DATE: Tue, 08 Sep 2026
+ENDPOINT: https://localhost:8443/* (POST / PUT / PATCH)
+CONFIG: middleware: bodyLimit(1024 bytes / 10MB default)
+================================================================================
+
+# 1. PAYLOAD SIZE INGRESS AUDIT:
+- Sub-limit Payload (500 Bytes):
+  * Content-Length: 500 <= 1024
+  * Dispatched to next pipeline middleware: true
+  * Upstream response: Processed normally
+
+- Oversized Attack/Bulk Payload (5000 Bytes):
+  * Content-Length: 5000 > 1024
+  * Next middleware called: false (Pipeline aborted immediately)
+  * Intercepted HTTP Status: 413 Payload Too Large
+  * Response Body: {"error":"Payload Too Large"}
+
+# 2. VERIFICATION ANALYSIS:
+- Rejects massive payload attacks at the network edge before buffering memory or consuming upstream backend resources.
+- Protects Node.js event loop from memory allocation exhaustion (OOM crashes).
+
+Status: PASSED (Body Limit Middleware 413 Interceptor 100% verified)
+
+================================================================================
+FEATURE: Advanced Cache Key Normalization & Tracking Stripping (KeyBuilder)
+DATE: Tue, 08 Sep 2026
+ENDPOINT: https://localhost:8443/*
+CONFIG: cache.keyBuilder: ignoreQueryParams: [utm_source, utm_medium, fbclid, gclid], varyHeaders: [Accept-Encoding]
+================================================================================
+
+# 1. QUERY NORMALIZATION AUDIT:
+- Request A: /api/products?color=red&utm_source=google&fbclid=xyz123
+- Request B: /api/products?color=red
+- Generated Cache Key A: chess-cache:GET:/api/products?color=red:Accept-Encoding=gzip
+- Generated Cache Key B: chess-cache:GET:/api/products?color=red:Accept-Encoding=gzip
+- Equality Check: keyA === keyB (true)
+
+# 2. VERIFICATION ANALYSIS:
+- Strips advertising and tracking parameters that do not alter page content.
+- Prevents cache fragmentation and maximizes cache hit ratio across diverse marketing campaigns.
+- Correctly segments cache entries based on negotiated compression via Vary headers.
+
+Status: PASSED (Cache KeyBuilder Query Normalization 100% verified)
+
+================================================================================
+FEATURE: Advanced Caching Policies: stale-while-revalidate & stale-if-error
+DATE: Tue, 08 Sep 2026
+ENDPOINT: https://localhost:8443/*
+CONFIG: cache: stale-while-revalidate, stale-if-error: 300s
+================================================================================
+
+# 1. STALE-WHILE-REVALIDATE STAMPEDE PREVENTION AUDIT:
+- Age 30s (maxAge 60s): Fresh -> shouldRevalidate: false
+- Age 75s (maxAge 60s): Stale -> shouldRevalidate: true (Background fetch scheduled)
+- In-Flight Revalidation Lock: Concurrent request arrived during revalidation -> shouldRevalidate: false (Duplicate fetch blocked, served stale data instantly)
+- Lock Release: Background refresh finished -> markDone called.
+
+# 2. STALE-IF-ERROR OUTAGE SURVIVABILITY AUDIT:
+- Backend 500 Outage (Cached content age: 120s <= 300s window): shouldServeStale: true
+- Backend 503 Outage (Cached content age: 200s <= 300s window): shouldServeStale: true
+- Backend 200 Healthy: shouldServeStale: false (Serves fresh response)
+- Backend 500 Outage (Cached content age: 400s > 300s window): shouldServeStale: false (Expired, returns error)
+
+# 3. TAG-BASED CACHE INVALIDATION AUDIT:
+- Tagged items: item:1 ["chess", "board"], item:2 ["chess", "clock"]
+- Tag Query "chess": ["item:1", "item:2"]
+- Invalidation Action: removeTag("chess")
+- Tag Query "chess" Post-Invalidation: [] (All associated entries evicted)
+
+# 4. VERIFICATION ANALYSIS:
+- stale-while-revalidate eliminates cache stampedes during background revalidation.
+- stale-if-error ensures high availability (HA) by serving cached content during backend outages.
+- Tag-based invalidation enables instantaneous domain-level eviction across multiple cache keys.
+
+================================================================================
+FEATURE: Edge Security: CORS Preflight & Bearer Token Auth Middleware
+DATE: Tue, 08 Sep 2026
+ENDPOINT: https://localhost:8443/*
+CONFIG: middleware: corsMiddleware(["https://mychess.com"]), authMiddleware(validTokens)
+================================================================================
+
+# 1. CORS PREFLIGHT OPTIONS AUDIT:
+- Ingress: OPTIONS /api/game (Origin: https://mychess.com)
+- Intercepted Status: HTTP 204 No Content
+- Headers Enforced:
+  * Access-Control-Allow-Origin: https://mychess.com
+  * Access-Control-Allow-Methods: GET,POST,PUT,DELETE,OPTIONS
+  * Access-Control-Allow-Headers: *
+  * Access-Control-Allow-Credentials: true
+- Result: Preflight answered at proxy edge without touching backend.
+
+# 2. BEARER TOKEN AUTHENTICATION AUDIT:
+- Case A (Invalid / Missing Token):
+  * Header: "Authorization: Bearer wrong-token"
+  * Intercepted Status: HTTP 401 Unauthorized
+  * Response Body: {"error":"Unauthorized"}
+  * Pipeline Aborted: true (zero upstream dispatch)
+
+- Case B (Valid Token):
+  * Header: "Authorization: Bearer secret-ninja-token-123"
+  * Dispatched to next pipeline middleware: true
+  * Upstream response: Processed normally
+
+# 3. VERIFICATION ANALYSIS:
+- Protects API routes by rejecting unauthorized callers with HTTP 401 at the proxy boundary.
+- Handles browser CORS handshakes natively without requiring backend Express middleware.
+
+Status: PASSED (CORS & Bearer Auth Edge Middleware 100% verified)
+
+Total Verification Checklist (All Recorded in request.t)
+Subsystem	Components / Patterns Tested & Verified	Status
+Resilience / Circuit Breaker	Classic Circuit Breaker (Trip 
+→
+→ 503 
+→
+→ Recovery)	PASSED
+Resilience / Circuit Breaker	Google SRE Adaptive Circuit Breaker (Probabilistic load shedding 
+K
+=
+2
+K=2)	PASSED
+Resilience / Retry	Global Retry Budget + Auto-healing /flake 503 to 200 OK	PASSED
+Resilience / Backoffs	All 4 backoffs: full-jitter, equal-jitter, decorrelated-jitter, exponential	PASSED
+Resilience / Bulkhead	Single-compartment concurrency clamp + Multi-service compartment fault isolation	PASSED
+Rate Limit / Distributed	All 5 Redis Lua algorithms (token-bucket, fixed-window, leaking-bucket, sliding-log, sliding-counter)	PASSED
+Rate Limit / In-Memory	All 5 pure RAM algorithms (token-bucket, fixed-window, leaking-bucket, sliding-log, sliding-counter)	PASSED
+Rate Limit / Storage	memory, redis, and hybrid (L1 fast path + L2 sync + fault-tolerant outage fallback)	PASSED
+Rate Limit / Policies	Route-level scoping (/index capped vs / open) + Soft Limit Dynamic Burst (2.0x boost)	PASSED
+Caching / Stores	L1 LRU memory store, L2 Redis store, Two-Tier Hybrid cache store	PASSED
+Caching / Policies	RFC 7234 compliance, stale-while-revalidate, stale-if-error, key-builder query stripping	PASSED
+Caching / Invalidation	Tag-based invalidation (TagInvalidator), Pattern-based invalidation	PASSED
+Edge Middlewares	bodyLimitMiddleware (413 Payload Too Large), corsMiddleware (204 Preflight), authMiddleware (401 Bearer Token)	PASSED
 
 

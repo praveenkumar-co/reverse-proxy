@@ -106,9 +106,7 @@ export class Logger {
     } catch {}
   }
 }
-
 export const logger = new Logger();
-
 export async function writeAccessLog(
   logPath: string | undefined,
   clientIp: string,

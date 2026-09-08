@@ -514,6 +514,7 @@ export async function createServer(config: CreateServerConfig){
         upstreamUrl: serviceInstance.url,
         clientIp, 
       };
+      logger.info("LoadBalancer", `Routed ${payload.requestType} ${payload.url} -> ${upstreamId} (${serviceInstance.url})`);
       const workerIndex = (attempt === 0) ? (nextWorkerIndex++) % WORKER_POOL.length : (nextWorkerIndex + attempt) % WORKER_POOL.length;
       const worker = WORKER_POOL[workerIndex];
       if(!worker){
@@ -687,6 +688,7 @@ export async function createServer(config: CreateServerConfig){
               "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
               "Access-Control-Allow-Headers": "*",
               "Access-Control-Allow-Credentials": "true",
+              "X-Upstream-Id": upstreamId,
               ...(reply.headers || {}),
             };
             if (effectiveCache?.enabled && isCacheMethod) {
