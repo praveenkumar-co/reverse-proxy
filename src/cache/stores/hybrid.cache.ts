@@ -6,7 +6,7 @@ export class HybridCache implements ICache {
   constructor(private l2: ICache, l1MaxSize: number, private defaultTtl: number){
     this.l1 = new InMemoryLRU(l1MaxSize);
   }
-  async get(key: string): Promise<string | null> {
+  async get(key: string): Promise<string | null>{
     const l1val = this.l1.get(key);
     if(l1val !== null) return l1val;
     try {

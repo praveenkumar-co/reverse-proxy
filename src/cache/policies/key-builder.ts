@@ -3,7 +3,6 @@ export interface KeyBuilderOptions {
   varyHeaders?: string[];
   prefix?: string;
 }
-
 export class KeyBuilder {
   constructor(private opts: KeyBuilderOptions = {}){}
 
