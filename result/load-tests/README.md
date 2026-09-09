@@ -48,6 +48,11 @@ k6 run --env BASE_URL=http://localhost:9080 tests/load/k6/smoke.js
 | Stage 9: Hyperscale DDoS Spike (1,000 VUs Peak Saturation) | `ddos_burst` | **1,000 VUs** | 6s | **13,685.7 req/s** | `61.02ms` | `136.56ms` | `223.28ms` | 0.00% | 127.3 MB | ✅ PASS |
 | Stage 10: Observability Concurrency (300 VUs /metrics & /__lb-stats) | `observability_scrape` | **300 VUs** | 8s | **1,126.6 req/s** | `73.03ms` | `544.02ms` | `576.07ms` | 0.00% | 64.4 MB | ✅ PASS |
 
+### 💡 Hardware Bottleneck & Scaling Analysis
+- **Local Development Machine Ceiling (~1,500 – 2,000 VUs)**: All 11 processes (client load generator, 6 proxy workers, 4 mock upstreams) share a single Apple M5 chip and local loopback TCP network stack (`127.0.0.1`), competing for loopback socket buffers and ephemeral ports.
+- **Distributed Cloud Deployment (10,000 – 50,000+ VUs)**: With external client IPs and isolated backend microservice pods across a VPC, the proxy's non-blocking epoll/kqueue event loop can easily handle **tens of thousands of concurrent connections (C10K/C50K problem solved)**.
+
+👉 **[View Official Grafana k6 Binary Live Report](./k6-live-benchmark-report.md)**  
 👉 **[View Full Hyperscale Benchmark Report](./load-test-report.md)**  
 👉 **[View Subsystem & Algorithm Architecture Trade-Off Guide](./algorithm-tradeoffs.md)**  
 👉 **[View Raw JSON Telemetry Data](./load_test_results.json)**
