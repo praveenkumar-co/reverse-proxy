@@ -16,6 +16,8 @@
     "build": "tsc -p .",
     "dev": "tsc-watch --onSuccess \"node dist/index.js --config config.yaml\"",
     "test": "tsc -p tsconfig.test.json && node --test dist-test/tests/unit/**/*.js dist-test/tests/integration/*.js",
+    "test:audit": "node tests/full-system-audit.mjs",
+    "test:live": "node tests/live-integration-test.mjs",
     "generate-certs": "bash scripts/generate-certs.sh",
     "lint": "eslint src --ext .ts"
   },
