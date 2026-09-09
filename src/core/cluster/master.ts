@@ -1064,6 +1064,7 @@ export async function createServer(config: CreateServerConfig){
           if (
             req.url?.startsWith("/__registry") ||
             req.url?.startsWith("/__ready") ||
+            req.url?.startsWith("/__health") ||
             req.url?.startsWith("/__lb-stats") ||
             req.url?.startsWith("/metrics")
           ) {

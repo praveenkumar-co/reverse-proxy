@@ -2,6 +2,9 @@ version: '3.8'
 services:
   ninja-proxy:
     image: ninja-proxy:distroless
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.distroless
     restart: unless-stopped
     ports:
       - "8080:8080"

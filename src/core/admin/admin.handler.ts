@@ -83,7 +83,7 @@ export async function handleAdminRequest(options: AdminHandlerOptions): Promise<
     return true;
   }
 
-  if (url === "/__ready") {
+  if (url === "/__ready" || url === "/__health") {
     const result = await readinessProbe.isReady();
     res.writeHead(result.ready ? 200 : 503, { "Content-Type": "application/json" });
     res.end(JSON.stringify(result));
