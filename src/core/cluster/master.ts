@@ -75,6 +75,7 @@ const rateLimiters = new Map<string, RateLimiter>();
 let globalRateLimiter: RateLimiter | undefined;
 const upstreamBulkheads = new Map<string, Bulkhead>();
 let nextWorkerIndex = 0;
+let isShuttingDown = false;
 
 interface PendingRequest {
   resolve: (parsed: any) => void;
@@ -414,6 +415,7 @@ export async function createServer(config: CreateServerConfig){
       }
     }
     cluster.on("exit", (worker) => {
+      if (isShuttingDown) return;
       const idx = WORKER_POOL.indexOf(worker);
       if (idx !== -1){
         WORKER_POOL.splice(idx, 1);
@@ -777,12 +779,25 @@ export async function createServer(config: CreateServerConfig){
         [...HEALTHY_UPSTREAMS].filter((id) => allowedUpstreams.includes(id))
       );
 
-      const upstreamId = lb.pickFiltered(
-        routeHealthyUpstreams.size > 0 ? routeHealthyUpstreams : HEALTHY_UPSTREAMS,
-        clientIP,
-        new Set(),
-        req.headers.cookie,
-      );
+      let upstreamId: string | null = null;
+      if (pathRule?.sticky){
+        const cookies = parseCookies(req.headers.cookie);
+        const stickId = cookies[ACTIVE_CONFIG.server.loadBalancing.stickyCookieName ?? "NINJA_ROUTE"];
+        if (
+          stickId &&
+          routeHealthyUpstreams.has(stickId)
+        ){
+          upstreamId = stickId;
+        }
+      }
+      if (!upstreamId){
+        upstreamId = lb.pickFiltered(
+          routeHealthyUpstreams.size > 0 ? routeHealthyUpstreams : HEALTHY_UPSTREAMS,
+          clientIP,
+          new Set(),
+          req.headers.cookie,
+        );
+      }
       if(!upstreamId){
         socket.destroy();
         return;
@@ -1056,12 +1071,15 @@ export async function createServer(config: CreateServerConfig){
     if(httpsServer){
       httpsServer.on("upgrade", wsUpgradeHandler);
     }
-    let isShuttingDown = false;
     async function gracefulShutdown(signal: string){
       if(isShuttingDown) return;
       isShuttingDown = true;
       logger.info("Master", `Received ${signal} — draining and shutting down`);
-      await cache.disconnect();
+      for(const worker of WORKER_POOL){
+        try { worker.kill("SIGTERM"); } catch {}
+      }
+      WORKER_POOL.length = 0;
+      await cache.disconnect().catch(() => {});
       httpServer.close();
       if(httpsServer){
         httpsServer.close(() => {
@@ -1070,6 +1088,7 @@ export async function createServer(config: CreateServerConfig){
       } else {
         process.exit(0);
       }
+      setTimeout(() => process.exit(0), 1000).unref();
     }
     process.on("SIGTERM", () => void gracefulShutdown("SIGTERM"));
     process.on("SIGINT", () => void gracefulShutdown("SIGINT"));

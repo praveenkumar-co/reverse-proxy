@@ -56,7 +56,9 @@ export class ServiceRegistry {
       for(const [id, s] of this.services.entries()){
         plainObj[id] = s;
       }
-      await fs.writeFile(this.persistencePath, JSON.stringify(plainObj, null, 2), "utf-8");
+      const tmpFile = `${this.persistencePath}.tmp.${process.pid}`;
+      await fs.writeFile(tmpFile, JSON.stringify(plainObj, null, 2), "utf-8");
+      await fs.rename(tmpFile, this.persistencePath);
     }catch (err: any){
       logger.error("Registry", `Failed to save disk snapshot: ${err.message}`);
     }
