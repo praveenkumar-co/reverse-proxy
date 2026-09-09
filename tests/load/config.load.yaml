@@ -2,7 +2,7 @@ server:
   host: "127.0.0.1"
   port: 9080
   listen: 9080
-  workers: 2
+  workers: 6
   trustProxy: true
   connectTimeoutMs: 3000
   readTimeoutMs: 5000
@@ -16,35 +16,66 @@ upstreams:
     url: "http://127.0.0.1:9001"
     weight: 1
     healthPath: "/health"
-    maxConnections: 500
+    maxConnections: 5000
   - id: app-b
     url: "http://127.0.0.1:9002"
     weight: 1
     healthPath: "/health"
-    maxConnections: 500
+    maxConnections: 5000
+  - id: app-c
+    url: "http://127.0.0.1:9003"
+    weight: 1
+    healthPath: "/health"
+    maxConnections: 5000
+  - id: app-d
+    url: "http://127.0.0.1:9004"
+    weight: 1
+    healthPath: "/health"
+    maxConnections: 5000
 
 routes:
   - path: "/api/live"
-    upstreams: ["app-a", "app-b"]
-  - path: "/api/cached"
-    upstreams: ["app-a", "app-b"]
+    upstreams: ["app-a", "app-b", "app-c", "app-d"]
+  - path: "/api/catalog"
+    upstreams: ["app-a", "app-b", "app-c", "app-d"]
+  - path: "/api/orders"
+    upstreams: ["app-a", "app-b", "app-c", "app-d"]
+  - path: "/api/users"
+    upstreams: ["app-a", "app-b", "app-c", "app-d"]
+  - path: "/api/sticky"
+    upstreams: ["app-a", "app-b", "app-c", "app-d"]
+    sticky: true
   - path: "/api/limited"
-    upstreams: ["app-a", "app-b"]
+    upstreams: ["app-a", "app-b", "app-c", "app-d"]
     rateLimit:
       windowMs: 10000
-      maxRequests: 20
+      maxRequests: 200
       algorithm: token-bucket
       storage: memory
+  - path: "/api/sliding"
+    upstreams: ["app-a", "app-b", "app-c", "app-d"]
+    rateLimit:
+      windowMs: 10000
+      maxRequests: 200
+      algorithm: sliding-window-counter
+      storage: memory
+  - path: "/api/cached"
+    upstreams: ["app-a", "app-b", "app-c", "app-d"]
 
 loadBalancing:
-  strategy: round-robin
+  strategy: power-of-two
 
 resilience:
   retry:
-    enabled: false
+    enabled: true
+    maxAttempts: 2
+    backoff: full-jitter
+    baseDelayMs: 50
+    maxDelayMs: 500
+    budgetPercent: 20
   circuitBreaker:
     mode: classic
-    failureThreshold: 10
+    failureThreshold: 30
     recoveryTimeMs: 10000
   bulkhead:
     enabled: false
