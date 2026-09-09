@@ -56,6 +56,315 @@ Ninja Reverse Proxy utilizes a highly performant **Master-Worker Cluster Archite
 
 ---
 
+## 📂 Complete Repository Directory Structure
+
+The following tree maps every single directory, file, and subsystem in the repository with its functional responsibility:
+
+```text
+reverse-proxy/
+├── README.md                                  # Project overview, architecture & operational guide
+├── package.json                               # Dependencies, engine versions & test scripts
+├── pnpm-lock.yaml                             # Deterministic dependency lockfile
+├── tsconfig.json                              # TypeScript base compiler configuration
+├── tsconfig.build.json                        # Production build TS configuration (outputs to dist/)
+├── tsconfig.test.json                         # Test runner TS configuration (outputs to dist-test/)
+├── jest.config.ts                             # Jest testing framework configuration
+├── sonar-project.properties                   # SonarQube code quality & security gate settings
+├── config.yaml                                # Active reverse proxy configuration file
+├── config.example.yaml                        # Annotated reference configuration template
+├── .gitignore                                 # Ignored artifacts, logs & local certificates
+│
+├── deploy/                                    # Deployment & infrastructure manifests
+│   └── monitoring/
+│       ├── docker-compose.monitoring.yml      # Compose stack for Prometheus (:9090) & Grafana (:3000)
+│       ├── prometheus.yml                     # Prometheus scrape configuration for proxy :8443
+│       └── grafana/
+│           ├── dashboards/                    # Pre-provisioned JSON monitoring dashboards
+│           │   ├── cache.json                 # L1/L2 cache hit/miss ratio & eviction dashboard
+│           │   ├── circuit-breaker.json       # Circuit breaker state transitions & drop rates
+│           │   ├── load-balancer.json         # Per-upstream load distribution & active connections
+│           │   ├── proxy-overview.json        # High-level RPS, latency percentiles & error rates
+│           │   └── rate-limit.json            # HTTP 429 throttled requests & burst monitoring
+│           └── provisioning/
+│               ├── dashboards/dashboards.yaml # Dashboard provider mapping config
+│               └── datasources/datasources.yaml# Prometheus datasource connection definition
+│
+├── docs/                                      # 22 Architectural & Technical Deep Dives
+│   ├── 00-index.md                            # Documentation index & architecture map
+│   ├── 01-websocket.md                        # L4 TCP tunneling, HTTP Upgrade & WS sticky sessions
+│   ├── 02-tls-https.md                        # TLS termination, cert loading & HTTP 8080→8443 redirect
+│   ├── 03-load-balancing.md                   # 12 load balancing strategies & NGINX WRR math
+│   ├── 04-health-checks.md                    # Active HTTP ping probe & passive error event bus
+│   ├── 05-rate-limiting.md                    # 5 rate-limiting algorithms & SoftLimit burst policy
+│   ├── 06-circuit-breaker.md                  # Classic 3-state machine & Google SRE adaptive drop math
+│   ├── 07-caching.md                          # Invalidation strategies, Vary headers & Cache-Control
+│   ├── 08-master-worker-architecture.md       # Cluster IPC dispatch, worker restart & SIGTERM guard
+│   ├── 09-service-registry.md                 # Dynamic registration, heartbeat & atomic disk persistence
+│   ├── 10-middleware-pipeline.md              # Onion model, RequestContext & next() chaining
+│   ├── 11-observability.md                    # MetricsRegistry, OpenMetrics exposition & Prometheus
+│   ├── 12-https-request-flow.md               # End-to-end request lifecycle: TLS → Worker → Upstream
+│   ├── 13-config-zod-validation.md            # Zod runtime schema validation & SIGHUP hot-reload
+│   ├── 14-retry-bulkhead.md                   # Bulkhead slot isolation, RetryBudget & 4 jitter backoffs
+│   ├── 15-connection-pool.md                  # Keep-alive agents, maxSockets: 256 & socket reuse
+│   ├── 16-multi-tier-caching.md               # HybridCache: L1 RAM (<0.05ms) + L2 Redis write-through
+│   ├── 17-cdc-cache-invalidation.md           # Debezium CDC streaming invalidation on SQL/Mongo writes
+│   ├── 18-tracing.md                          # Distributed Tracer, span lifecycle & X-Trace-Id header
+│   ├── 19-readiness-liveness.md               # ReadinessProbe multi-check gate vs Liveness checks
+│   ├── 20-tenant-log-streamer.md              # Asynchronous batched webhook dispatch per tenant
+│   ├── 21-deployment.md                       # Local run, cert generation & Prometheus/Grafana stack
+│   └── 22-testing-strategy.md                 # 5-tier testing pyramid & strict verification philosophy
+│
+├── logs/                                      # Access logs & log parsing guides
+│   ├── README.md                              # Combined log schema, field breakdown & awk queries
+│   └── access.log                             # Live access logs with microsecond latency metrics
+│
+├── result/                                    # Tiered test verification artifacts
+│   ├── README.md                              # Test reporting index & environment guidelines
+│   ├── unit-tests/
+│   │   └── README.md                          # Level 1: In-memory unit & algorithm audit scope
+│   ├── smoke-tests/
+│   │   └── README.md                          # Level 2: Transport & protocol smoke check specifications
+│   ├── integration-tests/
+│   │   └── README.md                          # Level 3: Strict 10-point real-application E2E suite
+│   ├── chaos-tests/
+│   │   └── README.md                          # Level 4: Fault injection, node kill & failover plans
+│   ├── load-tests/
+│   │   └── README.md                          # Level 5: k6 sustained RPS & P99 latency criteria
+│   └── request_check_for_graf.t/
+│       ├── image.png                          # Grafana metrics dashboard verification capture
+│       └── request.t                          # Historical curl check logs across features
+│
+├── scripts/                                   # Operational & maintenance CLI utilities
+│   ├── README.md                              # Utility catalog & CLI argument reference
+│   ├── benchmark.ts                           # Batch HTTP/HTTPS concurrency benchmarker
+│   ├── generate-certs.sh                      # Self-signed TLS cert generator (cert.pem, key.pem)
+│   ├── interactive-algo-test.ts               # Interactive CLI visualizer for load balancing algorithms
+│   ├── migrate-config.ts                      # Configuration schema upgrade utility
+│   └── verify-all-features.ts                 # Full sequential feature verification utility
+│
+├── src/                                       # Core Reverse Proxy Engine
+│   ├── index.ts                               # CLI entrypoint & bootstrap orchestrator
+│   │
+│   ├── balancer/                              # Load Balancing Subsystem
+│   │   ├── index.ts                           # Load balancer module exports
+│   │   ├── contracts/                         # Load balancing interfaces & types
+│   │   │   ├── balancer.interface.ts          # ILoadBalancer contract definition
+│   │   │   ├── context.types.ts               # Routing context & client metadata types
+│   │   │   └── strategy.interface.ts          # IStrategy contract definition
+│   │   ├── core/                              # Core load balancer logic
+│   │   │   ├── load-balancer.ts               # LoadBalancer class with pickFiltered()
+│   │   │   └── strategy-registry.ts           # Registry mapping strategy names to instances
+│   │   ├── factory/                           # Strategy factory layer
+│   │   │   ├── balancer.factory.ts            # Dynamic strategy instantiation from config
+│   │   │   └── explain.t                      # Design notes on strategy factory pattern
+│   │   └── strategies/                        # 12 Implemented Strategy Algorithms
+│   │       ├── adaptive-wrr.strategy.ts       # Latency EWMA dynamic weight balancing
+│   │       ├── consistent-hashing.strategy.ts # 150-virtual-node Ketama hash ring
+│   │       ├── ip-hash.strategy.ts            # Deterministic FNV-1a IP modulo hash
+│   │       ├── least-connections.strategy.ts  # Minimal active connection routing
+│   │       ├── least-response-time.strategy.ts# EWMA latency-sensitive routing
+│   │       ├── power-of-two.strategy.ts       # O(1) random two-choice selection (P2C)
+│   │       ├── random.strategy.ts             # Uniform random selection fallback
+│   │       ├── resource-based.strategy.ts     # Sidecar CPU/Memory telemetry-aware routing
+│   │       ├── round-robin.strategy.ts        # Classic sequential round-robin
+│   │       ├── sticky-sessions.strategy.ts    # Cookie-based (NINJA_ROUTE) session affinity
+│   │       ├── weighted-least-connections.strategy.ts # Active connections / weight ratio
+│   │       └── weighted-round-robin.strategy.ts       # Interleaved smooth NGINX WRR
+│   │
+│   ├── cache/                                 # Caching Subsystem
+│   │   ├── index.ts                           # Cache module exports
+│   │   ├── cache-manager.ts                   # Facade coordinating L1/L2 and CDC invalidators
+│   │   ├── contracts/                         # Cache contracts & interfaces
+│   │   │   ├── cache.interface.ts             # ICache contract (get, set, del, invalidate)
+│   │   │   ├── cache-config.interface.ts      # Cache configuration types
+│   │   │   └── invalidator.interface.ts       # IInvalidator contract
+│   │   ├── invalidation/                      # Cache invalidation mechanisms
+│   │   │   ├── debezium.invalidator.ts        # Event-driven CDC SQL/Mongo log parser
+│   │   │   ├── pattern.invalidator.ts         # Wildcard glob pattern cache purger
+│   │   │   └── tag.invalidator.ts             # Entity metadata tag purger
+│   │   ├── policies/                          # Caching policies & parsers
+│   │   │   ├── cache-control.parser.ts        # HTTP Cache-Control header parser
+│   │   │   ├── key-builder.ts                 # Deterministic query-normalized cache key builder
+│   │   │   ├── stale-if-error.ts              # Stale cache delivery on upstream 5xx errors
+│   │   │   └── stale-while-revalidate.ts      # Background revalidation without client stalls
+│   │   └── stores/                            # Cache storage implementations
+│   │       ├── hybrid.cache.ts                # Two-tier orchestrator (L1 Memory + L2 Redis)
+│   │       ├── in-memory-lru.ts               # Synchronous bounded LRU memory store
+│   │       └── redis.cache.ts                 # Distributed Redis client adapter
+│   │
+│   ├── config/                                # Configuration Engine
+│   │   ├── index.ts                           # Config module exports
+│   │   ├── config.ts                          # Loaded config singleton
+│   │   ├── config.loader.ts                   # YAML reader, environment resolver & SIGHUP reloader
+│   │   ├── config-schema.ts                   # Master Zod schema
+│   │   ├── server-schema.ts                   # Server sub-schema definition
+│   │   └── schemas/                           # Zod Modular Schemas
+│   │       ├── admin.schema.ts                # Admin API configuration schema
+│   │       ├── balancer.schema.ts             # Load balancer options schema
+│   │       ├── cache.schema.ts                # Cache settings schema
+│   │       ├── discovery.schema.ts            # Service discovery & probe schema
+│   │       ├── observability.schema.ts        # Metrics, tracing & logging schema
+│   │       ├── ratelimit.schema.ts            # Rate limiter algorithms & stores schema
+│   │       ├── resilience.schema.ts           # Circuit breaker, retry & bulkhead schema
+│   │       └── server.schema.ts               # Server ports, TLS, workers & timeouts schema
+│   │
+│   ├── core/                                  # Core Cluster & Pipeline Orchestration
+│   │   ├── admin/
+│   │   │   └── admin.handler.ts               # Internal admin API route handler
+│   │   ├── cluster/                           # Master/Worker IPC Cluster Architecture
+│   │   │   ├── ipc.protocol.ts                # Master-Worker IPC message contracts
+│   │   │   ├── master.ts                      # Cluster master: TLS, LB, WS routing & worker watchdog
+│   │   │   └── worker.ts                      # Cluster worker: pipeline execution & upstream proxying
+│   │   ├── pipeline/                          # Middleware Pipeline Execution
+│   │   │   ├── context.ts                     # RequestContext factory (IP, startTime, metadata)
+│   │   │   └── middleware.pipeline.ts         # Onion-model middleware pipeline runner
+│   │   ├── proxy/                             # Network Proxying & Connection Pools
+│   │   │   ├── connection.pool.ts             # Persistent httpAgent & httpsAgent connection pools
+│   │   │   ├── http.handler.ts                # HTTP request streaming & response forwarding
+│   │   │   ├── upstream.client.ts             # Upstream client request dispatcher
+│   │   │   └── websocket.handler.ts           # L4 bidirectional TCP pipe tunnel for WebSockets
+│   │   └── router/                            # Route Matching & Path Rules
+│   │       ├── route.matcher.ts               # First-match router with method guards
+│   │       ├── route.types.ts                 # RouteRule definitions & path options
+│   │       └── router.ts                      # Router class abstraction
+│   │
+│   ├── discovery/                             # Service Discovery & Health Checking
+│   │   ├── index.ts                           # Discovery module exports
+│   │   ├── target-node.ts                     # Target node representation
+│   │   ├── contracts/
+│   │   │   └── registry.interface.ts          # IServiceRegistry interface
+│   │   ├── health/                            # Health Probe Implementations
+│   │   │   ├── active.probe.ts                # Periodic active HTTP ping checker (checkUpstream)
+│   │   │   ├── health.manager.ts              # HealthManager tracking consecutive failure state
+│   │   │   └── passive.probe.ts               # Passive traffic error event bus observer
+│   │   └── registry/                          # Service Registries
+│   │       └── dynamic.registry.ts            # Dynamic registry with atomic .tmp disk snapshot
+│   │
+│   ├── middleware/                            # Onion Middleware Pipeline Implementations
+│   │   ├── auth.middleware.ts                 # Bearer token & API key authorization
+│   │   ├── body-limit.middleware.ts           # Payload size ceiling enforcement
+│   │   ├── cache.middleware.ts                # Cache lookup, short-circuit & response buffering
+│   │   ├── circuit.middleware.ts              # Circuit breaker gating & 503 fast-fail
+│   │   ├── cors.middleware.ts                 # CORS preflight & header injection
+│   │   ├── logging.middleware.ts              # Access logging with microsecond timing
+│   │   ├── rate-limit.middleware.ts           # Multi-dimensional rate limit enforcement
+│   │   └── tracing.middleware.ts              # Trace ID extraction & span generation
+│   │
+│   ├── observability/                         # Observability, Telemetry & Tracing
+│   │   ├── index.ts                           # Observability module exports
+│   │   ├── health/
+│   │   │   └── readiness.ts                   # Multi-check ReadinessProbe gating
+│   │   ├── logger/                            # Logging subsystems
+│   │   │   ├── logger.ts                      # Structured JSON console logger
+│   │   │   └── tenant-log.streamer.ts         # Multi-tenant asynchronous webhook log dispatcher
+│   │   ├── metrics/                           # Prometheus metrics
+│   │   │   ├── histogram.registry.ts          # Latency histogram with bucket aggregation
+│   │   │   ├── prometheus.exporter.ts         # MetricsRegistry formatting OpenMetrics exposition
+│   │   │   └── system.metrics.ts              # CPU load, memory RSS & process uptime collector
+│   │   └── tracing/                           # Distributed Tracing
+│   │       └── tracer.ts                      # In-process Tracer managing span lifecycles
+│   │
+│   ├── ratelimit/                             # Rate Limiting Engine
+│   │   ├── index.ts                           # Rate limit module exports
+│   │   ├── rate-limiter.ts                    # RateLimiter facade
+│   │   ├── algorithms/                        # 5 Rate Limiting Algorithms
+│   │   │   ├── fixed-window.ts                # Discrete time-slice counter
+│   │   │   ├── leaking-bucket.ts              # Constant-rate queue drain
+│   │   │   ├── sliding-window-counter.ts      # Weighted previous/current window interpolation
+│   │   │   ├── sliding-window-log.ts          # Exact microsecond timestamp log
+│   │   │   └── token-bucket.ts                # Continuous refill token bucket with burst capacity
+│   │   ├── contracts/                         # Rate limit contracts
+│   │   │   ├── limiter.interface.ts           # IRateLimiterAlgorithm contract
+│   │   │   └── storage.interface.ts           # IRateLimitStore contract (increment, count, reset)
+│   │   ├── policies/                          # Rate limit policies
+│   │   │   └── soft-limit.policy.ts           # Dynamic burst multiplier below load threshold
+│   │   └── storage/                           # Rate Limit Storage Adapters
+│   │       ├── hybrid.store.ts                # L1 Memory + L2 Redis fallback store
+│   │       ├── memory.store.ts                # Local in-memory Map store
+│   │       └── redis.store.ts                 # Atomic Redis Lua script store
+│   │
+│   ├── resilience/                            # Fault Tolerance & Resilience Subsystem
+│   │   ├── index.ts                           # Resilience module exports
+│   │   ├── bulkhead/                          # Concurrency isolation
+│   │   │   └── bulkhead.ts                    # Slot-based concurrency isolation limiter
+│   │   ├── circuit-breaker/                   # Circuit Breakers
+│   │   │   ├── adaptive.circuit-breaker.ts    # Google SRE drop probability breaker
+│   │   │   ├── circuit-breaker.manager.ts     # Singleton manager caching breakers per upstream
+│   │   │   ├── classic.circuit-breaker.ts     # CLOSED → OPEN → HALF_OPEN state machine
+│   │   │   ├── contracts/
+│   │   │   │   └── circuit-breaker.interface.ts # ICircuitBreaker contract
+│   │   │   └── states/                        # Circuit breaker states
+│   │   │       ├── closed.state.ts            # ClosedState: normal traffic flow
+│   │   │       ├── half-open.state.ts         # HalfOpenState: trial request probing
+│   │   │       └── open.state.ts              # OpenState: fast-fail 503 rejection
+│   │   └── retry/                             # Retry Engine
+│   │       ├── retry-budget.ts                # Capped retry ratio budget (e.g. max 15%)
+│   │       ├── retry-handler.ts               # Execution wrapper with retry policies
+│   │       ├── contracts/
+│   │       │   └── retry.interface.ts         # IRetryPolicy contract
+│   │       └── backoff/                       # 4 Jitter Backoff Algorithms
+│   │           ├── decorrelated-jitter.backoff.ts # AWS decorrelated sleep growth backoff
+│   │           ├── equal-jitter.backoff.ts        # Base + random jitter backoff
+│   │           ├── exponential.backoff.ts         # Deterministic exponential doubling backoff
+│   │           └── full-jitter.backoff.ts         # Uniform randomized 0..cap full jitter backoff
+│   │
+│   └── types/                                 # Global TypeScript Type Definitions
+│       ├── index.ts                           # Type exports
+│       ├── balancer.types.ts                  # Load balancer types & strategy names
+│       ├── common.types.ts                    # Utility types
+│       ├── config.types.ts                    # Proxy configuration interfaces
+│       ├── http.types.ts                      # HTTP header & request representations
+│       ├── resilience.types.ts                # Circuit breaker & retry configuration types
+│       └── upstream.types.ts                  # Upstream definition, health status & metrics types
+│
+└── tests/                                     # 5-Tier Verification Framework
+    ├── README.md                              # Test pyramid documentation & runner commands
+    ├── full-system-audit.mjs                  # Level 1: 183-test in-memory unit audit script
+    ├── live-integration-test.mjs              # Level 2: 6-point protocol smoke test script
+    ├── universal-app-test.mjs                 # Level 3: 10-point strict real-app integration test
+    ├── chaos/                                 # Chaos engineering suites
+    │   └── upstream-failure.chaos.ts          # Level 4: Upstream kill & failover chaos test
+    ├── integration/                           # Compiled Integration Tests
+    │   ├── failover.test.ts                   # Circuit breaker failover via load balancer
+    │   ├── hot-reload.test.ts                 # Configuration hot-reload on SIGHUP
+    │   ├── http-proxy.test.ts                 # HTTP upstream request & body routing
+    │   └── websocket.test.ts                  # WebSocket upgrade tunneling
+    ├── load/                                  # Load & stress testing
+    │   └── k6/                                # Level 5: k6 Load & Stress Benchmark Scripts
+    │       ├── smoke.js                       # 1 VU, 30s baseline sanity check
+    │       ├── stress.js                      # Ramp 0 to 200 VUs over 9m sustained stress
+    │       └── spike.js                       # Sudden burst surge to 500 VUs
+    ├── mocks/                                 # Test Mock Factories
+    │   └── target-servers.mock.ts             # Ephemeral mock HTTP server test factory
+    └── unit/                                  # Compiled Unit Tests
+        ├── balancer/                          # Load balancer unit tests
+        │   ├── .gitkeep
+        │   ├── balancerAllStrategies.test.ts  # All 12 strategy pick() tests
+        │   ├── loadBalancer.test.ts           # pickFiltered() & connection tracking tests
+        │   └── loadBalancerAdvanced.test.ts   # WRR math, P2C & consistent hash tests
+        ├── cache/                             # Cache unit tests
+        │   ├── .gitkeep
+        │   ├── cache.test.ts                  # InMemoryLRU & HybridCache tests
+        │   └── cacheAllFeatures.test.ts       # KeyBuilder, SWR, StaleIfError & CDC tests
+        ├── discovery/                         # Discovery unit tests
+        │   ├── .gitkeep
+        │   ├── discovery.test.ts              # ServiceRegistry & ActiveProbe tests
+        │   └── discoveryAllFeatures.test.ts   # PassiveProbe & disk snapshot tests
+        ├── observability/                     # Observability unit tests
+        │   └── observabilityAllFeatures.test.ts # Histograms, MetricsRegistry & log streamer tests
+        ├── ratelimit/                         # Rate limit unit tests
+        │   ├── .gitkeep
+        │   ├── rateLimitAllAlgorithms.test.ts # All 5 algorithms & SoftLimitPolicy tests
+        │   └── rateLimiter.test.ts            # RateLimiter facade & memory store tests
+        └── resilience/                        # Resilience unit tests
+            ├── .gitkeep
+            ├── circuitBreaker.test.ts         # ClassicCB & AdaptiveCB tests
+            ├── resilience.test.ts             # Bulkhead & retry handler tests
+            └── resilienceAllFeatures.test.ts  # All 4 jitter backoffs & RetryBudget tests
+```
+
+---
+
 ## ⚡ Core Systems & Features
 
 ### 1. Advanced Load Balancing Engine (12 Strategies)
@@ -197,34 +506,91 @@ observability:
 
 ---
 
+## 📚 Complete Technical Documentation
+
+Comprehensive architectural deep-dives with ASCII diagrams, code flows, and configuration references are available in the [`docs/`](./docs/00-index.md) directory:
+
+| # | Topic | Document |
+|---|---|---|
+| **01** | WebSocket Proxying | [01-websocket.md](./docs/01-websocket.md) |
+| **02** | TLS & HTTPS Termination | [02-tls-https.md](./docs/02-tls-https.md) |
+| **03** | 12 Load Balancing Strategies | [03-load-balancing.md](./docs/03-load-balancing.md) |
+| **04** | Active & Passive Health Checks | [04-health-checks.md](./docs/04-health-checks.md) |
+| **05** | 5 Rate Limiting Algorithms | [05-rate-limiting.md](./docs/05-rate-limiting.md) |
+| **06** | Classic & Adaptive Circuit Breakers | [06-circuit-breaker.md](./docs/06-circuit-breaker.md) |
+| **07** | High-Performance Caching & Invalidation | [07-caching.md](./docs/07-caching.md) |
+| **08** | Master-Worker Cluster Architecture | [08-master-worker-architecture.md](./docs/08-master-worker-architecture.md) |
+| **09** | Dynamic Service Registry | [09-service-registry.md](./docs/09-service-registry.md) |
+| **10** | Onion Middleware Pipeline | [10-middleware-pipeline.md](./docs/10-middleware-pipeline.md) |
+| **11** | Observability, Prometheus & Grafana | [11-observability.md](./docs/11-observability.md) |
+| **12** | Complete HTTPS Request Flow | [12-https-request-flow.md](./docs/12-https-request-flow.md) |
+| **13** | Zod Schema Configuration Validation | [13-config-zod-validation.md](./docs/13-config-zod-validation.md) |
+| **14** | Retry Handler, Budget & Bulkhead | [14-retry-bulkhead.md](./docs/14-retry-bulkhead.md) |
+| **15** | Connection Pooling & Socket Reuse | [15-connection-pool.md](./docs/15-connection-pool.md) |
+| **16** | Two-Tier Caching (L1 RAM + L2 Redis) | [16-multi-tier-caching.md](./docs/16-multi-tier-caching.md) |
+| **17** | Event-Driven CDC Invalidation (Debezium) | [17-cdc-cache-invalidation.md](./docs/17-cdc-cache-invalidation.md) |
+| **18** | Distributed Tracing & Correlation IDs | [18-tracing.md](./docs/18-tracing.md) |
+| **19** | Health Gating: Readiness vs Liveness | [19-readiness-liveness.md](./docs/19-readiness-liveness.md) |
+| **20** | Multi-Tenant Log Streaming Webhooks | [20-tenant-log-streamer.md](./docs/20-tenant-log-streamer.md) |
+| **21** | Operations & Deployment Guide | [21-deployment.md](./docs/21-deployment.md) |
+| **22** | Testing Architecture & Strategy | [22-testing-strategy.md](./docs/22-testing-strategy.md) |
+
+---
+
 ## 🧪 Testing & Verification Suites
 
-### 1. Run Complete 63-Unit & Integration Test Suite
+Ninja Reverse Proxy follows a strict testing pyramid to ensure zero unhandled socket leaks or runtime crashes before load testing:
+
+### 1. In-Memory Unit & Subsystem Audit (183 Tests)
+Runs in-memory with zero network overhead. Validates every algorithm, mathematical formula, state machine, and data structure:
 ```bash
-node node_modules/typescript/bin/tsc -p tsconfig.test.json && node --test dist-test/tests/unit/**/*.js dist-test/tests/integration/*.js
+npm run test:audit
 ```
 
-### 2. Run 30-Feature Audit & Report Generator
+### 2. Protocol & Network Transport Smoke Test (6 Checks)
+Validates port 8080 $\to$ 8443 auto-redirect, TLS socket negotiation, basic WebSocket 101 upgrade, and live Prometheus scrape:
 ```bash
-node node_modules/typescript/bin/tsc -p tsconfig.test.json && node dist-test/scripts/verify-all-features.js
+npm run test:live
 ```
-*(Generates markdown proof report in `results/interview_proof_report.md`)*
 
-### 3. Run Production High-RPS Benchmark
+### 3. Strict Real-App Integration Suite (10 Checks)
+Zero shortcuts. Tests real HTML delivery, CORS preflight, distributed trace headers, 4-hit sticky session pinning, Socket.IO tunneling, slow backend tolerance (`/slow`), automatic retry on flaky upstreams (`/flake`), and 30-request concurrency burst against live backends:
 ```bash
-npx tsx scripts/benchmark.ts https://localhost:8443/ 1000 20
+npm run test:universal
+```
+
+### 4. High-Concurrency Load & Stress Testing (k6)
+Establishes throughput baseline, P99 latency percentiles, and verifies zero memory leaks under sustained load:
+```bash
+# Baseline smoke (1 VU, 30s)
+k6 run --env BASE_URL=https://localhost:8443 tests/load/k6/smoke.js
+
+# Sustained stress (0 to 200 VUs over 9m)
+k6 run --env BASE_URL=https://localhost:8443 tests/load/k6/stress.js
+
+# Sudden burst spike (0 to 500 VUs)
+k6 run --env BASE_URL=https://localhost:8443 tests/load/k6/spike.js
 ```
 
 ---
 
-## 📦 Build & NPM Publish
+## 📦 Build & Run
 
 ```bash
-# Build TypeScript bundle to dist/
-pnpm run build
+# 1. Install dependencies
+pnpm install
 
-# Publish to npmjs.com
-npm publish
+# 2. Build TypeScript bundle to dist/
+npm run build
+
+# 3. Generate self-signed TLS certificates (dev)
+npm run generate-certs
+
+# 4. Start Proxy in Production Mode
+npm start
+
+# 5. Start Proxy with Watch/Hot-Reload Mode
+npm run dev
 ```
 
 ---
