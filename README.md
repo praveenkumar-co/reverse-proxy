@@ -583,6 +583,7 @@ node tests/load/load-runner.mjs
 - **Current Local Ceiling (~1,500 – 2,000 VUs)**: On a single development machine, the client load generator, the 6 proxy workers, and the 4 backend mock servers all share the same physical CPU and loopback network stack (`127.0.0.1`), competing for OS ephemeral ports and socket buffers.
 - **Distributed Cloud Capacity (10,000 – 50,000+ VUs)**: When deployed in Kubernetes or AWS/GCP with dedicated client nodes and isolated backend pods, the proxy's non-blocking epoll/kqueue event loop can easily handle **tens of thousands of concurrent connections** without local loopback contention.
 
+👉 **[View Official Grafana k6 Binary Live Report (243,642 Reqs @ 1,000 VUs)](./result/load-tests/k6-live-benchmark-report.md)**  
 👉 **[View Full In-Depth Benchmark Report (10 Stages)](./result/load-tests/load-test-report.md)**  
 👉 **[View Subsystem & Algorithm Architecture Trade-Off Guide](./result/load-tests/algorithm-tradeoffs.md)**  
 👉 **[View Raw JSON Telemetry Data](./result/load-tests/load_test_results.json)**

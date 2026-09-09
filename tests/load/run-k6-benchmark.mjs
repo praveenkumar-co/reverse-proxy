@@ -84,10 +84,23 @@ async function run() {
     stdio: 'inherit',
   });
 
-  k6Process.on('close', async (code) => {
+  const cleanup = async () => {
     console.log('\n[Cleanup] Stopping reverse proxy and upstream nodes...');
     proxyProcess.kill('SIGTERM');
     for (const s of servers) await new Promise((r) => s.close(r));
+  };
+
+  process.on('SIGINT', async () => {
+    await cleanup();
+    process.exit(130);
+  });
+  process.on('SIGTERM', async () => {
+    await cleanup();
+    process.exit(143);
+  });
+
+  k6Process.on('close', async (code) => {
+    await cleanup();
     console.log('[Cleanup] Done. k6 benchmark exited with code:', code);
     process.exit(code ?? 0);
   });
