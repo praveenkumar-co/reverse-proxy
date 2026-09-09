@@ -14,7 +14,7 @@ export class IpHashStrategy implements IStrategy {
         (hash << 24);
     }
     return hash >>> 0;
-  }
+  } 
   pick(
     candidates: UpstreamState[],
     clientIp?: string,
