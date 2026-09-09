@@ -742,18 +742,7 @@ export async function createServer(config: CreateServerConfig){
         }),
       );
     }
-    const httpServer = http.createServer((req, res) => {
-      if(req.url?.startsWith("/__registry")){
-        httpsServer?.emit("request", req, res);
-        return;
-      }
-      const httpsUrl = `https://${req.headers.host?.replace(
-        String(port),
-        String(ACTIVE_CONFIG.server.httpsPort ?? 8443),
-      )}${req.url}`;
-      res.writeHead(301, { Location: httpsUrl });
-      res.end();
-    });
+    let httpServer!: http.Server;
 
     const wsUpgradeHandler = (
       req: http.IncomingMessage,
@@ -1065,11 +1054,36 @@ export async function createServer(config: CreateServerConfig){
       await pipeline.run(ctx);
     };
 
-    if (sslOptions.key.length > 0) {
-      httpsServer = https.createServer(sslOptions, proxyRequestHandler);
-    }
-    if(httpsServer){
+    const isTlsEnabled = Boolean(ACTIVE_CONFIG.tls?.enabled && sslOptions.key.length > 0);
+    if (isTlsEnabled) {
+      httpsServer = https.createServer(sslOptions, (req, res) => void proxyRequestHandler(req, res));
       httpsServer.on("upgrade", wsUpgradeHandler);
+
+      if (ACTIVE_CONFIG.tls?.redirectHttp ?? true) {
+        httpServer = http.createServer((req, res) => {
+          if (
+            req.url?.startsWith("/__registry") ||
+            req.url?.startsWith("/__ready") ||
+            req.url?.startsWith("/__lb-stats") ||
+            req.url?.startsWith("/metrics")
+          ) {
+            void proxyRequestHandler(req, res);
+            return;
+          }
+          const httpsUrl = `https://${req.headers.host?.replace(
+            String(port),
+            String(ACTIVE_CONFIG.tls?.httpsPort ?? ACTIVE_CONFIG.server.httpsPort ?? 8443),
+          )}${req.url}`;
+          res.writeHead(301, { Location: httpsUrl });
+          res.end();
+        });
+      } else {
+        httpServer = http.createServer((req, res) => void proxyRequestHandler(req, res));
+        httpServer.on("upgrade", wsUpgradeHandler);
+      }
+    } else {
+      httpServer = http.createServer((req, res) => void proxyRequestHandler(req, res));
+      httpServer.on("upgrade", wsUpgradeHandler);
     }
     async function gracefulShutdown(signal: string){
       if(isShuttingDown) return;

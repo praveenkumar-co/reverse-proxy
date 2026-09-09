@@ -1,0 +1,62 @@
+server:
+  host: "127.0.0.1"
+  port: 9080
+  listen: 9080
+  workers: 2
+  trustProxy: true
+  connectTimeoutMs: 3000
+  readTimeoutMs: 5000
+  compression: false
+
+tls:
+  enabled: false
+
+upstreams:
+  - id: app-a
+    url: "http://127.0.0.1:9001"
+    weight: 1
+    healthPath: "/health"
+    maxConnections: 500
+  - id: app-b
+    url: "http://127.0.0.1:9002"
+    weight: 1
+    healthPath: "/health"
+    maxConnections: 500
+
+routes:
+  - path: "/api/live"
+    upstreams: ["app-a", "app-b"]
+  - path: "/api/cached"
+    upstreams: ["app-a", "app-b"]
+  - path: "/api/limited"
+    upstreams: ["app-a", "app-b"]
+    rateLimit:
+      windowMs: 10000
+      maxRequests: 20
+      algorithm: token-bucket
+      storage: memory
+
+loadBalancing:
+  strategy: round-robin
+
+resilience:
+  retry:
+    enabled: false
+  circuitBreaker:
+    mode: classic
+    failureThreshold: 10
+    recoveryTimeMs: 10000
+  bulkhead:
+    enabled: false
+
+rateLimit:
+  enabled: false
+
+cache:
+  enabled: false
+
+discovery:
+  healthCheck:
+    enabled: true
+    intervalMs: 5000
+    timeoutMs: 1000

@@ -22,7 +22,7 @@ result/
 | [smoke-tests/](./smoke-tests/README.md) | Protocol validation (HTTP 8080 redirect, TLS handshake, WebSocket 101) | **6/6 Passed** |
 | [integration-tests/](./integration-tests/README.md) | End-to-end integration against real live backends (Chess app on 3009/3010) | **10/10 Passed** |
 | [chaos-tests/](./chaos-tests/README.md) | Node failure injection, circuit breaker tripping, zero 502 failover | Ready for Chaos runs |
-| [load-tests/](./load-tests/README.md) | Throughput ceiling (RPS), P50/P95/P99 latency curves, memory leak soak | Ready for Stage 3 |
+| [load-tests/](./load-tests/README.md) | Throughput ceiling (RPS), P50/P95/P99 latency curves, rate limit spike | **5/5 Passed (7,163 RPS peak, 28k spike)** |
 
 ---
 

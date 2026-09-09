@@ -171,7 +171,7 @@ export class Cache {
   }
 
   isConnected(): boolean {
-    return this.connected;
+    return !this.enabled || this.connected;
   }
 
   getStats(): object {
