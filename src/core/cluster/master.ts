@@ -1035,11 +1035,7 @@ export async function createServer(config: CreateServerConfig){
       pipeline.use(async (c) => {
         const clientIP = c.clientIp;
         const chunks: Buffer[] = [];
-        c.req.on("data", (chunk: Buffer) => {
-          chunks.push(chunk);
-        });
-        c.req.on("end", () => {
-          const bodyBuffer = Buffer.concat(chunks);
+        const sendPayload = (bodyBuffer: Buffer) => {
           const body = bodyBuffer.length > 0 ? bodyBuffer.toString("binary") : null;
           const payload: WorkerMessageType = {
             requestType: c.req.method ?? "GET",
@@ -1048,6 +1044,18 @@ export async function createServer(config: CreateServerConfig){
             url: `${c.req.url}`,
           };
           dispatchToWorker(payload, clientIP, c.res);
+        };
+
+        if (c.req.readableEnded) {
+          sendPayload(Buffer.concat(chunks));
+          return;
+        }
+
+        c.req.on("data", (chunk: Buffer) => {
+          chunks.push(chunk);
+        });
+        c.req.on("end", () => {
+          sendPayload(Buffer.concat(chunks));
         });
       });
 

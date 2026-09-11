@@ -61,7 +61,7 @@ async function main(){
       }
     });
     await createServer({
-      port: validatedConfig.server.listen,
+      port: validatedConfig.server.port ?? validatedConfig.server.listen,
       workerCount: validatedConfig.server.workers ?? os.cpus().length,
       config: validatedConfig,
     });

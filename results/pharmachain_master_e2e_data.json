@@ -1,0 +1,142 @@
+[
+  {
+    "category": "pharma-core",
+    "feature": "GET /core/health (Readiness & RSA Keys)",
+    "status": "PASS",
+    "details": "Status: 200, KeystoreReady: true, RsaReady: true",
+    "durationMs": 14
+  },
+  {
+    "category": "pharma-core",
+    "feature": "GET /jwks.json (RFC 7517 Public Key Discovery)",
+    "status": "PASS",
+    "details": "Status: 200, Keys found: 1, KID: pharma-core-rs256",
+    "durationMs": 12
+  },
+  {
+    "category": "pharma-core",
+    "feature": "GET /.well-known/jwks.json (RFC 5785 Discovery Route)",
+    "status": "PASS",
+    "details": "Status: 200, Standard RFC discovery endpoint verified",
+    "durationMs": 3
+  },
+  {
+    "category": "admin-service",
+    "feature": "POST /api/admin/auth/login (Invalid Creds Rejection)",
+    "status": "PASS",
+    "details": "Status: 401, Rejection message: \"Invalid email or password\"",
+    "durationMs": 13
+  },
+  {
+    "category": "admin-service",
+    "feature": "POST /api/admin/auth/login (Superadmin Authentication & JWT)",
+    "status": "PASS",
+    "details": "Status: 200, Authenticated: National Drug Regulator (CDSCO), Role: SUPERADMIN",
+    "durationMs": 419
+  },
+  {
+    "category": "admin-service",
+    "feature": "GET /api/admin/auth/me (Protected Route with JWT Bearer)",
+    "status": "PASS",
+    "details": "Status: 200, Verified AdminID: ADM_CDSCO_ROOT_01",
+    "durationMs": 5
+  },
+  {
+    "category": "admin-service",
+    "feature": "GET /api/admin/manufacturers (KYC Licensing Queue)",
+    "status": "PASS",
+    "details": "Status: 200, Query returned 2 manufacturer records",
+    "durationMs": 23
+  },
+  {
+    "category": "consumer-service",
+    "feature": "GET /healthz (Consumer Liveness Probe)",
+    "status": "PASS",
+    "details": "Status: 200, Service: consumer-service",
+    "durationMs": 4
+  },
+  {
+    "category": "consumer-service",
+    "feature": "GET /readyz (Consumer Readiness Probe)",
+    "status": "PASS",
+    "details": "Status: 200, Service: consumer-service",
+    "durationMs": 3
+  },
+  {
+    "category": "consumer-service",
+    "feature": "POST /api/consumer/verify (QR Signature Validation Guard)",
+    "status": "PASS",
+    "details": "Status: 400, Handled invalid token cleanly with error response",
+    "durationMs": 9
+  },
+  {
+    "category": "manufacturer-service",
+    "feature": "GET /api/manufacturer/public/keys/all (Public Keys Discovery)",
+    "status": "PASS",
+    "details": "Status: 200, Public keys available: 0",
+    "durationMs": 5
+  },
+  {
+    "category": "manufacturer-service",
+    "feature": "POST /api/manufacturer/auth/register (New Plant Onboarding)",
+    "status": "PASS",
+    "details": "Status: 201, Manufacturer ID: MFR_LICMFR1789033593235_2ABFA0",
+    "durationMs": 426
+  },
+  {
+    "category": "shopkeeper-service",
+    "feature": "GET /api/shopkeeper/stats (Unauthenticated Access Rejection)",
+    "status": "PASS",
+    "details": "Status: 401, Access denied cleanly without token",
+    "durationMs": 4
+  },
+  {
+    "category": "shopkeeper-service",
+    "feature": "POST /api/shopkeeper/auth/register (Retail Chemist Onboarding)",
+    "status": "PASS",
+    "details": "Status: 201, Shop ID: SHOP-99725B61",
+    "durationMs": 432
+  },
+  {
+    "category": "Reverse Proxy Core",
+    "feature": "Distributed Tracing (X-Trace-Id Header Injection)",
+    "status": "PASS",
+    "details": "TraceId: \"1fbef957-8ab8-4d1d-9e27-a3ead55a1f42\" injected on response",
+    "durationMs": 3
+  },
+  {
+    "category": "Reverse Proxy Core",
+    "feature": "Upstream Routing Header (X-Upstream-Id Verification)",
+    "status": "PASS",
+    "details": "X-Upstream-Id: \"admin-service\" matches target",
+    "durationMs": 2
+  },
+  {
+    "category": "Reverse Proxy Security",
+    "feature": "CORS Preflight (OPTIONS Handshake Handling)",
+    "status": "PASS",
+    "details": "Status: 204, Access-Control-Allow-Origin: \"https://pharmachain.gov.in\"",
+    "durationMs": 1
+  },
+  {
+    "category": "Reverse Proxy Balancer",
+    "feature": "Power of Two Choices (P2C Active Telemetry)",
+    "status": "PASS",
+    "details": "Strategy: power-of-two, Healthy Upstreams: [consumer-service, admin-service, manufacturer-service, shopkeeper-service, pharma-core-service]",
+    "durationMs": 1
+  },
+  {
+    "category": "Reverse Proxy Discovery",
+    "feature": "Cluster Readiness Probe (/__ready)",
+    "status": "PASS",
+    "details": "Status: 200, Ready: true, Upstreams checked: undefined",
+    "durationMs": 0
+  },
+  {
+    "category": "Reverse Proxy Observability",
+    "feature": "Prometheus Metrics Exposition (/metrics)",
+    "status": "PASS",
+    "details": "Status: 200, Exposition payload contains counters and latency histograms",
+    "durationMs": 2
+  }
+]

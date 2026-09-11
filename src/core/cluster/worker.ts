@@ -217,27 +217,40 @@ process.on("message", async (rawMsg: any, handle?: any) => {
   };
   let connectTimeoutTimer: NodeJS.Timeout;
   let readTimeoutTimer: NodeJS.Timeout;
+  const forwardHeaders: Record<string, any> = { ...msg.headers };
+  delete forwardHeaders["transfer-encoding"];
+  delete forwardHeaders["connection"];
+  delete forwardHeaders["keep-alive"];
+  forwardHeaders["host"] = finalUpstreamUrl.host;
+  forwardHeaders["X-Real-IP"] = msg.clientIp || "unknown";
+  forwardHeaders["X-Forwarded-For"] = msg.headers["x-forwarded-for"]
+    ? `${msg.headers["x-forwarded-for"]}, ${msg.clientIp || "unknown"}`
+    : (msg.clientIp || "unknown");
+  forwardHeaders["X-Forwarded-Proto"] = msg.headers["x-forwarded-proto"] || (isHttps ? "https" : "http");
+  forwardHeaders["X-Forwarded-Host"] = msg.headers["x-forwarded-host"] || msg.headers["host"] || "localhost";
+  forwardHeaders["X-Forwarded-Port"] = msg.headers["x-forwarded-port"] || String(workerConfig.server.port || workerConfig.server.listen || (isHttps ? 8443 : 8080));
+  if (msg.headers["x-trace-id"]) {
+    forwardHeaders["X-Trace-Id"] = msg.headers["x-trace-id"];
+  }
+  forwardHeaders["X-Proxy-By"] = "Ninja-Reverse-Proxy";
+
+  if (workerConfig.server.headers) {
+    for (const h of workerConfig.server.headers) {
+      forwardHeaders[h.key] = h.value === "client_ip" ? (msg.clientIp || "unknown") : h.value;
+    }
+  }
+
+  if (msg.body) {
+    forwardHeaders["content-length"] = Buffer.byteLength(msg.body).toString();
+  }
+
   const requestOptions: http.RequestOptions = {
     host: finalUpstreamUrl.hostname,
     port: finalUpstreamUrl.port || (isHttps ? "443" : "80"),
     path: requestUrl,
     method: msg.requestType,
     agent,
-    headers: {
-      ...msg.headers,
-      "X-Real-IP": msg.clientIp || "unknown",
-      "X-Forwarded-For": msg.headers["x-forwarded-for"]
-        ? `${msg.headers["x-forwarded-for"]}, ${msg.clientIp || "unknown"}`
-        : (msg.clientIp || "unknown"),
-      "X-Proxy-By": "Ninja-Reverse-Proxy",
-      ...(workerConfig.server.headers?.reduce((acc: any, h) => {
-        acc[h.key] = h.value === "client_ip" ? (msg.clientIp || "unknown") : h.value;
-        return acc;
-      }, {})),
-      ...(msg.body && {
-        "Content-Length": Buffer.byteLength(msg.body).toString(),
-      }),
-    },
+    headers: forwardHeaders,
     ...(isHttps && {
       rejectUnauthorized,
       ...(caBuffer ? { ca: caBuffer } : {}),

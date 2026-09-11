@@ -56,7 +56,7 @@ export class ServiceRegistry {
       for(const [id, s] of this.services.entries()){
         plainObj[id] = s;
       }
-      const tmpFile = `${this.persistencePath}.tmp.${process.pid}`;
+      const tmpFile = `${this.persistencePath}.tmp.${process.pid}.${Date.now()}_${Math.random().toString(36).slice(2)}`;
       await fs.writeFile(tmpFile, JSON.stringify(plainObj, null, 2), "utf-8");
       await fs.rename(tmpFile, this.persistencePath);
     }catch (err: any){

@@ -21,12 +21,24 @@ export function proxyRequest(opts: ProxyRequestOptions): Promise<ProxyResponse> 
     const url = new URL(opts.upstreamUrl);
     const isHttps = url.protocol === 'https:';
     const transport = isHttps ? https : http;
+    const forwardHeaders = { ...opts.headers };
+    delete forwardHeaders['transfer-encoding'];
+    delete forwardHeaders['connection'];
+    delete forwardHeaders['keep-alive'];
+    forwardHeaders['host'] = url.host;
+    if (!forwardHeaders['x-forwarded-proto']) forwardHeaders['x-forwarded-proto'] = isHttps ? 'https' : 'http';
+    if (!forwardHeaders['x-forwarded-host']) forwardHeaders['x-forwarded-host'] = url.host;
+    if (!forwardHeaders['x-forwarded-port']) forwardHeaders['x-forwarded-port'] = url.port || (isHttps ? '443' : '80');
+    if (!forwardHeaders['x-proxy-by']) forwardHeaders['x-proxy-by'] = 'Ninja-Reverse-Proxy';
+    if (opts.body) {
+      forwardHeaders['content-length'] = Buffer.byteLength(opts.body).toString();
+    }
     const req = transport.request({
       host: url.hostname,
       port: url.port || (isHttps ? '443' : '80'),
       path: opts.path,
       method: opts.method,
-      headers: opts.headers,
+      headers: forwardHeaders,
       rejectUnauthorized: opts.rejectUnauthorized ?? true,
     }, (res) => {
       const chunks: Buffer[] = [];

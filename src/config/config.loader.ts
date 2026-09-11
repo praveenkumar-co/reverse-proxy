@@ -8,7 +8,9 @@ function mapBackwardCompatibleKeys(configParsed: any): any {
   if (!configParsed) return {};
   if (!configParsed.server) configParsed.server = {};
 
-  if (configParsed.server.listen !== undefined && configParsed.server.port === undefined){
+  if (configParsed.server.port !== undefined){
+    configParsed.server.listen = configParsed.server.port;
+  } else if (configParsed.server.listen !== undefined){
     configParsed.server.port = configParsed.server.listen;
   }
   if (!configParsed.tls){

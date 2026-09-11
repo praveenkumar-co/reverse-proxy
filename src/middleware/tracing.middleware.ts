@@ -6,6 +6,7 @@ export function tracingMiddleware(){
   return async (ctx: RequestContext, next: () => Promise<void>) => {
     const traceId = (ctx.req.headers['x-trace-id'] as string) ?? crypto.randomUUID();
     ctx.metadata['traceId'] = traceId;
+    ctx.req.headers['x-trace-id'] = traceId;
     ctx.res.setHeader('X-Trace-Id', traceId);
 
     const span = tracer.startSpan(

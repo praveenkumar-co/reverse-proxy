@@ -1,10 +1,8 @@
 global:
-  scrape_interval: 15s
+  scrape_interval: 5s
 scrape_configs:
   - job_name: ninja-proxy
     static_configs:
-      - targets: ['host.docker.internal:8443']
-    scheme: https
-    tls_config:
-      insecure_skip_verify: true
+      - targets: ['host.docker.internal:8080']
     metrics_path: /metrics
+
