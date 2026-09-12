@@ -34,13 +34,14 @@
       "datasource": "Prometheus",
       "targets": [
         {
-          "expr": "100 * sum(rate(ninja_http_requests_total{status=~\"5..\"}[1m])) / sum(rate(ninja_http_requests_total[1m]))",
+          "expr": "(100 * sum(rate(ninja_http_requests_total{status=~\"5..\"}[1m])) / sum(rate(ninja_http_requests_total[1m]))) >= 0 or vector(0)",
           "legendFormat": "Error %"
         }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "percent",
+          "noValue": "0%",
           "thresholds": {
             "mode": "absolute",
             "steps": [
