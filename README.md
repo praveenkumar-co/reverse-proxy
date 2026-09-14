@@ -15,6 +15,7 @@ Ninja Reverse Proxy has been rigorously verified against real-world production b
 | **Node.js / Express** | **PharmaChain** (Supply Chain KYC, Licensing & Crypto Vault) | [PharmaChain Master Guide](./PHARMACHAIN_REVERSE_PROXY_MASTER_GUIDE.md) | **100% Passed** (1000 requests @ 4739 req/s) |
 | **Python / FastAPI** | **Conduit RealWorld** (Async ASGI, PostgreSQL, JWT Auth) | [FastAPI Conduit Master Guide](./FASTAPI_CONDUIT_REVERSE_PROXY_MASTER_GUIDE.md) | **100% Passed** (10/10 automated tests passed) |
 | **Java / Spring Boot** | **QKD Simulation** (BB84 Quantum Key Distribution, 256-bit AES) | [Java QKD Master Guide](./JAVA_SPRINGBOOT_QKD_REVERSE_PROXY_MASTER_GUIDE.md) | **100% Passed** (10/10 automated tests passed, 19k RPS burst) |
+| **Kotlin / Ktor** | **Conduit RealWorld** (Netty Coroutines, Exposed ORM, JWT Auth) | [Kotlin Ktor Master Guide](./KOTLIN_KTOR_REVERSE_PROXY_MASTER_GUIDE.md) | **100% Passed** (10/10 automated tests passed, 15.5k RPS burst) |
 
 ---
 

@@ -1,0 +1,62 @@
+================================================================================
+AUTOCANNON BENCHMARK & LOAD STRESS TEST: KOTLIN KTOR REALWORLD BACKEND
+================================================================================
+Target: http://127.0.0.1:8080/api
+Reverse Proxy Architecture: 2 Cluster Workers, Token Bucket Rate Limiting, Power-of-Two Load Balancing
+Backend: Kotlin 2.1 / Ktor 3.1.2 / Netty Server Engine / Exposed ORM / H2 In-Memory DB
+
+[1] High-Concurrency Throughput & Burst Rate Limiting Test (20 connections, 5s)
+--------------------------------------------------------------------------------
+Running 5s test @ http://127.0.0.1:8080/api
+20 connections
+
+┌─────────┬──────┬──────┬───────┬───────┬─────────┬─────────┬────────┐
+│ Stat    │ 2.5% │ 50%  │ 97.5% │ 99%   │ Avg     │ Stdev   │ Max    │
+├─────────┼──────┼──────┼───────┼───────┼─────────┼─────────┼────────┤
+│ Latency │ 0 ms │ 1 ms │ 6 ms  │ 11 ms │ 1.35 ms │ 2.66 ms │ 135 ms │
+└─────────┴──────┴──────┴───────┴───────┴─────────┴─────────┴────────┘
+┌───────────┬─────────┬─────────┬─────────┬────────┬──────────┬──────────┬─────────┐
+│ Stat      │ 1%      │ 2.5%    │ 50%     │ 97.5%  │ Avg      │ Stdev    │ Min     │
+├───────────┼─────────┼─────────┼─────────┼────────┼──────────┼──────────┼─────────┤
+│ Req/Sec   │ 7,695   │ 7,695   │ 9,727   │ 15,583 │ 10,809.2 │ 2,676.02 │ 7,695   │
+├───────────┼─────────┼─────────┼─────────┼────────┼──────────┼──────────┼─────────┤
+│ Bytes/Sec │ 5.34 MB │ 5.34 MB │ 6.89 MB │ 11 MB  │ 7.63 MB  │ 1.92 MB  │ 5.34 MB │
+└───────────┴─────────┴─────────┴─────────┴────────┴──────────┴──────────┴─────────┘
+
+Req/Bytes counts sampled once per second.
+# of samples: 5
+
+540 2xx responses, 53512 non 2xx responses (Token bucket rate limit enforced: HTTP 429)
+54k requests in 5.07s, 38.1 MB read
+
+Summary:
+- Peak throughput: 15,583 Req/Sec
+- Average throughput: 10,809.2 Req/Sec
+- p50 Latency: 1 ms
+- p99 Latency: 11 ms
+- Max Latency: 135 ms
+- Token Bucket rate limiter successfully guarded Ktor Netty event loops against socket saturation.
+
+[2] Controlled Concurrency Within Rate Limit (5 connections, 100 requests)
+--------------------------------------------------------------------------------
+Running 100 requests test @ http://127.0.0.1:8080/api
+5 connections
+
+┌─────────┬──────┬──────┬───────┬───────┬─────────┬─────────┬───────┐
+│ Stat    │ 2.5% │ 50%  │ 97.5% │ 99%   │ Avg     │ Stdev   │ Max   │
+├─────────┼──────┼──────┼───────┼───────┼─────────┼─────────┼───────┤
+│ Latency │ 0 ms │ 2 ms │ 10 ms │ 10 ms │ 2.48 ms │ 2.43 ms │ 14 ms │
+└─────────┴──────┴──────┴───────┴───────┴─────────┴─────────┴───────┘
+┌───────────┬─────────┬─────────┬─────────┬─────────┬─────────┬───────┬─────────┐
+│ Stat      │ 1%      │ 2.5%    │ 50%     │ 97.5%   │ Avg     │ Stdev │ Min     │
+├───────────┼─────────┼─────────┼─────────┼─────────┼─────────┼───────┼─────────┤
+│ Req/Sec   │ 100     │ 100     │ 100     │ 100     │ 100     │ 0     │ 100     │
+├───────────┼─────────┼─────────┼─────────┼─────────┼─────────┼───────┼─────────┤
+│ Bytes/Sec │ 55.8 kB │ 55.8 kB │ 55.8 kB │ 55.8 kB │ 55.8 kB │ 0 B   │ 55.8 kB │
+└───────────┴─────────┴─────────┴─────────┴─────────┴─────────┴───────┴─────────┘
+
+Summary:
+- 100 requests processed in 1.01s
+- Avg Latency: 2.48 ms
+- p50 Latency: 2 ms
+- 0 connection drops or timeouts

@@ -11,6 +11,7 @@ result/
 ├── load-tests/              # Level 5: k6 / Autocannon sustained RPS & latency percentiles
 ├── python-fastapi-conduit/  # Polyglot Audit: Python FastAPI RealWorld full gateway verification
 ├── java-spring-boot-qkd/    # Polyglot Audit: Java 21 Spring Boot QKD Simulation gateway verification
+├── kotlin-ktor-realworld/   # Polyglot Audit: Kotlin 2.1 Ktor Netty RealWorld gateway verification
 └── request_check_for_graf.t/# Historical Grafana metric validation logs & screenshot
 ```
 
@@ -27,6 +28,7 @@ result/
 | [load-tests/](./load-tests/README.md) | Hyperscale multi-method load (P2C algorithm, 1,000 VUs, 17.7k RPS peak) | **10/10 Passed (627k Reqs, 1,000 VUs)** |
 | [python-fastapi-conduit/](./python-fastapi-conduit/README.md) | Python FastAPI RealWorld: E2E, 1.9k RPS load, rate limiting, circuit breaker | **100% Passed (10/10 E2E, 0% Error Rate)** |
 | [java-spring-boot-qkd/](./java-spring-boot-qkd/README.md) | Java 21 Spring Boot QKD: BB84 Quantum Key Distribution, 19k RPS burst, AES-256 | **100% Passed (10/10 E2E, Upstream UP)** |
+| [kotlin-ktor-realworld/](./kotlin-ktor-realworld/README.md) | Kotlin 2.1 Ktor RealWorld: Coroutines, Netty, JWT, 15.5k RPS burst | **100% Passed (10/10 E2E, Upstream UP)** |
 
 ---
 

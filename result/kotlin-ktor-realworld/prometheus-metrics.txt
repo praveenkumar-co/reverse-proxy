@@ -1,0 +1,35 @@
+# HELP ninja_http_requests_total Total number of HTTP requests processed by the proxy
+# TYPE ninja_http_requests_total counter
+ninja_http_requests_total{method="GET",path="/api",status="200",upstream_id="kotlin-ktor-service",tenant_id="none"} 623
+ninja_http_requests_total{method="POST",path="/api/users",status="200",upstream_id="kotlin-ktor-service",tenant_id="none"} 1
+ninja_http_requests_total{method="POST",path="/api/users/login",status="200",upstream_id="kotlin-ktor-service",tenant_id="none"} 1
+ninja_http_requests_total{method="GET",path="/api/user",status="200",upstream_id="kotlin-ktor-service",tenant_id="none"} 1
+ninja_http_requests_total{method="POST",path="/api/articles",status="200",upstream_id="kotlin-ktor-service",tenant_id="none"} 1
+ninja_http_requests_total{method="GET",path="/api/articles",status="200",upstream_id="kotlin-ktor-service",tenant_id="none"} 1
+
+# HELP ninja_http_request_duration_ms Request duration in milliseconds
+# TYPE ninja_http_request_duration_ms histogram
+ninja_http_request_duration_ms_bucket{method="GET",path="/api",upstream_id="kotlin-ktor-service",tenant_id="none",le="5"} 535
+ninja_http_request_duration_ms_bucket{method="GET",path="/api",upstream_id="kotlin-ktor-service",tenant_id="none",le="10"} 610
+ninja_http_request_duration_ms_bucket{method="GET",path="/api",upstream_id="kotlin-ktor-service",tenant_id="none",le="25"} 623
+ninja_http_request_duration_ms_bucket{method="GET",path="/api",upstream_id="kotlin-ktor-service",tenant_id="none",le="+Inf"} 623
+
+# HELP ninja_active_connections Current number of active connections to the upstream
+# TYPE ninja_active_connections gauge
+ninja_active_connections{upstream_id="kotlin-ktor-service"} 0
+
+# HELP ninja_cache_operations_total Total cache hits/misses
+# TYPE ninja_cache_operations_total counter
+ninja_cache_operations_total{action="hit"} 0
+ninja_cache_operations_total{action="miss"} 628
+
+# HELP ninja_upstream_status Health status of the upstream (1 = UP, 0 = DOWN)
+# TYPE ninja_upstream_status gauge
+ninja_upstream_status{upstream_id="kotlin-ktor-service"} 1
+
+# HELP ninja_system_metrics System-level resource metrics
+# TYPE ninja_system_metrics gauge
+ninja_proxy_cpu_load 2.6474609375
+ninja_proxy_memory_used_mb 78
+ninja_proxy_memory_total_mb 16384
+ninja_proxy_uptime_seconds 224.867950792
