@@ -1,0 +1,28 @@
+═══════════════════════════════════════════════════════════════════
+⚡ NINJA REVERSE PROXY: ADVANCED FEATURE STRESS & VALIDATION SUITE
+═══════════════════════════════════════════════════════════════════
+
+🔹 [1/4] Inspecting Circuit Breaker & Load Balancer Live State (/__lb-stats)...
+   ✅ Strategy: "power-of-two", Healthy Upstreams: [fastapi-service]
+   └─ Upstream Stats: [{"id":"fastapi-service","activeConnections":0,"failures":0,"state":"CLOSED","responseTime":52.00106980235589,"healthy":true,"adaptiveStats":{"requests":8.14697981114816,"accepts":8.14697981114816,"dropProbability":0}}]
+
+🔹 [2/4] Executing High-Concurrency Load Test (1,000 requests @ 25 concurrency)...
+   ✅ Dispatched: 1000 requests in 0.50s
+   └─ Throughput: 1983.6 req/sec
+   └─ Latency Percentiles: p50: 6.4ms | p90: 19.2ms | p95: 53.1ms | p99: 163.5ms
+   └─ Status Breakdown: 200 OK: 503 | 429 Throttled: 497
+
+🔹 [3/4] Triggering Rate Limiter Token-Bucket Defense (Firing 200 burst requests)...
+   🛡️ RATE LIMITER ACTIVATED! HTTP 429 Too Many Requests cleanly intercepted.
+   └─ X-RateLimit-Limit: 500
+   └─ X-RateLimit-Remaining: 0
+   └─ Retry-After: 60
+
+🔹 [4/4] Verifying Hop-by-Hop Header Sanitization & Distributed Tracing...
+   ✅ Status: 429
+   └─ X-Trace-Id Propagated: "2eb82fd5-5cd9-48b0-8cba-6ca724caea67"
+   └─ X-Proxy-By Signature: "Ninja-Reverse-Proxy"
+
+═══════════════════════════════════════════════════════════════════
+🎉 ADVANCED FEATURE VALIDATION COMPLETE!
+═══════════════════════════════════════════════════════════════════

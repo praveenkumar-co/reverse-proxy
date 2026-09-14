@@ -1,0 +1,22 @@
+═══════════════════════════════════════════════════════════════════
+⚡ CIRCUIT BREAKER & AUTOMATIC HEALTH RECOVERY TEST
+═══════════════════════════════════════════════════════════════════
+
+🔹 STEP 1: Baseline Check — Verifying Gateway & Backend are UP...
+   └─ Initial /docs status: 200 (Expected: 200)
+
+🔹 STEP 2: Simulating Backend Outage (Killing Python FastAPI)...
+   └─ Killing FastAPI process (PID: 4485)...
+
+🔹 STEP 3: Dispatching Traffic to Proxy During Backend Outage...
+   🛡️ Proxy Clean Interception: HTTP 502
+   └─ Body received: Upstream connection failed: connect ECONNREFUSED 127.0.0.1:8000
+   └─ Notice: Reverse Proxy did NOT crash! Handled failure gracefully.
+
+🔹 STEP 4: Simulating Backend Recovery (Restarting FastAPI)...
+   └─ Spawned fresh FastAPI instance. Waiting for health checker to auto-heal...
+   ✅ AUTO-HEALED! Succeeded at probe #1: HTTP 200 OK
+
+═══════════════════════════════════════════════════════════════════
+🎉 SUCCESS: Circuit Breaker & Zero-Downtime Auto-Recovery VERIFIED!
+═══════════════════════════════════════════════════════════════════

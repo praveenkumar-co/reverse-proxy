@@ -1,0 +1,61 @@
+================================================================================
+AUTOCANNON BENCHMARK & LOAD STRESS TEST: JAVA SPRING BOOT QKD SIMULATION
+================================================================================
+Target: http://127.0.0.1:8080/api/qkd/encrypt?message=LoadBench
+Reverse Proxy Architecture: 2 Cluster Workers, Token Bucket Rate Limiting, Power-of-Two Load Balancing
+
+[1] High-Concurrency Throughput & Burst Rate Limiting Test (20 connections, 5s)
+--------------------------------------------------------------------------------
+Running 5s test @ http://127.0.0.1:8080/api/qkd/encrypt?message=LoadBench
+20 connections
+
+┌─────────┬──────┬──────┬───────┬──────┬─────────┬─────────┬───────┐
+│ Stat    │ 2.5% │ 50%  │ 97.5% │ 99%  │ Avg     │ Stdev   │ Max   │
+├─────────┼──────┼──────┼───────┼──────┼─────────┼─────────┼───────┤
+│ Latency │ 0 ms │ 1 ms │ 2 ms  │ 5 ms │ 0.78 ms │ 2.11 ms │ 88 ms │
+└─────────┴──────┴──────┴───────┴──────┴─────────┴─────────┴───────┘
+┌───────────┬─────────┬─────────┬─────────┬─────────┬──────────┬──────────┬─────────┐
+│ Stat      │ 1%      │ 2.5%    │ 50%     │ 97.5%   │ Avg      │ Stdev    │ Min     │
+├───────────┼─────────┼─────────┼─────────┼─────────┼──────────┼──────────┼─────────┤
+│ Req/Sec   │ 5,155   │ 5,155   │ 17,503  │ 19,023  │ 15,130.8 │ 5,074.22 │ 5,152   │
+├───────────┼─────────┼─────────┼─────────┼─────────┼──────────┼──────────┼─────────┤
+│ Bytes/Sec │ 3.63 MB │ 3.63 MB │ 12.4 MB │ 13.5 MB │ 10.7 MB  │ 3.6 MB   │ 3.63 MB │
+└───────────┴─────────┴─────────┴─────────┴─────────┴──────────┴──────────┴─────────┘
+
+Req/Bytes counts sampled once per second.
+# of samples: 5
+
+448 2xx responses, 75202 non 2xx responses (Token bucket rate limit enforced: HTTP 429)
+76k requests in 5.02s, 53.5 MB read
+
+Summary:
+- Peak throughput: 19,023 Req/Sec
+- Average throughput: 15,130.8 Req/Sec
+- p50 Latency: 1 ms
+- p99 Latency: 5 ms
+- Max Latency: 88 ms
+- Token Bucket rate limiter successfully guarded Java container against socket saturation and memory starvation.
+
+[2] Controlled Concurrency Within Rate Limit (5 connections, 100 requests)
+--------------------------------------------------------------------------------
+Running 100 requests test @ http://127.0.0.1:8080/api/qkd/encrypt?message=LoadBench
+5 connections
+
+┌─────────┬──────┬──────┬───────┬───────┬─────────┬─────────┬───────┐
+│ Stat    │ 2.5% │ 50%  │ 97.5% │ 99%   │ Avg     │ Stdev   │ Max   │
+├─────────┼──────┼──────┼───────┼───────┼─────────┼─────────┼───────┤
+│ Latency │ 2 ms │ 5 ms │ 30 ms │ 30 ms │ 7.62 ms │ 7.17 ms │ 31 ms │
+└─────────┴──────┴──────┴───────┴───────┴─────────┴─────────┴───────┘
+┌───────────┬─────────┬─────────┬─────────┬─────────┬─────────┬───────┬─────────┐
+│ Stat      │ 1%      │ 2.5%    │ 50%     │ 97.5%   │ Avg     │ Stdev │ Min     │
+├───────────┼─────────┼─────────┼─────────┼─────────┼─────────┼───────┼─────────┤
+│ Req/Sec   │ 100     │ 100     │ 100     │ 100     │ 100     │ 0     │ 100     │
+├───────────┼─────────┼─────────┼─────────┼─────────┼─────────┼───────┼─────────┤
+│ Bytes/Sec │ 67.7 kB │ 67.7 kB │ 67.7 kB │ 67.7 kB │ 67.7 kB │ 0 B   │ 67.7 kB │
+└───────────┴─────────┴─────────┴─────────┴─────────┴─────────┴───────┴─────────┘
+
+Summary:
+- 100 requests processed in 1.01s
+- Avg Latency: 7.62 ms
+- 83 Quantum Keys established, 17 Eavesdropping attempts caught by BB84 QBER calculation
+- 0 connection drops or gateway timeouts

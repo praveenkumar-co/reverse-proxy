@@ -1,0 +1,29 @@
+═══════════════════════════════════════════════════════════════════
+⚛️  JAVA SPRING BOOT QKD SIMULATION + NINJA REVERSE PROXY TEST SUITE
+═══════════════════════════════════════════════════════════════════
+Gateway Target: http://127.0.0.1:8080
+
+✅ [PASS] [1/10] Gateway Readiness Probe (/__ready) (25ms)
+   └─ Status: 200, Checks: {"upstream-available":true,"cache-connected":true}
+✅ [PASS] [2/10] Upstream Health & Load Balancer Telemetry (/__lb-stats) (4ms)
+   └─ Strategy: power-of-two, Upstream: qkd-java-service (Healthy: true, State: CLOSED)
+✅ [PASS] [3/10] QKD BB84 Key Exchange & Message Encryption (GET /api/qkd/encrypt) (19ms)
+   └─ Status: 200, Key Length: 44 chars, Ciphertext: ZOwVj0Sdaw3QDY7aV1ZxE+NaD6ChcsKL...
+✅ [PASS] [4/10] Ephemeral 256-bit AES Quantum Key Validation (0ms)
+   └─ Key Encoding: Base64, Size: 32 bytes (256-bit AES), Base64: HAayxJieijQ+ItOq...
+✅ [PASS] [5/10] QKD Quantum Decryption (POST /api/qkd/decrypt) (20ms)
+   └─ Status: 200, Plaintext: "TopSecretQuantumPayload_2026_NinjaProxy", KeyProvided: HAayxJieij...
+✅ [PASS] [6/10] End-to-End Quantum Encryption/Decryption Roundtrip Fidelity (0ms)
+   └─ Original: "TopSecretQuantumPayload_2026_NinjaProxy" === Decrypted: "TopSecretQuantumPayload_2026_NinjaProxy" (100% byte fidelity)
+✅ [PASS] [7/10] Gateway Telemetry & Tracing Headers Propagation (6ms)
+   └─ X-Trace-Id: c42d245f-4026-4cd7-b26d-a3c3f681de1e, X-Upstream-Id: qkd-java-service, Access-Control-Allow-Origin: *
+✅ [PASS] [8/10] Resilient Error Handling for Invalid Quantum Key (POST /api/qkd/decrypt) (9ms)
+   └─ Handled Corrupted Key: HTTP 400, Error Body: {"error":"Key Error: Illegal base64 character 5f"}
+✅ [PASS] [9/10] High-Concurrency Multi-Client Quantum Simulation (50 concurrent exchanges) (170ms)
+   └─ Processed: 50/50 requests (Keys Established: 39, Eve Eavesdroppers Caught by QBER: 11, Concurrent Decryptions Verified: 39)
+✅ [PASS] [10/10] Prometheus Observability Metrics & Upstream Health Gauge (3ms)
+   └─ Prometheus scrape verified: Upstream UP (status=1), Metric records: 4
+
+═══════════════════════════════════════════════════════════════════
+RESULTS: 10/10 TESTS PASSED (100% Success Rate)
+═══════════════════════════════════════════════════════════════════
