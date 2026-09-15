@@ -1,6 +1,6 @@
 # 🛡️ Ninja Reverse Proxy — Full System Verification Report
 
-**Execution Timestamp**: 2026-09-09T18:06:06.826Z  
+**Execution Timestamp**: 2026-09-15T10:14:26.767Z  
 **Environment**: Production Verification & Portfolio Audit  
 **Total Features Verified**: 29  
 **Passed**: 29  
@@ -17,7 +17,7 @@
 | **Load Balancer** | Strategy: least-connections | ✅ PASS | `Picked: node-a` |
 | **Load Balancer** | Strategy: weighted-least-connections | ✅ PASS | `Picked: node-a` |
 | **Load Balancer** | Strategy: least-response-time | ✅ PASS | `Picked: node-a` |
-| **Load Balancer** | Strategy: power-of-two | ✅ PASS | `Picked: node-b` |
+| **Load Balancer** | Strategy: power-of-two | ✅ PASS | `Picked: node-a` |
 | **Load Balancer** | Strategy: consistent-hashing | ✅ PASS | `Picked: node-a` |
 | **Load Balancer** | Strategy: ip-hash | ✅ PASS | `Picked: node-a` |
 | **Load Balancer** | Strategy: adaptive-wrr | ✅ PASS | `Picked: node-a` |
@@ -32,7 +32,7 @@
 | **Resilience** | Classic Circuit Breaker (CLOSED → OPEN) | ✅ PASS | `State: OPEN` |
 | **Resilience** | Adaptive Circuit Breaker (Google SRE EWMA) | ✅ PASS | `Requests: 1.90, DropProb: 0.0345` |
 | **Resilience** | Bulkhead Pattern (Concurrency Limiter) | ✅ PASS | `Slot 1: true, Slot 2 Rejection: true, Slot 3: true` |
-| **Resilience** | Exponential & Jitter Backoffs + Retry Budget | ✅ PASS | `Exp: 400ms, FullJitter: 357ms, EqualJitter: 391ms, Decorrelated: 101ms` |
+| **Resilience** | Exponential & Jitter Backoffs + Retry Budget | ✅ PASS | `Exp: 400ms, FullJitter: 137ms, EqualJitter: 361ms, Decorrelated: 220ms` |
 | **Cache & Storage** | L1 In-Memory LRU Eviction & TTL | ✅ PASS | `Evicted LRU 'a': Success, Retrieved 'c': true` |
 | **Cache & Storage** | Hybrid Cache (L1 Memory + L2 Redis Sync) | ✅ PASS | `Retrieved & Warmed L1: value-from-redis` |
 | **Cache & Storage** | Stale-If-Error Cache Policy | ✅ PASS | `Served Stale on 503 Upstream Failure: true` |

@@ -1,0 +1,45 @@
+═════════════════════════════════════════════════════════════════════════
+🟣 KOTLIN KTOR ADVANCED GATEWAY AUDIT: CACHE, RATE LIMIT, PROM & GRAFANA
+═════════════════════════════════════════════════════════════════════════
+Gateway:    http://127.0.0.1:8080
+Prometheus: http://127.0.0.1:9090
+Grafana:    http://127.0.0.1:3000
+
+--- [SECTION 1: L1 / L2 REDIS CACHING AUDIT] ---
+✅ [PASS] 1. Cache MISS Verification on Cold Request (84ms)
+   └─ Status: 200, X-Cache: MISS, Latency: 82.21ms, Body: "Welcome to Realworld"
+✅ [PASS] 2. Cache HIT Verification on Subsequent Request (4ms)
+   └─ Status: 200, X-Cache: HIT, Latency: 3.84ms (Cache Speedup: 21.4x)
+✅ [PASS] 3. Cache Metrics Counters Scrape (13ms)
+   └─ Cache Hits Recorded: 6, Cache Misses Recorded: 1
+
+--- [SECTION 2: TOKEN BUCKET RATE LIMITING AUDIT] ---
+✅ [PASS] 4. Token Bucket Burst Throttling & HTTP 429 Enforcement (232ms)
+   └─ Burst Size: 550 reqs -> Accepted: 495 (HTTP 200), Throttled: 55 (HTTP 429 Too Many Requests)
+✅ [PASS] 5. Rate Limit Headers Verification (1ms)
+   └─ Headers Present -> Limit: 500, Remaining: 0, Retry-After: 1789467174433
+
+--- [SECTION 3: CIRCUIT BREAKER & ADAPTIVE RESILIENCE] ---
+✅ [PASS] 6. Circuit Breaker Telemetry & Adaptive Health Inspection (1ms)
+   └─ Upstream: kotlin-ktor-service, State: CLOSED, Healthy: true, Drop Probability: 0
+
+--- [SECTION 4: PROMETHEUS SCRAPING & PROMQL TELEMETRY] ---
+✅ [PASS] 7. Prometheus Target Scrape Health (:9090) (6018ms)
+   └─ Target: http://host.docker.internal:8080/metrics, Health: UP, Last Scrape: 2026-09-15T10:15:51Z
+✅ [PASS] 8. PromQL Query Validation: Upstream Status & Request Counters (7ms)
+   └─ PromQL Verified: [Upstream Status: UP (1)], [Total Proxied Requests: 2], [Cache Hits: 500]
+
+--- [SECTION 5: GRAFANA DASHBOARD & DATASOURCE AUDIT] ---
+✅ [PASS] 9. Grafana Prometheus Datasource Health Check (:3000) (25ms)
+   └─ Datasource Status: OK (Successfully queried the Prometheus API.)
+✅ [PASS] 10. Grafana Pre-Configured Dashboards Audit (64ms)
+   └─ Active Dashboards Verified (5/5):
+      • Ninja Proxy — Overview (http://localhost:3000/d/ninja-proxy-overview)
+      • Ninja Proxy — Rate Limiting (http://localhost:3000/d/ninja-rate-limit)
+      • Ninja Proxy — Cache (http://localhost:3000/d/ninja-cache)
+      • Ninja Proxy — Circuit Breaker & Resilience (http://localhost:3000/d/ninja-circuit-breaker)
+      • Ninja Proxy — Load Balancer (http://localhost:3000/d/ninja-load-balancer)
+
+═════════════════════════════════════════════════════════════════════════
+ADVANCED AUDIT SUMMARY: 10/10 AUDIT CHECKS PASSED (100%)
+═════════════════════════════════════════════════════════════════════════

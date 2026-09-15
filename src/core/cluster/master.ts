@@ -959,6 +959,15 @@ export async function createServer(config: CreateServerConfig) {
               "X-RateLimit-Reset": globalRateLimiter.getResetTime(clientIP).toString(),
               "X-RateLimit-Algorithm": globalRateLimiter.getAlgorithm(),
             });
+            const tenantId = (c.req.headers["x-tenant-id"] as string) ?? "none";
+            metricsRegistry.recordRequest(
+              c.req.method ?? "GET",
+              url.pathname,
+              429,
+              "rate-limiter",
+              0,
+              tenantId,
+            );
             c.res.end(
               JSON.stringify({
                 error: "Too Many Requests",
@@ -992,6 +1001,15 @@ export async function createServer(config: CreateServerConfig) {
               "X-RateLimit-Reset": routeLimiter.getResetTime(clientIP).toString(),
               "X-RateLimit-Algorithm": routeLimiter.getAlgorithm(),
             });
+            const tenantId = (c.req.headers["x-tenant-id"] as string) ?? "none";
+            metricsRegistry.recordRequest(
+              c.req.method ?? "GET",
+              url.pathname,
+              429,
+              "rate-limiter",
+              0,
+              tenantId,
+            );
             c.res.end(
               JSON.stringify({
                 error: "Too Many Requests",

@@ -208,3 +208,38 @@ ninja_http_requests_total{method="GET",path="/api/articles",status="200",upstrea
 | **Python / FastAPI** | Uvicorn / Python 3.14 ASGI | `1,983 req/sec` | `5.0 ms` | 100% Passed |
 | **Java / Spring Boot** | Tomcat / OpenJDK 21 (QKD) | `19,023 req/sec` | `0.78 ms` | 100% Passed |
 | **Kotlin / Ktor** | Netty / OpenJDK 21 (Conduit) | `15,583 req/sec` | `2.48 ms` | 100% Passed |
+
+---
+
+## 🛡️ Advanced Audits: Caching, Rate Limiting, Prometheus & Grafana
+
+Run the comprehensive audit:
+```bash
+node tests/kotlin-advanced-gateway-audit.mjs
+```
+
+### 1. Redis L1/L2 Caching
+* **Cold Cache Miss**: Latency ~82ms (`X-Cache: MISS`).
+* **Warm Cache Hit**: Latency ~3.8ms (`X-Cache: HIT`, **21.4x faster**).
+* **Direct Cache Serving**: 500 requests served from L1/L2 cache without hitting the Kotlin backend.
+
+### 2. Token Bucket Rate Limiting
+* **Burst Handling**: 550 requests in a burst throttled to 495 HTTP 200 and 55 HTTP 429 (`Too Many Requests`).
+* **Telemetry Headers**: `X-RateLimit-Limit: 500`, `X-RateLimit-Remaining: 0`, `Retry-After: active`.
+
+### 3. Prometheus Live Scraping (`http://localhost:9090`)
+* **Scrape Target**: `http://host.docker.internal:8080/metrics`
+* **Target Health**: **`UP`**
+* **PromQL Verified**:
+  * `ninja_upstream_status{upstream_id="kotlin-ktor-service"} == 1`
+  * `ninja_cache_operations_total{action="hit"} == 500`
+  * `ninja_cache_operations_total{action="miss"} == 2`
+
+### 4. Grafana Dashboards (`http://localhost:3000`)
+* **Datasource**: Prometheus (`http://prometheus:9090`) - Health: **OK**
+* **Dashboards Active**:
+  * [Overview](http://localhost:3000/d/ninja-proxy-overview)
+  * [Rate Limiting](http://localhost:3000/d/ninja-rate-limit)
+  * [Cache Performance](http://localhost:3000/d/ninja-cache)
+  * [Circuit Breaker & Resilience](http://localhost:3000/d/ninja-circuit-breaker)
+  * [Load Balancer Stats](http://localhost:3000/d/ninja-load-balancer)
