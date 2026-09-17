@@ -1,3 +1,14 @@
+export interface CanaryConfig {
+  enabled: boolean;
+  canaryUpstream: string;
+  baselineUpstream?: string;
+  weight?: number;
+  stickyCookieName?: string;
+  headerKey?: string;
+  headerValue?: string;
+  stage?: string;
+}
+
 export interface RouteRule {
   path: string;
   upstream: string[];
@@ -6,4 +17,6 @@ export interface RouteRule {
   cache?: { enabled: boolean; ttlSeconds?: number };
   sticky?: boolean;
   stripPrefix?: boolean;
+  canary?: CanaryConfig;
 }
+

@@ -47,13 +47,40 @@ const pathCacheSchema = z
   })
   .optional();
 
+export const canarySchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    canaryUpstream: z.string(),
+    baselineUpstream: z.string().optional(),
+    weight: z.number().min(0).max(100).default(10),
+    stickyCookieName: z.string().default("NINJA_CANARY"),
+    headerKey: z.string().optional(),
+    headerValue: z.string().optional(),
+    stage: z.string().default("canary"),
+  })
+  .optional()
+  .refine(
+    (data) => {
+      if (!data) return true;
+      return !data.headerKey === !data.headerValue;
+    },
+    {
+      message: "Both 'headerKey' and 'headerValue' must be provided together",
+      path: ["headerKey"],
+    },
+  );
+
+export type CanaryConfigType = z.infer<typeof canarySchema>;
+
 const routeSchema = z.object({
   path: z.string(),
   upstreams: z.array(z.string()),
   rateLimit: pathRateLimitSchema,
   sticky: z.boolean().default(false),
   cache: pathCacheSchema,
+  canary: canarySchema,
 });
+
 
 export const serverSchema = z.object({
   host: z.string().default("0.0.0.0"),

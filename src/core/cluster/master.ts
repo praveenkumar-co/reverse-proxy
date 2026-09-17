@@ -490,15 +490,78 @@ export async function createServer(config: CreateServerConfig) {
         [...HEALTHY_UPSTREAMS].filter((id) => allowedUpstreams.includes(id)),
       );
       let upstreamId: string | null = null;
-      if (pathRule?.sticky) {
+      let routeStage: string | undefined;
+      let setCanaryCookieVal: string | undefined;
+
+      // Canary Deployment Selection (if enabled on this path)
+      if (pathRule?.canary?.enabled) {
+        const canaryConf = pathRule.canary;
+        const canaryId = canaryConf.canaryUpstream;
+        const baselineId =
+          canaryConf.baselineUpstream ||
+          (allowedUpstreams.length > 0 ? allowedUpstreams[0] : null);
+        const cookieName = canaryConf.stickyCookieName || "NINJA_CANARY";
+        const cookies = parseCookies(payload.headers.cookie);
+        const userCookie = cookies[cookieName];
+
+        const isCanaryHealthy = canaryId ? HEALTHY_UPSTREAMS.has(canaryId) : false;
+
+        // 1. Header Override (Highest Priority)
+        let headerMatched = false;
+        if (canaryConf.headerKey && canaryConf.headerValue) {
+          const incomingHeaderVal =
+            payload.headers[canaryConf.headerKey.toLowerCase()];
+          if (incomingHeaderVal === canaryConf.headerValue) {
+            headerMatched = true;
+          }
+        }
+
+        if (headerMatched) {
+          if (isCanaryHealthy && !attemptedUpstreams.has(canaryId)) {
+            upstreamId = canaryId;
+            routeStage = canaryConf.stage || "canary";
+          }
+        } else if (userCookie === "canary") {
+          if (isCanaryHealthy && !attemptedUpstreams.has(canaryId)) {
+            upstreamId = canaryId;
+            routeStage = canaryConf.stage || "canary";
+          }
+        } else if (userCookie === "baseline") {
+          if (
+            baselineId &&
+            HEALTHY_UPSTREAMS.has(baselineId) &&
+            !attemptedUpstreams.has(baselineId)
+          ) {
+            upstreamId = baselineId;
+            routeStage = "baseline";
+          }
+        } else {
+          const weight = canaryConf.weight ?? 10;
+          const roll = Math.random() * 100;
+          if (roll < weight && isCanaryHealthy && !attemptedUpstreams.has(canaryId)) {
+            upstreamId = canaryId;
+            routeStage = canaryConf.stage || "canary";
+            setCanaryCookieVal = "canary";
+          } else if (
+            baselineId &&
+            HEALTHY_UPSTREAMS.has(baselineId) &&
+            !attemptedUpstreams.has(baselineId)
+          ) {
+            upstreamId = baselineId;
+            routeStage = "baseline";
+            setCanaryCookieVal = "baseline";
+          }
+        }
+      }
+      if(pathRule?.sticky && !upstreamId) {
         const cookies = parseCookies(payload.headers.cookie);
         const stickId =
           cookies[ACTIVE_CONFIG.server.loadBalancing.stickyCookieName ?? "NINJA_ROUTE"];
-        if (stickId && routeHealthyUpstreams.has(stickId) && !attemptedUpstreams.has(stickId)) {
+        if(stickId && routeHealthyUpstreams.has(stickId) && !attemptedUpstreams.has(stickId)) {
           upstreamId = stickId;
         }
       }
-      if (!upstreamId) {
+      if(!upstreamId) {
         const candidateSet =
           routeHealthyUpstreams.size > 0 ? routeHealthyUpstreams : HEALTHY_UPSTREAMS;
         upstreamId = lb.pickFiltered(
@@ -507,11 +570,11 @@ export async function createServer(config: CreateServerConfig) {
           attemptedUpstreams,
           payload.headers.cookie,
         );
-        if (!upstreamId && attempt > 0) {
+        if(!upstreamId && attempt > 0) {
           upstreamId = lb.pickFiltered(candidateSet, clientIp, new Set(), payload.headers.cookie);
         }
       }
-      if (!upstreamId) {
+      if(!upstreamId) {
         logger.warn("Master", "No healthy upstream available to dispatch request", { attempt });
         res.writeHead(503, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "No healthy upstreams available" }));
@@ -528,20 +591,20 @@ export async function createServer(config: CreateServerConfig) {
       const effectiveResilience = ACTIVE_CONFIG.resilience ?? ACTIVE_CONFIG.server.resilience;
       const bulkheadConf = effectiveResilience?.bulkhead;
       const isBulkheadEnabled = bulkheadConf?.enabled ?? false;
-      if (isBulkheadEnabled) {
+      if(isBulkheadEnabled) {
         let bulkhead = upstreamBulkheads.get(upstreamId);
-        if (!bulkhead) {
+        if(!bulkhead) {
           const upstreamConf = ACTIVE_CONFIG.server.upstreams.find((u) => u.id === upstreamId);
           const maxConcurrent =
             bulkheadConf?.maxConcurrentPerUpstream ?? upstreamConf?.maxConnections ?? 1000;
           bulkhead = new Bulkhead(maxConcurrent);
           upstreamBulkheads.set(upstreamId, bulkhead);
         }
-        if (!bulkhead.enter()) {
+        if(!bulkhead.enter()){
           logger.warn("Resilience", `Bulkhead capacity reached for upstream: ${upstreamId}`);
           const retryConfig = ACTIVE_CONFIG.server.loadBalancing.retry;
           const retryAllowed = globalRetryBudget.recordRetry();
-          if (retryAllowed && attempt < retryConfig.maxAttempts) {
+          if(retryAllowed && attempt < retryConfig.maxAttempts) {
             dispatchToWorker(payload, clientIp, res, attempt + 1, attemptedUpstreams, startTime);
           } else {
             res.writeHead(503, { "Content-Type": "application/json" });
@@ -783,12 +846,35 @@ export async function createServer(config: CreateServerConfig) {
             delete responseHeaders["content-length"];
             delete responseHeaders["transfer-encoding"];
             delete responseHeaders["connection"];
+            if (routeStage) {
+              responseHeaders["X-Route-Stage"] = routeStage;
+            }
+            const setCookieList: string[] = [];
+            const upstreamSetCookie = reply.headers?.["set-cookie"];
+            if (upstreamSetCookie) {
+              if (Array.isArray(upstreamSetCookie)) {
+                setCookieList.push(...upstreamSetCookie);
+              } else {
+                setCookieList.push(upstreamSetCookie);
+              }
+            }
             if (pathRule?.sticky) {
               const maxAge = ACTIVE_CONFIG.server.loadBalancing.stickyCookieTtlMs
                 ? `; Max-Age=${Math.round(ACTIVE_CONFIG.server.loadBalancing.stickyCookieTtlMs / 1000)}`
                 : "";
+              setCookieList.push(
+                `${ACTIVE_CONFIG.server.loadBalancing.stickyCookieName ?? "NINJA_ROUTE"}=${upstreamId}; Path=/; HttpOnly; SameSite=Lax${maxAge}`,
+              );
+            }
+            if (setCanaryCookieVal && pathRule?.canary) {
+              const cName = pathRule.canary.stickyCookieName || "NINJA_CANARY";
+              setCookieList.push(
+                `${cName}=${setCanaryCookieVal}; Path=/; HttpOnly; SameSite=Lax`,
+              );
+            }
+            if (setCookieList.length > 0) {
               responseHeaders["Set-Cookie"] =
-                `${ACTIVE_CONFIG.server.loadBalancing.stickyCookieName ?? "NINJA_ROUTE"}=${upstreamId}; Path=/; HttpOnly; SameSite=Lax${maxAge}`;
+                setCookieList.length === 1 ? setCookieList[0] : setCookieList;
             }
             res.writeHead(reply.statusCode ?? 200, responseHeaders);
             res.end(responseData);
@@ -819,7 +905,43 @@ export async function createServer(config: CreateServerConfig) {
       );
 
       let upstreamId: string | null = null;
-      if (pathRule?.sticky) {
+      if (pathRule?.canary?.enabled) {
+        const canaryConf = pathRule.canary;
+        const canaryId = canaryConf.canaryUpstream;
+        const baselineId =
+          canaryConf.baselineUpstream ||
+          (allowedUpstreams.length > 0 ? allowedUpstreams[0] : null);
+        const cookieName = canaryConf.stickyCookieName || "NINJA_CANARY";
+        const cookies = parseCookies(req.headers.cookie);
+        const userCookie = cookies[cookieName];
+        const isCanaryHealthy = canaryId ? HEALTHY_UPSTREAMS.has(canaryId) : false;
+
+        let headerMatched = false;
+        if (canaryConf.headerKey && canaryConf.headerValue) {
+          const incomingHeaderVal =
+            req.headers[canaryConf.headerKey.toLowerCase()];
+          if (incomingHeaderVal === canaryConf.headerValue) {
+            headerMatched = true;
+          }
+        }
+
+        if (headerMatched && isCanaryHealthy) {
+          upstreamId = canaryId;
+        } else if (userCookie === "canary" && isCanaryHealthy) {
+          upstreamId = canaryId;
+        } else if (userCookie === "baseline" && baselineId && HEALTHY_UPSTREAMS.has(baselineId)) {
+          upstreamId = baselineId;
+        } else {
+          const weight = canaryConf.weight ?? 10;
+          if (Math.random() * 100 < weight && isCanaryHealthy) {
+            upstreamId = canaryId;
+          } else if (baselineId && HEALTHY_UPSTREAMS.has(baselineId)) {
+            upstreamId = baselineId;
+          }
+        }
+      }
+
+      if (pathRule?.sticky && !upstreamId) {
         const cookies = parseCookies(req.headers.cookie);
         const stickId =
           cookies[ACTIVE_CONFIG.server.loadBalancing.stickyCookieName ?? "NINJA_ROUTE"];

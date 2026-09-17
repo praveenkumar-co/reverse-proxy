@@ -34,6 +34,10 @@ function mapBackwardCompatibleKeys(configParsed: any): any {
     configParsed.server.upstreams = effectiveUpstreams;
   }
 
+  if (!configParsed.server.paths && configParsed.paths) {
+    configParsed.server.paths = configParsed.paths;
+  }
+
   if (configParsed.server.paths !== undefined && configParsed.routes === undefined){
     configParsed.routes = configParsed.server.paths.map((p: any) => {
       const upstreams = p.upstreams || (p.upstream ? (Array.isArray(p.upstream) ? p.upstream : [p.upstream]) : []);
@@ -43,6 +47,7 @@ function mapBackwardCompatibleKeys(configParsed: any): any {
         rateLimit: p.rateLimit,
         sticky: p.sticky,
         cache: p.cache,
+        canary: p.canary,
       };
     });
   } else if (configParsed.routes){
@@ -59,6 +64,7 @@ function mapBackwardCompatibleKeys(configParsed: any): any {
       rateLimit: r.rateLimit,
       sticky: r.sticky,
       cache: r.cache,
+      canary: r.canary,
     }));
   }
 
