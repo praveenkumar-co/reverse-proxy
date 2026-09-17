@@ -135,19 +135,6 @@ console.log('🚀 Ninja Reverse Proxy listening on port 8080');
 
 ---
 
-## 🌐 Verified Across Polyglot Backends
-
-Ninja Reverse Proxy is tested and audited against real-world production frameworks:
-
-| Ecosystem | Backend Stack | Verification Focus | Result |
-| :--- | :--- | :--- | :--- |
-| **Node.js** | Express / PharmaChain | High-throughput JSON routing & JWT auth | **100% Passed** (4,739 req/s) |
-| **Python** | FastAPI / Conduit | Async ASGI coroutines & PostgreSQL proxying | **10/10 Passed** |
-| **Java** | Spring Boot / QKD | Quantum key simulation & multi-client burst | **10/10 Passed** (19,000 RPS burst) |
-| **Kotlin** | Ktor / RealWorld | Netty engine, Exposed ORM & L1/L2 Redis cache | **10/10 Passed** (15,500 RPS burst) |
-
----
-
 ## 📊 Hyperscale Performance Benchmark
 
 Benchmarked under sustained multi-method eCommerce traffic using k6 across clustered workers:

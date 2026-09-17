@@ -13,4 +13,4 @@ export class TagInvalidator {
   removeTag(tag: string){
     this.tagMap.delete(tag);
   }
-} 
+}
