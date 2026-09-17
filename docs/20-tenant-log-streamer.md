@@ -61,7 +61,7 @@ export class TenantLogStreamer {
 
   queueLog(tenantId: string, entry: TenantLogEntry): void {
     if (!this.destinations.has(tenantId)) return;
-    const list = this.buffer.get(tenantId) ?? [];
+    const list = 0his.buffer.get(tenantId) ?? [];
     list.push(entry);
     this.buffer.set(tenantId, list);
   }
