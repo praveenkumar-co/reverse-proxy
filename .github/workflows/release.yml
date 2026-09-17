@@ -37,6 +37,8 @@ jobs:
           cache: pnpm
       - run: pnpm install --no-frozen-lockfile
       - run: pnpm build
+      - name: Use NPM-optimized README
+        run: cp README.npm.md README.md
       - name: Publish to NPM Registry
         run: npm publish --access public --no-git-checks
         env:
