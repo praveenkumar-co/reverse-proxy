@@ -118,6 +118,18 @@ export class LoadBalancer {
     const s = this.states.get(id);
     if(s && s.activeConnections > 0) s.activeConnections--;
   }
+  public getActiveConnections(id: string): number {
+    return this.states.get(id)?.activeConnections ?? 0;
+  }
+  public isAtCapacity(id: string, customLimit?: number): boolean {
+    const s = this.states.get(id);
+    if(!s) return false;
+    const limit = customLimit ?? s.maxConnections;
+    if(limit !== undefined && s.activeConnections >= limit) {
+      return true;
+    }
+    return false;
+  }
   public recordSuccess(id: string, latencyMs = 0){
     const s = this.states.get(id);
     if(!s) return;

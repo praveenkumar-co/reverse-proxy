@@ -57,6 +57,9 @@ export const canarySchema = z
     headerKey: z.string().optional(),
     headerValue: z.string().optional(),
     stage: z.string().default("canary"),
+    allowedIps: z.array(z.string()).optional(),
+    stripHeader: z.boolean().default(true),
+    maxConnections: z.number().positive().optional(),
   })
   .optional()
   .refine(

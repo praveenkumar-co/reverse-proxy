@@ -30,4 +30,7 @@ export class Bulkhead {
   public getMaxConcurrent(): number {
     return this.maxConcurrent;
   }
+  public get availableSlots(): number {
+    return Math.max(0, this.maxConcurrent - this.activeCount);
+  }
 }

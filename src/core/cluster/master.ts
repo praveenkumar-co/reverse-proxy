@@ -56,6 +56,19 @@ function getEffectiveLoadBalancing(config: RootConfigType) {
   return config.loadBalancing ?? config.server.loadBalancing;
 }
 
+function isIpAllowed(clientIp: string, allowedIps?: string[]): boolean {
+  if (!allowedIps || allowedIps.length === 0) return true;
+  const normalizedClient = clientIp.replace(/^::ffff:/, "").trim();
+  return allowedIps.some((allowed) => {
+    const normAllowed = allowed.replace(/^::ffff:/, "").trim();
+    return (
+      normAllowed === normalizedClient ||
+      (normalizedClient === "::1" && normAllowed === "127.0.0.1") ||
+      (normalizedClient === "127.0.0.1" && normAllowed === "::1")
+    );
+  });
+}
+
 interface CreateServerConfig {
   port: number;
   workerCount: number;
@@ -505,6 +518,12 @@ export async function createServer(config: CreateServerConfig) {
         const userCookie = cookies[cookieName];
 
         const isCanaryHealthy = canaryId ? HEALTHY_UPSTREAMS.has(canaryId) : false;
+        const canaryBulkhead = canaryId ? upstreamBulkheads.get(canaryId) : undefined;
+        const isCanaryAtCapacity = canaryId
+          ? lb.isAtCapacity(canaryId, canaryConf.maxConnections) ||
+            (canaryBulkhead !== undefined && canaryBulkhead.availableSlots <= 0)
+          : false;
+        const isCanaryAvailable = isCanaryHealthy && !isCanaryAtCapacity;
 
         // 1. Header Override (Highest Priority)
         let headerMatched = false;
@@ -512,19 +531,48 @@ export async function createServer(config: CreateServerConfig) {
           const incomingHeaderVal =
             payload.headers[canaryConf.headerKey.toLowerCase()];
           if (incomingHeaderVal === canaryConf.headerValue) {
-            headerMatched = true;
+            if (isIpAllowed(clientIp, canaryConf.allowedIps)) {
+              headerMatched = true;
+            } else {
+              logger.warn(
+                "Canary",
+                `Header override ignored for client IP ${clientIp}: not in allowedIps whitelist`,
+              );
+            }
           }
         }
 
         if (headerMatched) {
-          if (isCanaryHealthy && !attemptedUpstreams.has(canaryId)) {
+          if (isCanaryAvailable && !attemptedUpstreams.has(canaryId)) {
             upstreamId = canaryId;
             routeStage = canaryConf.stage || "canary";
+          } else if (
+            baselineId &&
+            HEALTHY_UPSTREAMS.has(baselineId) &&
+            !attemptedUpstreams.has(baselineId)
+          ) {
+            logger.warn(
+              "Canary",
+              `Canary upstream ${canaryId} at capacity; fallback to baseline ${baselineId}`,
+            );
+            upstreamId = baselineId;
+            routeStage = "baseline";
           }
         } else if (userCookie === "canary") {
-          if (isCanaryHealthy && !attemptedUpstreams.has(canaryId)) {
+          if (isCanaryAvailable && !attemptedUpstreams.has(canaryId)) {
             upstreamId = canaryId;
             routeStage = canaryConf.stage || "canary";
+          } else if (
+            baselineId &&
+            HEALTHY_UPSTREAMS.has(baselineId) &&
+            !attemptedUpstreams.has(baselineId)
+          ) {
+            logger.warn(
+              "Canary",
+              `Canary upstream ${canaryId} at capacity; fallback to baseline ${baselineId}`,
+            );
+            upstreamId = baselineId;
+            routeStage = "baseline";
           }
         } else if (userCookie === "baseline") {
           if (
@@ -538,7 +586,7 @@ export async function createServer(config: CreateServerConfig) {
         } else {
           const weight = canaryConf.weight ?? 10;
           const roll = Math.random() * 100;
-          if (roll < weight && isCanaryHealthy && !attemptedUpstreams.has(canaryId)) {
+          if (roll < weight && isCanaryAvailable && !attemptedUpstreams.has(canaryId)) {
             upstreamId = canaryId;
             routeStage = canaryConf.stage || "canary";
             setCanaryCookieVal = "canary";
@@ -633,8 +681,13 @@ export async function createServer(config: CreateServerConfig) {
         res.end("Service not found in registry");
         return;
       }
+      const forwardHeaders = { ...payload.headers };
+      if (pathRule?.canary?.headerKey && pathRule?.canary?.stripHeader !== false) {
+        delete forwardHeaders[pathRule.canary.headerKey.toLowerCase()];
+      }
       const enrichedPayload = {
         ...payload,
+        headers: forwardHeaders,
         upstreamId,
         upstreamUrl: serviceInstance.url,
         clientIp,
@@ -915,25 +968,54 @@ export async function createServer(config: CreateServerConfig) {
         const cookies = parseCookies(req.headers.cookie);
         const userCookie = cookies[cookieName];
         const isCanaryHealthy = canaryId ? HEALTHY_UPSTREAMS.has(canaryId) : false;
+        const canaryBulkhead = canaryId ? upstreamBulkheads.get(canaryId) : undefined;
+        const isCanaryAtCapacity = canaryId
+          ? lb.isAtCapacity(canaryId, canaryConf.maxConnections) ||
+            (canaryBulkhead !== undefined && canaryBulkhead.availableSlots <= 0)
+          : false;
+        const isCanaryAvailable = isCanaryHealthy && !isCanaryAtCapacity;
 
         let headerMatched = false;
         if (canaryConf.headerKey && canaryConf.headerValue) {
           const incomingHeaderVal =
             req.headers[canaryConf.headerKey.toLowerCase()];
           if (incomingHeaderVal === canaryConf.headerValue) {
-            headerMatched = true;
+            if (isIpAllowed(clientIP, canaryConf.allowedIps)) {
+              headerMatched = true;
+            } else {
+              logger.warn(
+                "Canary",
+                `WS Header override ignored for client IP ${clientIP}: not in allowedIps whitelist`,
+              );
+            }
           }
         }
 
-        if (headerMatched && isCanaryHealthy) {
-          upstreamId = canaryId;
-        } else if (userCookie === "canary" && isCanaryHealthy) {
-          upstreamId = canaryId;
+        if (headerMatched) {
+          if (isCanaryAvailable) {
+            upstreamId = canaryId;
+          } else if (baselineId && HEALTHY_UPSTREAMS.has(baselineId)) {
+            logger.warn(
+              "Canary",
+              `WS Canary upstream ${canaryId} at capacity; fallback to baseline ${baselineId}`,
+            );
+            upstreamId = baselineId;
+          }
+        } else if (userCookie === "canary") {
+          if (isCanaryAvailable) {
+            upstreamId = canaryId;
+          } else if (baselineId && HEALTHY_UPSTREAMS.has(baselineId)) {
+            logger.warn(
+              "Canary",
+              `WS Canary upstream ${canaryId} at capacity; fallback to baseline ${baselineId}`,
+            );
+            upstreamId = baselineId;
+          }
         } else if (userCookie === "baseline" && baselineId && HEALTHY_UPSTREAMS.has(baselineId)) {
           upstreamId = baselineId;
         } else {
           const weight = canaryConf.weight ?? 10;
-          if (Math.random() * 100 < weight && isCanaryHealthy) {
+          if (Math.random() * 100 < weight && isCanaryAvailable) {
             upstreamId = canaryId;
           } else if (baselineId && HEALTHY_UPSTREAMS.has(baselineId)) {
             upstreamId = baselineId;
@@ -976,11 +1058,15 @@ export async function createServer(config: CreateServerConfig) {
         socket.destroy();
         return;
       }
+      const outgoingHeaders = { ...req.headers };
+      if (pathRule?.canary?.headerKey && pathRule?.canary?.stripHeader !== false) {
+        delete outgoingHeaders[pathRule.canary.headerKey.toLowerCase()];
+      }
       const reqFields = {
         method: req.method ?? "GET",
         url: req.url ?? "/",
         httpVersion: req.httpVersion,
-        headers: req.headers,
+        headers: outgoingHeaders,
       };
       const payload = {
         type: "WEBSOCKET_UPGRADE",

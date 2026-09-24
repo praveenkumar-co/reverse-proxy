@@ -7,6 +7,9 @@ export interface CanaryConfig {
   headerKey?: string;
   headerValue?: string;
   stage?: string;
+  allowedIps?: string[];
+  stripHeader?: boolean;
+  maxConnections?: number;
 }
 
 export interface RouteRule {

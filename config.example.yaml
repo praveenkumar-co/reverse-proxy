@@ -30,6 +30,15 @@ upstreams:
 routes:
   - path: "/api"
     upstreams: ["app-a", "app-b"]
+    canary:
+      enabled: false                  # Set true to enable canary deployment (splits traffic between baseline & canary)
+      canaryUpstream: "app-b"        # New release / experimental candidate upstream ID
+      baselineUpstream: "app-a"      # Stable production upstream ID
+      weight: 10                     # Traffic percentage allocated to canary (0-100)
+      stickyCookieName: "NINJA_CANARY" # Cookie used to lock user session to canary/baseline
+      headerKey: "x-canary"          # Dev/QA header to force routing to canary
+      headerValue: "beta"            # Value of the dev/QA header
+      stage: "canary-v2"             # Stage identifier reported in X-Route-Stage header
     rateLimit:
       windowMs: 60000
       maxRequests: 100

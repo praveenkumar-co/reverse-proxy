@@ -75,3 +75,21 @@ test('CanarySchema - enforces weight bounds between 0 and 100', () => {
     });
   });
 });
+
+test('CanarySchema - supports allowedIps, stripHeader, and maxConnections', () => {
+  const parsed = canarySchema.parse({
+    enabled: true,
+    canaryUpstream: 'service-v2',
+    baselineUpstream: 'service-v1',
+    headerKey: 'x-canary',
+    headerValue: 'secret_token_123',
+    allowedIps: ['127.0.0.1', '10.0.0.1'],
+    stripHeader: true,
+    maxConnections: 50,
+  });
+
+  assert.strictEqual(parsed?.stripHeader, true);
+  assert.strictEqual(parsed?.maxConnections, 50);
+  assert.deepStrictEqual(parsed?.allowedIps, ['127.0.0.1', '10.0.0.1']);
+});
+
