@@ -37,7 +37,6 @@ import { createContext } from "../pipeline/context.js";
 import { corsMiddleware } from "../../middleware/cors.middleware.js";
 import { bodyLimitMiddleware } from "../../middleware/body-limit.middleware.js";
 import { tracingMiddleware } from "../../middleware/tracing.middleware.js";
-
 import type { RootConfigType } from "../../config/schemas/server.schema.js";
 
 function getEffectiveCache(config: RootConfigType) {
@@ -503,7 +502,7 @@ export async function createServer(config: CreateServerConfig) {
         [...HEALTHY_UPSTREAMS].filter((id) => allowedUpstreams.includes(id)),
       );
       let upstreamId: string | null = null;
-      let routeStage: string | undefined;
+      let routeStage: string | undefined; 
       let setCanaryCookieVal: string | undefined;
 
       // Canary Deployment Selection (if enabled on this path)
@@ -511,8 +510,7 @@ export async function createServer(config: CreateServerConfig) {
         const canaryConf = pathRule.canary;
         const canaryId = canaryConf.canaryUpstream;
         const baselineId =
-          canaryConf.baselineUpstream ||
-          (allowedUpstreams.length > 0 ? allowedUpstreams[0] : null);
+          canaryConf.baselineUpstream || (allowedUpstreams.length > 0 ? allowedUpstreams[0] : null);
         const cookieName = canaryConf.stickyCookieName || "NINJA_CANARY";
         const cookies = parseCookies(payload.headers.cookie);
         const userCookie = cookies[cookieName];
@@ -528,8 +526,7 @@ export async function createServer(config: CreateServerConfig) {
         // 1. Header Override (Highest Priority)
         let headerMatched = false;
         if (canaryConf.headerKey && canaryConf.headerValue) {
-          const incomingHeaderVal =
-            payload.headers[canaryConf.headerKey.toLowerCase()];
+          const incomingHeaderVal = payload.headers[canaryConf.headerKey.toLowerCase()];
           if (incomingHeaderVal === canaryConf.headerValue) {
             if (isIpAllowed(clientIp, canaryConf.allowedIps)) {
               headerMatched = true;
@@ -559,7 +556,7 @@ export async function createServer(config: CreateServerConfig) {
             routeStage = "baseline";
           }
         } else if (userCookie === "canary") {
-          if (isCanaryAvailable && !attemptedUpstreams.has(canaryId)) {
+          if(isCanaryAvailable && !attemptedUpstreams.has(canaryId)) {
             upstreamId = canaryId;
             routeStage = canaryConf.stage || "canary";
           } else if (
@@ -601,15 +598,15 @@ export async function createServer(config: CreateServerConfig) {
           }
         }
       }
-      if(pathRule?.sticky && !upstreamId) {
+      if (pathRule?.sticky && !upstreamId) {
         const cookies = parseCookies(payload.headers.cookie);
         const stickId =
           cookies[ACTIVE_CONFIG.server.loadBalancing.stickyCookieName ?? "NINJA_ROUTE"];
-        if(stickId && routeHealthyUpstreams.has(stickId) && !attemptedUpstreams.has(stickId)) {
+        if (stickId && routeHealthyUpstreams.has(stickId) && !attemptedUpstreams.has(stickId)) {
           upstreamId = stickId;
         }
       }
-      if(!upstreamId) {
+      if (!upstreamId) {
         const candidateSet =
           routeHealthyUpstreams.size > 0 ? routeHealthyUpstreams : HEALTHY_UPSTREAMS;
         upstreamId = lb.pickFiltered(
@@ -618,11 +615,11 @@ export async function createServer(config: CreateServerConfig) {
           attemptedUpstreams,
           payload.headers.cookie,
         );
-        if(!upstreamId && attempt > 0) {
+        if (!upstreamId && attempt > 0) {
           upstreamId = lb.pickFiltered(candidateSet, clientIp, new Set(), payload.headers.cookie);
         }
       }
-      if(!upstreamId) {
+      if (!upstreamId) {
         logger.warn("Master", "No healthy upstream available to dispatch request", { attempt });
         res.writeHead(503, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "No healthy upstreams available" }));
@@ -639,20 +636,20 @@ export async function createServer(config: CreateServerConfig) {
       const effectiveResilience = ACTIVE_CONFIG.resilience ?? ACTIVE_CONFIG.server.resilience;
       const bulkheadConf = effectiveResilience?.bulkhead;
       const isBulkheadEnabled = bulkheadConf?.enabled ?? false;
-      if(isBulkheadEnabled) {
+      if (isBulkheadEnabled) {
         let bulkhead = upstreamBulkheads.get(upstreamId);
-        if(!bulkhead) {
+        if (!bulkhead) {
           const upstreamConf = ACTIVE_CONFIG.server.upstreams.find((u) => u.id === upstreamId);
           const maxConcurrent =
             bulkheadConf?.maxConcurrentPerUpstream ?? upstreamConf?.maxConnections ?? 1000;
           bulkhead = new Bulkhead(maxConcurrent);
           upstreamBulkheads.set(upstreamId, bulkhead);
         }
-        if(!bulkhead.enter()){
+        if (!bulkhead.enter()) {
           logger.warn("Resilience", `Bulkhead capacity reached for upstream: ${upstreamId}`);
           const retryConfig = ACTIVE_CONFIG.server.loadBalancing.retry;
           const retryAllowed = globalRetryBudget.recordRetry();
-          if(retryAllowed && attempt < retryConfig.maxAttempts) {
+          if (retryAllowed && attempt < retryConfig.maxAttempts) {
             dispatchToWorker(payload, clientIp, res, attempt + 1, attemptedUpstreams, startTime);
           } else {
             res.writeHead(503, { "Content-Type": "application/json" });
@@ -921,9 +918,7 @@ export async function createServer(config: CreateServerConfig) {
             }
             if (setCanaryCookieVal && pathRule?.canary) {
               const cName = pathRule.canary.stickyCookieName || "NINJA_CANARY";
-              setCookieList.push(
-                `${cName}=${setCanaryCookieVal}; Path=/; HttpOnly; SameSite=Lax`,
-              );
+              setCookieList.push(`${cName}=${setCanaryCookieVal}; Path=/; HttpOnly; SameSite=Lax`);
             }
             if (setCookieList.length > 0) {
               responseHeaders["Set-Cookie"] =
@@ -962,8 +957,7 @@ export async function createServer(config: CreateServerConfig) {
         const canaryConf = pathRule.canary;
         const canaryId = canaryConf.canaryUpstream;
         const baselineId =
-          canaryConf.baselineUpstream ||
-          (allowedUpstreams.length > 0 ? allowedUpstreams[0] : null);
+          canaryConf.baselineUpstream || (allowedUpstreams.length > 0 ? allowedUpstreams[0] : null);
         const cookieName = canaryConf.stickyCookieName || "NINJA_CANARY";
         const cookies = parseCookies(req.headers.cookie);
         const userCookie = cookies[cookieName];
@@ -977,8 +971,7 @@ export async function createServer(config: CreateServerConfig) {
 
         let headerMatched = false;
         if (canaryConf.headerKey && canaryConf.headerValue) {
-          const incomingHeaderVal =
-            req.headers[canaryConf.headerKey.toLowerCase()];
+          const incomingHeaderVal = req.headers[canaryConf.headerKey.toLowerCase()];
           if (incomingHeaderVal === canaryConf.headerValue) {
             if (isIpAllowed(clientIP, canaryConf.allowedIps)) {
               headerMatched = true;
@@ -1229,7 +1222,6 @@ export async function createServer(config: CreateServerConfig) {
             return;
           }
         }
-
         await next();
       });
 

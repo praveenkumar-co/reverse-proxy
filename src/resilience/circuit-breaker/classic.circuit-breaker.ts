@@ -27,7 +27,7 @@ export class ClassicCircuitBreaker implements ICircuitBreaker {
       }
       return false;
     }
-    return true;
+    return true ; 
   }
   public getState(){
     return this.state;
