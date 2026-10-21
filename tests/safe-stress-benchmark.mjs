@@ -280,14 +280,19 @@ async function runTier(tier) {
               const ms = Date.now() - start;
               const ok = res.statusCode >= 200 && res.statusCode < 300;
               record(ms, ok);
-              fire();
+              // Deferred, not called inline — a keep-alive agent can invoke this completion
+              // callback synchronously while handing a freed socket to the next queued
+              // request, and calling fire() directly from there can chain into unbounded
+              // synchronous recursion ("Maximum call stack size exceeded") at high per-loop
+              // connection counts. setImmediate breaks the chain via the event loop.
+              setImmediate(fire);
             });
           },
         );
         req.setTimeout(REQUEST_TIMEOUT_MS, () => req.destroy(new Error("request timeout")));
         req.on("error", () => {
           record(Date.now() - start, false);
-          fire();
+          setImmediate(fire);
         });
         req.end();
       }

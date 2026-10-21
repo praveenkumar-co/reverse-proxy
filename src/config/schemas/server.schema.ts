@@ -103,6 +103,13 @@ export const serverSchema = z.object({
   // Node's own default (511) can drop/reset handshakes under a sudden burst of concurrent
   // connects; raise it for high-concurrency deployments.
   backlog: z.number().default(511),
+  // Node's http.Server defaults these to 5000ms/60000ms. Under CPU contention (e.g. worker
+  // count close to or exceeding core count), a persistent client connection can sit idle
+  // past keepAliveTimeout purely from scheduling delay — the server then closes it, and a
+  // client reusing that socket for its next request gets an immediate ECONNRESET rather than
+  // a clean retry signal. Raising these gives contended workers more slack before that happens.
+  keepAliveTimeoutMs: z.number().default(65000),
+  headersTimeoutMs: z.number().default(66000),
   compression: z.boolean().default(false),
   // Backward-compatible properties with Zod defaults to prevent TypeScript compiler errors in legacy files
   listen: z.number().default(8080),

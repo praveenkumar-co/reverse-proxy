@@ -1476,6 +1476,13 @@ export async function createServer(config: CreateServerConfig) {
     await new Promise((r) => setTimeout(r, 3000));
     await initialHealthCheck(ACTIVE_CONFIG.server.upstreams, HEALTHY_UPSTREAMS, lb);
     const listenBacklog = ACTIVE_CONFIG.server.backlog ?? 511;
+    const keepAliveTimeoutMs = ACTIVE_CONFIG.server.keepAliveTimeoutMs ?? 65000;
+    const headersTimeoutMs = ACTIVE_CONFIG.server.headersTimeoutMs ?? 66000;
+    for (const srv of [httpServer, httpsServer]) {
+      if (!srv) continue;
+      srv.keepAliveTimeout = keepAliveTimeoutMs;
+      srv.headersTimeout = headersTimeoutMs;
+    }
     httpServer.listen(port, listenBacklog);
     if (httpsServer) {
       httpsServer.listen(
