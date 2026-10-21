@@ -6,6 +6,7 @@ import fs from "node:fs";
 import net from "net";
 import { tunnelWebSocket } from "../proxy/websocket.handler.js";
 import cluster, { type Worker } from "node:cluster";
+import os from "node:os";
 import { createClient } from "redis";
 import type { RedisClientType } from "redis";
 
@@ -33,7 +34,7 @@ import { passiveProbe } from "../../discovery/health/passive.probe.js";
 import { readinessProbe } from "../../observability/health/readiness.js";
 import { handleAdminRequest } from "../admin/admin.handler.js";
 import { MiddlewarePipeline } from "../pipeline/middleware.pipeline.js";
-import { createContext } from "../pipeline/context.js";
+import { createContext, resolveClientIp } from "../pipeline/context.js";
 import { corsMiddleware } from "../../middleware/cors.middleware.js";
 import { bodyLimitMiddleware } from "../../middleware/body-limit.middleware.js";
 import { tracingMiddleware } from "../../middleware/tracing.middleware.js";
@@ -55,6 +56,10 @@ function getEffectiveLoadBalancing(config: RootConfigType) {
   return config.loadBalancing ?? config.server.loadBalancing;
 }
 
+function getEffectiveDiscovery(config: RootConfigType) {
+  return config.discovery ?? config.server.discovery;
+}
+
 function isIpAllowed(clientIp: string, allowedIps?: string[]): boolean {
   if (!allowedIps || allowedIps.length === 0) return true;
   const normalizedClient = clientIp.replace(/^::ffff:/, "").trim();
@@ -68,12 +73,34 @@ function isIpAllowed(clientIp: string, allowedIps?: string[]): boolean {
   });
 }
 
+const IDEMPOTENT_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+
+/**
+ * Mutating methods (POST/PUT/PATCH/DELETE) risk duplicate side effects on the backend if
+ * blindly retried after a failed/ambiguous response (e.g. the request was processed but the
+ * reply was lost). Only retry them automatically when the client has opted in via an
+ * Idempotency-Key header, or when the operator has explicitly enabled it for all mutations.
+ */
+function isMethodRetrySafe(
+  method: string,
+  headers: Record<string, any>,
+  allowMutatingRetries: boolean,
+): boolean {
+  if (IDEMPOTENT_METHODS.has(method.toUpperCase())) return true;
+  if (headers?.["idempotency-key"]) return true;
+  return allowMutatingRetries === true;
+}
+
 interface CreateServerConfig {
   port: number;
   workerCount: number;
   config: RootConfigType;
 }
 
+// Enforced both by the fast-path Content-Length check (bodyLimitMiddleware) and, authoritatively,
+// by the incremental byte counter in the request-body accumulation loop below — the latter
+// catches requests that omit Content-Length or lie about it (e.g. chunked transfer-encoding).
+const MAX_REQUEST_BODY_BYTES = 10 * 1024 * 1024;
 let WORKER_POOL: Worker[] = [];
 let ACTIVE_CONFIG: RootConfigType;
 let lb: LoadBalancer;
@@ -213,6 +240,12 @@ function parseCookies(cookieHeader: string | undefined): Record<string, string> 
 export async function reloadServerConfig(newConfig: RootConfigType) {
   logger.info("Master", "Hot-reload initiated — rebuilding dependencies and workers");
   ACTIVE_CONFIG = newConfig;
+  if (ACTIVE_CONFIG.admin.enabled && !ACTIVE_CONFIG.admin.token) {
+    logger.warn(
+      "Admin",
+      "Admin endpoints are enabled but no admin.token/ADMIN_SECRET is configured — all /__* requests will be rejected until a token is set",
+    );
+  }
   lb = createLoadBalancer({
     strategy: newConfig.server.loadBalancing.strategy,
     upstreams: newConfig.server.upstreams,
@@ -312,7 +345,10 @@ export async function reloadServerConfig(newConfig: RootConfigType) {
   }
   const oldWorkers = [...WORKER_POOL];
   WORKER_POOL.length = 0;
-  const targetWorkers = newConfig.server.workers ?? 2;
+  const targetWorkers =
+    newConfig.server.workers && newConfig.server.workers > 0
+      ? newConfig.server.workers
+      : os.cpus().length;
   for (let i = 0; i < targetWorkers; i++) {
     const worker = cluster.fork({
       APP_CONFIG: JSON.stringify(newConfig),
@@ -337,6 +373,12 @@ export async function createServer(config: CreateServerConfig) {
   ACTIVE_CONFIG = config.config;
   const { port, workerCount } = config;
   ACTIVE_CONFIG.server.upstreams.forEach((e) => HEALTHY_UPSTREAMS.add(e.id));
+  if (ACTIVE_CONFIG.admin.enabled && !ACTIVE_CONFIG.admin.token) {
+    logger.warn(
+      "Admin",
+      "Admin endpoints are enabled but no admin.token/ADMIN_SECRET is configured — all /__* requests will be rejected until a token is set",
+    );
+  }
   if (cluster.isPrimary) {
     const effectiveCache = getEffectiveCache(ACTIVE_CONFIG);
     cache = new Cache({
@@ -478,7 +520,9 @@ export async function createServer(config: CreateServerConfig) {
     if (ACTIVE_CONFIG.observability?.tenantDelivery?.mode === "webhook") {
       tenantLogStreamer.configure(ACTIVE_CONFIG.observability.tenantDelivery.exportEndpoints);
     }
-    for (let i = 0; i < workerCount; i++) {
+    const effectiveWorkerCount =
+      workerCount && workerCount > 0 ? workerCount : os.cpus().length;
+    for (let i = 0; i < effectiveWorkerCount; i++) {
       const worker = cluster.fork({
         APP_CONFIG: JSON.stringify(ACTIVE_CONFIG),
       });
@@ -625,7 +669,7 @@ export async function createServer(config: CreateServerConfig) {
         res.end(JSON.stringify({ error: "No healthy upstreams available" }));
         metricsRegistry.recordRequest(
           payload.requestType,
-          payload.url,
+          pathRule?.path ?? "unmatched",
           503,
           "none",
           performance.now() - startTime,
@@ -658,7 +702,7 @@ export async function createServer(config: CreateServerConfig) {
             );
             metricsRegistry.recordRequest(
               payload.requestType,
-              payload.url,
+              pathRule?.path ?? "unmatched",
               503,
               upstreamId,
               performance.now() - startTime,
@@ -714,11 +758,15 @@ export async function createServer(config: CreateServerConfig) {
           upstreamBulkheads.get(upstreamId!)?.leave();
           metricsRegistry.recordActiveConnection(upstreamId!, -1);
           lb.releaseConnection(upstreamId!);
+          // A hung request never reaches the resolve() callback below, so without this the
+          // circuit breaker never learns about it — worse still, it would leave a half-open
+          // trial probe permanently "in flight" and stuck (see REL-02).
+          lb.recordFailure(upstreamId!);
           res.writeHead(504);
           res.end("Gateway Timeout");
           metricsRegistry.recordRequest(
             payload.requestType,
-            payload.url,
+            pathRule?.path ?? "unmatched",
             504,
             upstreamId!,
             performance.now() - startTime,
@@ -762,7 +810,17 @@ export async function createServer(config: CreateServerConfig) {
               latencyMs: performance.now() - startTime,
             });
             const isLocalFailure = errorStatus === 500 || errorStatus === 502;
-            const retryAllowed = globalRetryBudget.recordRetry();
+            const resilienceRetryConf = effectiveResilience?.retry;
+            const policyAllowsRetry = isLocalFailure
+              ? (resilienceRetryConf?.retryOn?.localNodeFailure ?? true)
+              : (resilienceRetryConf?.retryOn?.systemOverload ?? true);
+            const methodRetrySafe = isMethodRetrySafe(
+              payload.requestType,
+              payload.headers,
+              resilienceRetryConf?.retryMutatingMethods ?? false,
+            );
+            const retryAllowed =
+              policyAllowsRetry && methodRetrySafe && globalRetryBudget.recordRetry();
             if (retryAllowed && attempt < retryConfig.maxAttempts) {
               if (isLocalFailure) {
                 upstreamBulkheads.get(upstreamId!)?.leave();
@@ -823,10 +881,12 @@ export async function createServer(config: CreateServerConfig) {
               }
             } else {
               if (!retryAllowed) {
-                logger.warn(
-                  "Master",
-                  "Retry budget exhausted — dropping retry to protect backend from retry storm",
-                );
+                const reason = !methodRetrySafe
+                  ? `non-idempotent method (${payload.requestType}) without Idempotency-Key`
+                  : !policyAllowsRetry
+                    ? "disabled via resilience.retry.retryOn policy"
+                    : "retry budget exhausted — dropping retry to protect backend from retry storm";
+                logger.warn("Master", `Retry not attempted: ${reason}`, { upstreamId });
               }
               upstreamBulkheads.get(upstreamId!)?.leave();
               metricsRegistry.recordActiveConnection(upstreamId!, -1);
@@ -945,8 +1005,10 @@ export async function createServer(config: CreateServerConfig) {
         socket.destroy();
         return;
       }
-      const clientIP =
-        (req.headers["x-forwarded-for"] as string) ?? socket.remoteAddress ?? "unknown";
+      const clientIP = resolveClientIp(req, socket, {
+        trustProxy: ACTIVE_CONFIG.server.trustProxy,
+        trustedProxies: ACTIVE_CONFIG.server.trustedProxies,
+      });
       const allowedUpstreams = pathRule?.upstream ?? [];
       const routeHealthyUpstreams = new Set(
         [...HEALTHY_UPSTREAMS].filter((id) => allowedUpstreams.includes(id)),
@@ -1115,7 +1177,10 @@ export async function createServer(config: CreateServerConfig) {
       if (isAdmin) return;
 
       // 2. Request context & middleware pipeline
-      const ctx = createContext(req, res);
+      const ctx = createContext(req, res, {
+        trustProxy: ACTIVE_CONFIG.server.trustProxy,
+        trustedProxies: ACTIVE_CONFIG.server.trustedProxies,
+      });
       const pipeline = new MiddlewarePipeline();
 
       // CORS middleware
@@ -1125,7 +1190,7 @@ export async function createServer(config: CreateServerConfig) {
       pipeline.use(tracingMiddleware());
 
       // Body limit middleware (10MB limit)
-      pipeline.use(bodyLimitMiddleware(10 * 1024 * 1024));
+      pipeline.use(bodyLimitMiddleware(MAX_REQUEST_BODY_BYTES));
 
       // Rate limiting middleware
       pipeline.use(async (c, next) => {
@@ -1163,7 +1228,7 @@ export async function createServer(config: CreateServerConfig) {
             const tenantId = (c.req.headers["x-tenant-id"] as string) ?? "none";
             metricsRegistry.recordRequest(
               c.req.method ?? "GET",
-              url.pathname,
+              pathRule?.path ?? "unmatched",
               429,
               "rate-limiter",
               0,
@@ -1205,7 +1270,7 @@ export async function createServer(config: CreateServerConfig) {
             const tenantId = (c.req.headers["x-tenant-id"] as string) ?? "none";
             metricsRegistry.recordRequest(
               c.req.method ?? "GET",
-              url.pathname,
+              pathRule?.path ?? "unmatched",
               429,
               "rate-limiter",
               0,
@@ -1259,7 +1324,7 @@ export async function createServer(config: CreateServerConfig) {
                 metricsRegistry.recordCacheOp("hit");
                 metricsRegistry.recordRequest(
                   c.req.method,
-                  c.req.url ?? "",
+                  pathRule?.path ?? "unmatched",
                   cached.statusCode ?? 200,
                   "cache",
                   0,
@@ -1306,6 +1371,8 @@ export async function createServer(config: CreateServerConfig) {
       pipeline.use(async (c) => {
         const clientIP = c.clientIp;
         const chunks: Buffer[] = [];
+        let receivedBytes = 0;
+        let rejected = false;
         const sendPayload = (bodyBuffer: Buffer) => {
           const body = bodyBuffer.length > 0 ? bodyBuffer.toString("binary") : null;
           const payload: WorkerMessageType = {
@@ -1323,9 +1390,24 @@ export async function createServer(config: CreateServerConfig) {
         }
 
         c.req.on("data", (chunk: Buffer) => {
+          if (rejected) return;
+          receivedBytes += chunk.length;
+          // Enforced here regardless of Content-Length, which a client can omit (chunked
+          // transfer-encoding) or understate — bodyLimitMiddleware's header check alone is
+          // trivially bypassable and only catches the honest case.
+          if (receivedBytes > MAX_REQUEST_BODY_BYTES) {
+            rejected = true;
+            c.req.destroy();
+            if (!c.res.writableEnded) {
+              c.res.writeHead(413, { "Content-Type": "application/json" });
+              c.res.end(JSON.stringify({ error: "Payload Too Large" }));
+            }
+            return;
+          }
           chunks.push(chunk);
         });
         c.req.on("end", () => {
+          if (rejected) return;
           sendPayload(Buffer.concat(chunks));
         });
       });
@@ -1393,12 +1475,26 @@ export async function createServer(config: CreateServerConfig) {
     process.on("SIGINT", () => void gracefulShutdown("SIGINT"));
     await new Promise((r) => setTimeout(r, 3000));
     await initialHealthCheck(ACTIVE_CONFIG.server.upstreams, HEALTHY_UPSTREAMS, lb);
-    httpServer.listen(port);
+    const listenBacklog = ACTIVE_CONFIG.server.backlog ?? 511;
+    httpServer.listen(port, listenBacklog);
     if (httpsServer) {
-      httpsServer.listen(ACTIVE_CONFIG.tls?.httpsPort ?? ACTIVE_CONFIG.server.httpsPort ?? 8443);
+      httpsServer.listen(
+        ACTIVE_CONFIG.tls?.httpsPort ?? ACTIVE_CONFIG.server.httpsPort ?? 8443,
+        listenBacklog,
+      );
     }
     if (healthCheckInterval) clearInterval(healthCheckInterval);
-    healthCheckInterval = startHealthChecks(ACTIVE_CONFIG.server.upstreams, HEALTHY_UPSTREAMS, lb);
+    const effectiveDiscovery = getEffectiveDiscovery(ACTIVE_CONFIG);
+    healthCheckInterval = startHealthChecks(
+      ACTIVE_CONFIG.server.upstreams,
+      HEALTHY_UPSTREAMS,
+      lb,
+      10000,
+      {
+        consecutiveFailuresToTrip: effectiveDiscovery?.activeProbe?.consecutiveFailuresToTrip,
+        consecutiveSuccessesToRecover: effectiveDiscovery?.activeProbe?.consecutiveSuccessesToRecover,
+      },
+    );
     if (!passiveProbeRegistered) {
       registerPassiveProbeListener(HEALTHY_UPSTREAMS, lb);
       passiveProbeRegistered = true;

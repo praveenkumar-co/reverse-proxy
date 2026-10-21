@@ -1,5 +1,12 @@
+import { BoundedStore } from "../bounded-store.js";
+
+interface FixedWindowEntry {
+  count: number;
+  resetTime: number;
+}
+
 export class FixedWindowAlgorithm {
-  private store = new Map<string, { count: number; resetTime: number }>();
+  private store = new BoundedStore<FixedWindowEntry>((entry, now) => now >= entry.resetTime);
 
   check(key: string, maxRequests: number, windowMs: number): boolean {
     const now = Date.now();
@@ -10,6 +17,7 @@ export class FixedWindowAlgorithm {
     }
     if(data.count < maxRequests){
       data.count++;
+      this.store.set(key, data);
       return true;
     }
     return false;

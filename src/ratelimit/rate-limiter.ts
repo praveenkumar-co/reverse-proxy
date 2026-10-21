@@ -309,8 +309,8 @@ export class RateLimiter {
         return now >= resetTime ? 0 : (this.fwAlgo["store"].get(key)?.count ?? 0);
       }
       case "sliding-window-log": {
-        const list = this.swLogAlgo["store"].get(key) ?? [];
-        return list.filter((t) => now - t < this.windowMs).length;
+        const list = this.swLogAlgo["store"].get(key)?.timestamps ?? [];
+        return list.filter((t: number) => now - t < this.windowMs).length;
       }
       case "sliding-window-counter": {
         const data = this.swCounterAlgo["store"].get(key);

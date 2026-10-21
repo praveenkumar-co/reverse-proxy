@@ -56,27 +56,71 @@ export async function initialHealthCheck(
   }
   logger.info("HealthCheck", "Initial check done", { healthy: [...HEALTHY_UPSTREAMS] });
 }
+interface ProbeStreak {
+  consecutiveSuccesses: number;
+  consecutiveFailures: number;
+}
+
 export function startHealthChecks(
   upstreams: Array<{ id: string; url: string; healthPath?: string; tls?: any }>,
   HEALTHY_UPSTREAMS: Set<string>,
   lb: LoadBalancer,
   intervalMs = 10000,
+  options: { consecutiveFailuresToTrip?: number; consecutiveSuccessesToRecover?: number } = {},
 ): NodeJS.Timeout {
-  logger.info("HealthCheck", "Periodic health checks started", { intervalMs });
+  const consecutiveFailuresToTrip = options.consecutiveFailuresToTrip ?? 2;
+  const consecutiveSuccessesToRecover = options.consecutiveSuccessesToRecover ?? 2;
+  // A single transient timeout/blip no longer flips status — each upstream must cross its
+  // consecutive-result threshold first, mirroring the hysteresis the passive probe already has.
+  const streaks = new Map<string, ProbeStreak>();
+
+  logger.info("HealthCheck", "Periodic health checks started", {
+    intervalMs,
+    consecutiveFailuresToTrip,
+    consecutiveSuccessesToRecover,
+  });
   const handle = setInterval(() => {
     logger.info("HealthCheck", "Checking all upstreams");
     for(const upstream of upstreams){
-      checkUpstream(upstream).then((healthy) => {
-        if(healthy){
-          if(!HEALTHY_UPSTREAMS.has(upstream.id)){
-            HEALTHY_UPSTREAMS.add(upstream.id);
-            logger.info("HealthCheck", `${upstream.id} back ONLINE`);
-          }
-          lb.setHealthy(upstream.id, true);
+      checkUpstream(upstream).then((probeHealthy) => {
+        const streak = streaks.get(upstream.id) ?? { consecutiveSuccesses: 0, consecutiveFailures: 0 };
+        if(probeHealthy){
+          streak.consecutiveSuccesses++;
+          streak.consecutiveFailures = 0;
         }else {
+          streak.consecutiveFailures++;
+          streak.consecutiveSuccesses = 0;
+        }
+        streaks.set(upstream.id, streak);
+
+        const wasHealthy = HEALTHY_UPSTREAMS.has(upstream.id);
+        if(!wasHealthy && probeHealthy && streak.consecutiveSuccesses >= consecutiveSuccessesToRecover){
+          HEALTHY_UPSTREAMS.add(upstream.id);
+          lb.setHealthy(upstream.id, true);
+          logger.info(
+            "HealthCheck",
+            `${upstream.id} back ONLINE (${streak.consecutiveSuccesses} consecutive successes)`,
+          );
+        }else if(wasHealthy && !probeHealthy && streak.consecutiveFailures >= consecutiveFailuresToTrip){
           HEALTHY_UPSTREAMS.delete(upstream.id);
           lb.setHealthy(upstream.id, false);
-          logger.warn("HealthCheck", `${upstream.id} is DOWN`, { id: upstream.id });
+          logger.warn(
+            "HealthCheck",
+            `${upstream.id} is DOWN (${streak.consecutiveFailures} consecutive failures)`,
+            { id: upstream.id },
+          );
+        }else if(wasHealthy && !probeHealthy){
+          logger.warn(
+            "HealthCheck",
+            `${upstream.id} probe failed (${streak.consecutiveFailures}/${consecutiveFailuresToTrip} before marking DOWN)`,
+            { id: upstream.id },
+          );
+        }else if(!wasHealthy && probeHealthy){
+          logger.info(
+            "HealthCheck",
+            `${upstream.id} probe succeeded (${streak.consecutiveSuccesses}/${consecutiveSuccessesToRecover} before marking UP)`,
+            { id: upstream.id },
+          );
         }
       });
     }

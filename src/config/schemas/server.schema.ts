@@ -90,8 +90,19 @@ export const serverSchema = z.object({
   port: z.number().default(8080),
   workers: z.number().default(0), // 0 = auto (CPU count)
   trustProxy: z.boolean().default(true),
+  // Peer socket addresses (post ::ffff:-normalization) allowed to supply X-Forwarded-For
+  // even when trustProxy is false — e.g. a known internal load balancer's IP.
+  trustedProxies: z.array(z.string()).optional(),
   connectTimeoutMs: z.number().default(5000),
   readTimeoutMs: z.number().default(15000),
+  // Symmetric counterpart to the request body limit: caps how much of an upstream response
+  // a worker will buffer in memory before aborting, so a huge/malicious upstream can't
+  // exhaust worker memory.
+  maxResponseBytes: z.number().default(25 * 1024 * 1024),
+  // TCP listen() backlog — the OS-level queue of pending connections awaiting accept().
+  // Node's own default (511) can drop/reset handshakes under a sudden burst of concurrent
+  // connects; raise it for high-concurrency deployments.
+  backlog: z.number().default(511),
   compression: z.boolean().default(false),
   // Backward-compatible properties with Zod defaults to prevent TypeScript compiler errors in legacy files
   listen: z.number().default(8080),

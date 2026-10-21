@@ -24,6 +24,7 @@ const httpsAgent = new https.Agent({
   maxFreeSockets: 32,
 });
 const workerConfig = await rootConfigSchema.parseAsync(JSON.parse(process.env["APP_CONFIG"]!));
+const maxResponseBytes = workerConfig.server.maxResponseBytes ?? 25 * 1024 * 1024;
 const healthyUpstreams = new Set<string>(workerConfig.server.upstreams.map((u) => u.id));
 const metricsRegistry = new MetricsRegistry(healthyUpstreams);
 if (workerConfig.observability?.tenantDelivery?.mode === "webhook") {
@@ -165,7 +166,7 @@ process.on("message", async (rawMsg: any, handle?: any) => {
       const tenantId = (msg.headers["x-tenant-id"] as string) ?? "none";
       metricsRegistry.recordRequest(
         msg.requestType,
-        msg.url,
+        rule.path,
         statusCode,
         raw.upstreamId || "unknown",
         latencyMs,
@@ -250,10 +251,38 @@ process.on("message", async (rawMsg: any, handle?: any) => {
     const proxyReq = transport.request(requestOptions, (upstreamRes) => {
       clearTimeout(connectTimeoutTimer);
       const chunks: Buffer[] = [];
+      let receivedBytes = 0;
+      let aborted = false;
       upstreamRes.on("data", (chunk: Buffer) => {
+        if (aborted) return;
+        receivedBytes += chunk.length;
+        // Symmetric to the request-side cap: an upstream (compromised, misconfigured, or
+        // simply serving a huge payload) could otherwise exhaust worker memory, since the
+        // whole response is buffered before any of it is relayed to the client.
+        if (receivedBytes > maxResponseBytes) {
+          aborted = true;
+          clearTimeout(readTimeoutTimer);
+          upstreamRes.destroy();
+          proxyReq.destroy();
+          logger.error(
+            `Worker:${process.pid}`,
+            `Upstream response exceeded ${maxResponseBytes}-byte cap — aborting`,
+            { upstreamId: raw.upstreamId, url: requestUrl },
+          );
+          recordAndLog(502, receivedBytes, performance.now() - startTime);
+          const reply: WorkerReplyMessageType = {
+            requestId: raw.requestId,
+            errorCode: "502",
+            error: "Upstream response exceeded maximum allowed size",
+            data: "",
+          };
+          if (process.send) process.send(JSON.stringify(reply));
+          return;
+        }
         chunks.push(chunk);
       });
       upstreamRes.on("end", () => {
+        if (aborted) return;
         clearTimeout(readTimeoutTimer);
         const bodyBuffer = Buffer.concat(chunks);
         const acceptEncoding = msg.headers["accept-encoding"] || "";

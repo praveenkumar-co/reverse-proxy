@@ -1,4 +1,5 @@
 import type http from "http";
+import crypto from "node:crypto";
 import type { RootConfigType } from "../../config/schemas/server.schema.js";
 import type { LoadBalancer } from "../../balancer/index.js";
 import type { Cache } from "../../cache/cache-manager.js";
@@ -6,6 +7,37 @@ import { MetricsRegistry } from "../../observability/metrics/prometheus.exporter
 import { registry } from "../../discovery/registry/dynamic.registry.js";
 import { readinessProbe } from "../../observability/health/readiness.js";
 import type { RetryBudget } from "../../resilience/retry/retry-budget.js";
+import { logger } from "../../observability/logger/logger.js";
+
+function safeCompare(a: string, b: string): boolean {
+  const bufA = Buffer.from(a, "utf8");
+  const bufB = Buffer.from(b, "utf8");
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
+function extractAdminToken(req: http.IncomingMessage): string | undefined {
+  const headerToken = req.headers["x-admin-token"];
+  if (typeof headerToken === "string" && headerToken.length > 0) return headerToken;
+  const authHeader = req.headers["authorization"];
+  if (typeof authHeader === "string" && authHeader.startsWith("Bearer ")) {
+    const token = authHeader.slice("Bearer ".length).trim();
+    if (token.length > 0) return token;
+  }
+  return undefined;
+}
+
+/**
+ * Fails closed: if admin is enabled but no secret is configured (config `admin.token`
+ * or ADMIN_SECRET env var), every admin request is rejected rather than left open.
+ */
+function isAuthorizedAdminRequest(req: http.IncomingMessage, config: RootConfigType): boolean {
+  const expected = config.admin.token;
+  if (!expected) return false;
+  const provided = extractAdminToken(req);
+  if (!provided) return false;
+  return safeCompare(provided, expected);
+}
 
 export interface AdminHandlerOptions {
   req: http.IncomingMessage;
@@ -37,6 +69,21 @@ export async function handleAdminRequest(options: AdminHandlerOptions): Promise<
   } = options;
 
   const url = req.url ?? "/";
+  const isAdminPath = url.startsWith("/__");
+
+  if (isAdminPath) {
+    if (!config.admin.enabled) {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Not Found" }));
+      return true;
+    }
+    if (!isAuthorizedAdminRequest(req, config)) {
+      logger.warn("Admin", `Rejected unauthorized admin request: ${req.method} ${url}`);
+      res.writeHead(403, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Forbidden" }));
+      return true;
+    }
+  }
 
   if (url === "/__lb-stats") {
     res.writeHead(200, { "Content-Type": "application/json" });

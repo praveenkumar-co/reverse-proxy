@@ -217,9 +217,15 @@ export class LoadBalancer {
       candidates.push(s);
     }
     if(candidates.length === 0) return null;
+    // `candidates` only contains upstreams whose cb.isAllowed() already returned true above —
+    // for a HALF_OPEN breaker that call itself only grants `maxHalfOpenProbes` concurrent
+    // admissions (see ClassicCircuitBreaker), so at most that many callers will ever see a
+    // given upstream show up here while it's recovering. This block just makes sure a request
+    // that *was* granted a trial slot is actually routed to the upstream it probed, rather than
+    // the strategy below picking a different one and leaving the granted slot unused.
     const halfOpenCandidates = candidates.filter((s) => {
       const cb = circuitBreakerManager.getOrCreate(
-        s.id, 
+        s.id,
         this.circuitBreakerConfig.mode,
         this.circuitBreakerConfig,
       );

@@ -9,7 +9,11 @@ export class CircuitBreakerManager {
     if(!this.breakers.has(id)){
       const cb = mode === 'adaptive'
         ? new AdaptiveCircuitBreaker(options?.K ?? 2, options?.decayFactor ?? 0.9)
-        : new ClassicCircuitBreaker(options?.failureThreshold ?? 3, options?.recoveryTimeMs ?? 30000);
+        : new ClassicCircuitBreaker(
+            options?.failureThreshold ?? 3,
+            options?.recoveryTimeMs ?? 30000,
+            options?.maxHalfOpenProbes ?? 1,
+          );
       this.breakers.set(id, cb);
     }
     return this.breakers.get(id)!;

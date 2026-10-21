@@ -35,6 +35,7 @@ A production-grade Layer 7 reverse proxy and load balancer written in TypeScript
 | 20 | [20-tenant-log-streamer.md](./20-tenant-log-streamer.md) | Tenant log streamer — per-tenant webhook delivery, queueLog/flush, destination routing |
 | 21 | [21-deployment.md](./21-deployment.md) | Deployment — local run, TLS cert generation, monitoring stack (Prometheus + Grafana via Docker) |
 | 22 | [22-testing-strategy.md](./22-testing-strategy.md) | Testing — unit / integration / smoke / load / chaos pyramid, what each level verifies |
+| 23 | [23-production-performance-formulas.md](./23-production-performance-formulas.md) | Production performance — essential formulas, tail latency amplification, Little's Law, queueing, retries, caching & Prometheus quantiles |
 
 ---
 

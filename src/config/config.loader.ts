@@ -112,6 +112,7 @@ function applyEnvironmentOverrides(configParsed: any): any {
   if (!configParsed.rateLimit.redis) configParsed.rateLimit.redis = {};
   if (!configParsed.observability) configParsed.observability = {};
   if (!configParsed.observability.logging) configParsed.observability.logging = {};
+  if (!configParsed.admin) configParsed.admin = {};
 
   if (process.env.PORT){
     configParsed.server.port = parseInt(process.env.PORT, 10);
@@ -133,6 +134,9 @@ function applyEnvironmentOverrides(configParsed: any): any {
   }
   if (process.env.LOG_LEVEL){
     configParsed.observability.logging.level = process.env.LOG_LEVEL;
+  }
+  if (process.env.ADMIN_SECRET){
+    configParsed.admin.token = process.env.ADMIN_SECRET;
   }
 
   return configParsed;

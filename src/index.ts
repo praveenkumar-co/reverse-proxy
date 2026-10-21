@@ -5,8 +5,22 @@ import os from "node:os";
 import { createServer, reloadServerConfig } from "./core/cluster/master.js";
 import fs from "node:fs";
 import path from "node:path";
-import { logger } from "./observability/logger/logger.js";
+import { logger, type LogLevel } from "./observability/logger/logger.js";
 import cluster from "node:cluster";
+import type { RootConfigType } from "./config/schemas/server.schema.js";
+
+// Config's `observability.logging.level` is lowercase and includes "debug", which the
+// Logger doesn't distinguish from "info" (there's no finer rank below INFO) — map both down.
+function toLoggerLevel(level: RootConfigType["observability"]["logging"]["level"]): LogLevel {
+  switch (level) {
+    case "warn":
+      return "WARN";
+    case "error":
+      return "ERROR";
+    default:
+      return "INFO";
+  }
+}
 
 // Exit code contract for watchdog / Docker restart policy:
 //   0 → intentional shutdown (SIGTERM/SIGINT) — do NOT restart
@@ -42,7 +56,10 @@ async function main(){
     const validatedConfig = await validateConfig(
       await parseYAMLConfig(configPath),
     );
-    logger.configure({ eventLogPath: validatedConfig.server.eventLog });
+    logger.configure({
+      eventLogPath: validatedConfig.server.eventLog,
+      minLevel: toLoggerLevel(validatedConfig.observability.logging.level),
+    });
     logger.info("Bootstrap", "Config loaded", {
       listen: validatedConfig.server.listen,
       httpsPort: validatedConfig.server.httpsPort,
@@ -54,7 +71,10 @@ async function main(){
         const rawConfig = await parseYAMLConfig(configPath);
         const newConfig = await validateConfig(rawConfig);
         await reloadServerConfig(newConfig);
-        logger.configure({ eventLogPath: newConfig.server.eventLog });
+        logger.configure({
+          eventLogPath: newConfig.server.eventLog,
+          minLevel: toLoggerLevel(newConfig.observability.logging.level),
+        });
         logger.info("Bootstrap", "Configuration reloaded successfully");
       } catch (err: any){
         logger.error("Bootstrap", `Reload failed, keeping old config: ${err.message}`);
@@ -62,7 +82,10 @@ async function main(){
     });
     await createServer({
       port: validatedConfig.server.port ?? validatedConfig.server.listen,
-      workerCount: validatedConfig.server.workers ?? os.cpus().length,
+      workerCount:
+        validatedConfig.server.workers && validatedConfig.server.workers > 0
+          ? validatedConfig.server.workers
+          : os.cpus().length,
       config: validatedConfig,
     });
     let watchDebounceTimer: NodeJS.Timeout;
@@ -73,7 +96,10 @@ async function main(){
           const rawConfig = await parseYAMLConfig(configPath);
           const newConfig = await validateConfig(rawConfig);
           await reloadServerConfig(newConfig);
-          logger.configure({ eventLogPath: newConfig.server.eventLog });
+          logger.configure({
+            eventLogPath: newConfig.server.eventLog,
+            minLevel: toLoggerLevel(newConfig.observability.logging.level),
+          });
           logger.info("Bootstrap", "Configuration reloaded automatically");
         } catch (err: any){
           logger.error("Bootstrap", `Auto-reload failed: ${err.message}`);

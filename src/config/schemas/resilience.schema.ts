@@ -26,6 +26,9 @@ export const resilienceSchema = z
             localNodeFailure: true,
             systemOverload: true,
           }),
+        // Mutating methods (POST/PUT/PATCH/DELETE) are only auto-retried when the request
+        // carries an Idempotency-Key header, unless this is explicitly set to true.
+        retryMutatingMethods: z.boolean().default(false),
       })
       .default({
         enabled: true,
@@ -38,6 +41,7 @@ export const resilienceSchema = z
           localNodeFailure: true,
           systemOverload: true,
         },
+        retryMutatingMethods: false,
       }),
     circuitBreaker: z
       .object({
@@ -46,6 +50,10 @@ export const resilienceSchema = z
         recoveryTimeMs: z.number().default(15000),
         K: z.number().default(2),
         windowMs: z.number().default(10000),
+        // Classic breaker only: concurrent trial requests allowed through while HALF_OPEN.
+        // Keeping this low (default 1) is what prevents a recovering upstream from being
+        // immediately slammed with full traffic and re-tripping.
+        maxHalfOpenProbes: z.number().default(1),
       })
       .default({
         mode: "classic",
@@ -53,6 +61,7 @@ export const resilienceSchema = z
         recoveryTimeMs: 15000,
         K: 2,
         windowMs: 10000,
+        maxHalfOpenProbes: 1,
       }),
     bulkhead: z
       .object({
@@ -76,6 +85,7 @@ export const resilienceSchema = z
         localNodeFailure: true,
         systemOverload: true,
       },
+      retryMutatingMethods: false,
     },
     circuitBreaker: {
       mode: "classic",
@@ -83,6 +93,7 @@ export const resilienceSchema = z
       recoveryTimeMs: 15000,
       K: 2,
       windowMs: 10000,
+      maxHalfOpenProbes: 1,
     },
     bulkhead: {
       enabled: false,

@@ -8,6 +8,15 @@ export interface Span {
 }
 export class Tracer {
   private spans: Span[] = [];
+
+  /**
+   * Nothing currently drains `spans` via flush() in production — every request creates one via
+   * tracingMiddleware — so without a cap this array grows for the lifetime of the worker
+   * process. `maxSpans` bounds it as a ring buffer: oldest spans are dropped once exceeded.
+   * Trimming in batches (rather than one at a time) keeps the amortized cost of startSpan() O(1).
+   */
+  constructor(private readonly maxSpans: number = 10_000){}
+
   startSpan(name: string, traceId: string, attributes: Record<string, string> = {}): Span {
     const span: Span = {
       traceId,
@@ -17,6 +26,9 @@ export class Tracer {
       attributes,
     };
     this.spans.push(span);
+    if(this.spans.length > this.maxSpans){
+      this.spans.splice(0, this.spans.length - this.maxSpans);
+    }
     return span;
   }
   endSpan(span: Span){

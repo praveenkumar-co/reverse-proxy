@@ -1,7 +1,13 @@
 import type { IRateLimitStore } from '../contracts/storage.interface.js';
+import { BoundedStore } from '../bounded-store.js';
+
+interface MemoryStoreEntry {
+  count: number;
+  resetTime: number;
+}
 
 export class MemoryStore implements IRateLimitStore {
-private counts = new Map<string, { count: number; resetTime: number }>();
+private counts = new BoundedStore<MemoryStoreEntry>((entry, now) => now >= entry.resetTime);
  async increment(key: string, windowMs: number): Promise<number> {
     const now = Date.now();
     const data = this.counts.get(key);
@@ -10,6 +16,7 @@ private counts = new Map<string, { count: number; resetTime: number }>();
       return 1;
     }
     data.count++;
+    this.counts.set(key, data);
     return data.count;
   }
   async count(key: string): Promise<number> {

@@ -1,6 +1,26 @@
 import { collectSystemMetrics, systemMetricsToPrometheus } from './system.metrics.js';
 import { histogramRegistry } from './histogram.registry.js';
 
+const NUMERIC_SEGMENT = /^\d+$/;
+const UUID_SEGMENT = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Collapses high-cardinality path segments (numeric IDs, UUIDs) and strips the query string,
+ * so metric labels stay bounded regardless of what a client sends. Call sites should prefer
+ * passing the matched route-rule's configured path (e.g. `pathRule.path`) instead of the raw
+ * request path in the first place — this is a defense-in-depth backstop for whatever reaches
+ * here, not a substitute for that.
+ */
+export function normalizeMetricPath(path: string): string {
+  const withoutQuery = path.split('?')[0] ?? path;
+  const segments = withoutQuery.split('/').map((segment) => {
+    if (segment.length === 0) return segment;
+    if (NUMERIC_SEGMENT.test(segment) || UUID_SEGMENT.test(segment)) return ':id';
+    return segment;
+  });
+  return segments.join('/');
+}
+
 export class MetricsRegistry {
   private requestsTotal = new Map<string, number>();
   private activeConnections = new Map<string, number>();
@@ -18,7 +38,7 @@ export class MetricsRegistry {
     durationMs: number,
     tenantId = "none",
   ){
-    const cleanPath = path.split("?")[0];
+    const cleanPath = normalizeMetricPath(path);
     const labels = `method="${method}",path="${cleanPath}",status="${status}",upstream_id="${upstreamId}",tenant_id="${tenantId}"`;
     this.requestsTotal.set(labels, (this.requestsTotal.get(labels) || 0) + 1);
     const histogramLabel = `method="${method}",path="${cleanPath}",upstream_id="${upstreamId}",tenant_id="${tenantId}"`;
