@@ -38,6 +38,10 @@ import { createContext, resolveClientIp } from "../pipeline/context.js";
 import { corsMiddleware } from "../../middleware/cors.middleware.js";
 import { bodyLimitMiddleware } from "../../middleware/body-limit.middleware.js";
 import { tracingMiddleware } from "../../middleware/tracing.middleware.js";
+import { authMiddleware } from "../../middleware/auth.middleware.js";
+import { RouteMatcher } from "../router/route.matcher.js";
+import type { RouteRule } from "../router/route.types.js";
+import { isMethodRetrySafe } from "../../resilience/retry/idempotency.js";
 import type { RootConfigType } from "../../config/schemas/server.schema.js";
 
 function getEffectiveCache(config: RootConfigType) {
@@ -73,24 +77,6 @@ function isIpAllowed(clientIp: string, allowedIps?: string[]): boolean {
   });
 }
 
-const IDEMPOTENT_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
-
-/**
- * Mutating methods (POST/PUT/PATCH/DELETE) risk duplicate side effects on the backend if
- * blindly retried after a failed/ambiguous response (e.g. the request was processed but the
- * reply was lost). Only retry them automatically when the client has opted in via an
- * Idempotency-Key header, or when the operator has explicitly enabled it for all mutations.
- */
-function isMethodRetrySafe(
-  method: string,
-  headers: Record<string, any>,
-  allowMutatingRetries: boolean,
-): boolean {
-  if (IDEMPOTENT_METHODS.has(method.toUpperCase())) return true;
-  if (headers?.["idempotency-key"]) return true;
-  return allowMutatingRetries === true;
-}
-
 interface CreateServerConfig {
   port: number;
   workerCount: number;
@@ -104,6 +90,7 @@ const MAX_REQUEST_BODY_BYTES = 10 * 1024 * 1024;
 let WORKER_POOL: Worker[] = [];
 let ACTIVE_CONFIG: RootConfigType;
 let lb: LoadBalancer;
+let routeMatcher: RouteMatcher;
 let cache: Cache;
 let metricsRegistry: MetricsRegistry;
 let rlRedisClient: RedisClientType | undefined;
@@ -237,9 +224,61 @@ function parseCookies(cookieHeader: string | undefined): Record<string, string> 
   });
   return list;
 }
+
+/**
+ * A response-like stub satisfying only what dispatchToWorker actually calls on `res`
+ * (writeHead/end). Used for background stale-while-revalidate fetches, which need to run
+ * the normal dispatch+cache-set path but have no real client waiting on the result.
+ */
+function createNoopResponse(): http.ServerResponse {
+  return {
+    writeHead: () => {},
+    end: () => {},
+    writableEnded: false,
+  } as unknown as http.ServerResponse;
+}
+
+/**
+ * Stale-if-error fallback: before giving up and returning an upstream error to the client,
+ * check whether a cacheable GET/HEAD request has a stale-but-still-within-window cached
+ * response and serve that instead. Returns true if it served a response (caller must not
+ * write its own), false if the caller should proceed with the normal error response.
+ */
+async function tryServeStaleOnError(
+  payload: WorkerMessageType,
+  pathRule: RouteRule | undefined,
+  errorStatus: number,
+  res: http.ServerResponse,
+): Promise<boolean> {
+  const isCacheMethod = payload.requestType === "GET" || payload.requestType === "HEAD";
+  if (!isCacheMethod || pathRule?.cache?.enabled === false) return false;
+  try {
+    const parsedUrl = new URL(payload.url, "http://dummy");
+    const cacheKey = cache.buildKey(payload.requestType, parsedUrl.pathname + parsedUrl.search, payload.headers);
+    const cachedJson = await cache.get(cacheKey);
+    if (!cachedJson) return false;
+    const cached = JSON.parse(cachedJson);
+    const ageSeconds = cached.storedAt ? (Date.now() - cached.storedAt) / 1000 : Infinity;
+    if (!cache.shouldServeStaleOnError(errorStatus, ageSeconds)) return false;
+    const bodyBuf =
+      cached.isCompressed && cached.encoding === "gzip"
+        ? Buffer.from(cached.body, "base64")
+        : typeof cached.body === "string"
+          ? Buffer.from(cached.body)
+          : cached.body;
+    res.writeHead(cached.statusCode ?? 200, { ...(cached.headers || {}), "X-Cache": "STALE-ON-ERROR" });
+    res.end(payload.requestType === "HEAD" ? undefined : bodyBuf);
+    logger.warn("Cache", `Served stale response in place of upstream error (status=${errorStatus})`, { cacheKey });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function reloadServerConfig(newConfig: RootConfigType) {
   logger.info("Master", "Hot-reload initiated — rebuilding dependencies and workers");
   ACTIVE_CONFIG = newConfig;
+  routeMatcher = new RouteMatcher(ACTIVE_CONFIG.server.paths as RouteRule[]);
   if (ACTIVE_CONFIG.admin.enabled && !ACTIVE_CONFIG.admin.token) {
     logger.warn(
       "Admin",
@@ -285,6 +324,8 @@ export async function reloadServerConfig(newConfig: RootConfigType) {
     l1MaxSize: effectiveCache.l1MaxSize,
     staleWhileRevalidate: effectiveCache.staleWhileRevalidate,
     staleIfError: effectiveCache.staleIfError,
+    staleIfErrorSeconds: effectiveCache.staleIfErrorSeconds,
+    key: effectiveCache.key,
     debezium: effectiveCache.debezium,
   });
   await cache.connect().catch(() => {});
@@ -371,6 +412,7 @@ export async function reloadServerConfig(newConfig: RootConfigType) {
 }
 export async function createServer(config: CreateServerConfig) {
   ACTIVE_CONFIG = config.config;
+  routeMatcher = new RouteMatcher(ACTIVE_CONFIG.server.paths as RouteRule[]);
   const { port, workerCount } = config;
   ACTIVE_CONFIG.server.upstreams.forEach((e) => HEALTHY_UPSTREAMS.add(e.id));
   if (ACTIVE_CONFIG.admin.enabled && !ACTIVE_CONFIG.admin.token) {
@@ -390,6 +432,8 @@ export async function createServer(config: CreateServerConfig) {
       l1MaxSize: effectiveCache.l1MaxSize,
       staleWhileRevalidate: effectiveCache.staleWhileRevalidate,
       staleIfError: effectiveCache.staleIfError,
+      staleIfErrorSeconds: effectiveCache.staleIfErrorSeconds,
+      key: effectiveCache.key,
       debezium: effectiveCache.debezium,
     });
     await cache.connect();
@@ -540,7 +584,7 @@ export async function createServer(config: CreateServerConfig) {
       previousSleepMs?: number,
     ) {
       globalRetryBudget.recordRequest();
-      const pathRule = ACTIVE_CONFIG.server.paths.find((p) => payload.url.startsWith(p.path));
+      const pathRule = routeMatcher.match(payload.url, payload.requestType);
       const allowedUpstreams = pathRule?.upstream ?? [];
       const routeHealthyUpstreams = new Set(
         [...HEALTHY_UPSTREAMS].filter((id) => allowedUpstreams.includes(id)),
@@ -665,15 +709,20 @@ export async function createServer(config: CreateServerConfig) {
       }
       if (!upstreamId) {
         logger.warn("Master", "No healthy upstream available to dispatch request", { attempt });
-        res.writeHead(503, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "No healthy upstreams available" }));
-        metricsRegistry.recordRequest(
-          payload.requestType,
-          pathRule?.path ?? "unmatched",
-          503,
-          "none",
-          performance.now() - startTime,
-        );
+        void (async () => {
+          const servedStale = await tryServeStaleOnError(payload, pathRule, 503, res);
+          if (!servedStale) {
+            res.writeHead(503, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "No healthy upstreams available" }));
+          }
+          metricsRegistry.recordRequest(
+            payload.requestType,
+            pathRule?.path ?? "unmatched",
+            servedStale ? 200 : 503,
+            "none",
+            performance.now() - startTime,
+          );
+        })();
         return;
       }
       attemptedUpstreams.add(upstreamId);
@@ -891,8 +940,13 @@ export async function createServer(config: CreateServerConfig) {
               upstreamBulkheads.get(upstreamId!)?.leave();
               metricsRegistry.recordActiveConnection(upstreamId!, -1);
               lb.releaseConnection(upstreamId!);
-              res.writeHead(errorStatus);
-              res.end(reply.error || "Bad Gateway");
+              void (async () => {
+                const servedStale = await tryServeStaleOnError(payload, pathRule, errorStatus, res);
+                if (!servedStale) {
+                  res.writeHead(errorStatus);
+                  res.end(reply.error || "Bad Gateway");
+                }
+              })();
             }
           } else {
             let responseData: Buffer | string = reply.data;
@@ -917,31 +971,43 @@ export async function createServer(config: CreateServerConfig) {
             if (isCacheMethod) {
               metricsRegistry.recordCacheOp("miss");
             }
-            const cacheControl = reply.headers?.["cache-control"] || "";
             const hasSetCookie = !!reply.headers?.["set-cookie"];
-            const isPrivate =
-              cacheControl.includes("private") ||
-              cacheControl.includes("no-store") ||
-              cacheControl.includes("no-cache");
+            const effectiveCache = getEffectiveCache(ACTIVE_CONFIG);
             const isCacheable =
               (reply.statusCode === 200 || reply.statusCode === 301) &&
               !payload.headers["authorization"] &&
               !hasSetCookie &&
-              !isPrivate;
+              pathRule?.cache?.enabled !== false &&
+              cache.isResponseCacheable(reply.headers);
             if (isCacheable && isCacheMethod) {
               const parsedUrl = new URL(payload.url, "http://dummy");
-              const cacheKey = cache.buildKey("GET", parsedUrl.pathname + parsedUrl.search);
+              const cacheKey = cache.buildKey(
+                payload.requestType,
+                parsedUrl.pathname + parsedUrl.search,
+                payload.headers,
+              );
+              const maxAgeSeconds = pathRule?.cache?.ttlSeconds ?? effectiveCache.ttlSeconds;
+              // Physical TTL outlives the logical max-age so stale-while-revalidate and
+              // stale-if-error have an entry left to serve once it's past maxAgeSeconds.
+              const physicalTtlSeconds = maxAgeSeconds + (effectiveCache.staleIfErrorSeconds ?? 86400);
               const cachePayload = JSON.stringify({
                 statusCode: reply.statusCode ?? 200,
                 headers: reply.headers ?? {},
                 body: reply.data,
                 isCompressed: reply.isCompressed ?? false,
                 encoding: reply.encoding,
+                storedAt: Date.now(),
+                maxAgeSeconds,
               });
-              const ttlOverride = pathRule?.cache?.ttlSeconds;
-              await cache.set(cacheKey, cachePayload, ttlOverride);
+              const tagHeader = reply.headers?.["cache-tag"] ?? reply.headers?.["x-cache-tags"];
+              const tags = tagHeader
+                ? (Array.isArray(tagHeader) ? tagHeader.join(",") : String(tagHeader))
+                    .split(",")
+                    .map((t: string) => t.trim())
+                    .filter(Boolean)
+                : undefined;
+              await cache.set(cacheKey, cachePayload, physicalTtlSeconds, tags);
             }
-            const effectiveCache = ACTIVE_CONFIG.cache ?? ACTIVE_CONFIG.server.cache;
             const responseHeaders: Record<string, any> = {
               "Access-Control-Allow-Origin": "*",
               "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
@@ -1000,7 +1066,7 @@ export async function createServer(config: CreateServerConfig) {
     let httpServer!: http.Server;
     const wsUpgradeHandler = (req: http.IncomingMessage, socket: net.Socket, head: Buffer) => {
       const url = new URL(req.url!, `http://${req.headers.host}`);
-      const pathRule = ACTIVE_CONFIG.server.paths.find((p) => url.pathname.startsWith(p.path));
+      const pathRule = routeMatcher.match(url.pathname, req.method);
       if (!pathRule) {
         socket.destroy();
         return;
@@ -1192,11 +1258,23 @@ export async function createServer(config: CreateServerConfig) {
       // Body limit middleware (10MB limit)
       pipeline.use(bodyLimitMiddleware(MAX_REQUEST_BODY_BYTES));
 
+      // Auth middleware — enforced only for routes with a configured auth.tokens list
+      pipeline.use(async (c, next) => {
+        const url = new URL(c.req.url!, `https://${c.req.headers.host}`);
+        const pathRule = routeMatcher.match(url.pathname, c.req.method);
+        if (pathRule?.auth?.tokens && pathRule.auth.tokens.length > 0) {
+          const guard = authMiddleware(new Set(pathRule.auth.tokens));
+          await guard(c, next);
+        } else {
+          await next();
+        }
+      });
+
       // Rate limiting middleware
       pipeline.use(async (c, next) => {
         const clientIP = c.clientIp;
         const url = new URL(c.req.url!, `https://${c.req.headers.host}`);
-        const pathRule = ACTIVE_CONFIG.server.paths.find((p) => url.pathname.startsWith(p.path));
+        const pathRule = routeMatcher.match(url.pathname, c.req.method);
 
         // Global Rate Limiter Check
         const effectiveGlobalRateLimit = getEffectiveRateLimit(ACTIVE_CONFIG);
@@ -1294,65 +1372,89 @@ export async function createServer(config: CreateServerConfig) {
       pipeline.use(async (c, next) => {
         const clientIP = c.clientIp;
         const url = new URL(c.req.url!, `https://${c.req.headers.host}`);
-        const pathRule = ACTIVE_CONFIG.server.paths.find((p) => url.pathname.startsWith(p.path));
+        const pathRule = routeMatcher.match(url.pathname, c.req.method);
 
         if (c.req.method === "GET" || c.req.method === "HEAD") {
           const skipCache =
             url.pathname.startsWith("/api/upload/") || pathRule?.cache?.enabled === false;
           if (!skipCache) {
-            const cacheKey = cache.buildKey("GET", url.pathname + url.search);
+            const cacheKey = cache.buildKey(c.req.method ?? "GET", url.pathname + url.search, c.req.headers);
             const cachedJson = await cache.get(cacheKey);
             if (cachedJson) {
               try {
                 const cached = JSON.parse(cachedJson);
-                c.res.writeHead(cached.statusCode ?? 200, {
-                  ...(cached.headers || {}),
-                  "X-Cache": "HIT",
-                });
-                const bodyBuf =
-                  cached.isCompressed && cached.encoding === "gzip"
-                    ? Buffer.from(cached.body, "base64")
-                    : typeof cached.body === "string"
-                      ? Buffer.from(cached.body)
-                      : cached.body;
-                if (c.req.method === "HEAD") {
-                  c.res.end();
-                } else {
-                  c.res.end(bodyBuf);
-                }
-                const tenantId = (c.req.headers["x-tenant-id"] as string) ?? "none";
-                metricsRegistry.recordCacheOp("hit");
-                metricsRegistry.recordRequest(
-                  c.req.method,
-                  pathRule?.path ?? "unmatched",
-                  cached.statusCode ?? 200,
-                  "cache",
-                  0,
-                  tenantId,
-                );
-                writeAccessLog(
-                  ACTIVE_CONFIG.server.accessLog,
-                  clientIP,
-                  c.req.method,
-                  c.req.url ?? "",
-                  cached.statusCode ?? 200,
-                  c.req.method === "HEAD" ? 0 : Buffer.byteLength(bodyBuf),
-                  0,
-                  (c.req.headers["user-agent"] as string) ?? "-",
-                );
-                if (ACTIVE_CONFIG.observability?.tenantDelivery?.mode === "webhook") {
-                  tenantLogStreamer.queueLog(tenantId, {
-                    timestamp: new Date().toISOString(),
-                    clientIp: clientIP,
-                    method: "GET",
-                    url: c.req.url ?? "",
-                    statusCode: cached.statusCode ?? 200,
-                    bytesSent: Buffer.byteLength(bodyBuf),
-                    latencyMs: 0,
-                    userAgent: (c.req.headers["user-agent"] as string) ?? "-",
+                const ageSeconds = cached.storedAt ? (Date.now() - cached.storedAt) / 1000 : Infinity;
+                const maxAgeSeconds = cached.maxAgeSeconds ?? getEffectiveCache(ACTIVE_CONFIG).ttlSeconds;
+                const isFresh = ageSeconds <= maxAgeSeconds;
+                const canServeStale = !isFresh && cache.shouldRevalidate(cacheKey, ageSeconds, maxAgeSeconds);
+                if (isFresh || canServeStale) {
+                  c.res.writeHead(cached.statusCode ?? 200, {
+                    ...(cached.headers || {}),
+                    "X-Cache": isFresh ? "HIT" : "STALE",
                   });
+                  const bodyBuf =
+                    cached.isCompressed && cached.encoding === "gzip"
+                      ? Buffer.from(cached.body, "base64")
+                      : typeof cached.body === "string"
+                        ? Buffer.from(cached.body)
+                        : cached.body;
+                  if (c.req.method === "HEAD") {
+                    c.res.end();
+                  } else {
+                    c.res.end(bodyBuf);
+                  }
+                  const tenantId = (c.req.headers["x-tenant-id"] as string) ?? "none";
+                  metricsRegistry.recordCacheOp("hit");
+                  metricsRegistry.recordRequest(
+                    c.req.method,
+                    pathRule?.path ?? "unmatched",
+                    cached.statusCode ?? 200,
+                    "cache",
+                    0,
+                    tenantId,
+                  );
+                  writeAccessLog(
+                    ACTIVE_CONFIG.server.accessLog,
+                    clientIP,
+                    c.req.method,
+                    c.req.url ?? "",
+                    cached.statusCode ?? 200,
+                    c.req.method === "HEAD" ? 0 : Buffer.byteLength(bodyBuf),
+                    0,
+                    (c.req.headers["user-agent"] as string) ?? "-",
+                  );
+                  if (ACTIVE_CONFIG.observability?.tenantDelivery?.mode === "webhook") {
+                    tenantLogStreamer.queueLog(tenantId, {
+                      timestamp: new Date().toISOString(),
+                      clientIp: clientIP,
+                      method: "GET",
+                      url: c.req.url ?? "",
+                      statusCode: cached.statusCode ?? 200,
+                      bytesSent: Buffer.byteLength(bodyBuf),
+                      latencyMs: 0,
+                      userAgent: (c.req.headers["user-agent"] as string) ?? "-",
+                    });
+                  }
+                  if (canServeStale) {
+                    // Stale-while-revalidate: the client already has a response — refresh the
+                    // cache in the background via a dispatch whose "response" nobody reads.
+                    cache.markRevalidating(cacheKey);
+                    const revalidatePayload: WorkerMessageType = {
+                      requestType: c.req.method ?? "GET",
+                      headers: c.req.headers,
+                      body: null,
+                      url: `${c.req.url}`,
+                    };
+                    dispatchToWorker(revalidatePayload, clientIP, createNoopResponse());
+                    setTimeout(
+                      () => cache.markRevalidationDone(cacheKey),
+                      (ACTIVE_CONFIG.server.readTimeoutMs ?? 15000) + 2000,
+                    ).unref();
+                  }
+                  return;
                 }
-                return;
+                // Stale, and either SWR is disabled or a revalidation is already in flight —
+                // fall through to a normal dispatch below, which will refresh the entry.
               } catch {
                 // fallback if cache corrupt
               }

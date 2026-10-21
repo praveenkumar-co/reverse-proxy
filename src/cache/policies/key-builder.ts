@@ -1,7 +1,7 @@
 export interface KeyBuilderOptions {
-  ignoreQueryParams?: string[];
-  varyHeaders?: string[];
-  prefix?: string;
+  ignoreQueryParams?: string[] | undefined;
+  varyHeaders?: string[] | undefined;
+  prefix?: string | undefined;
 }
 export class KeyBuilder {
   constructor(private opts: KeyBuilderOptions = {}){}

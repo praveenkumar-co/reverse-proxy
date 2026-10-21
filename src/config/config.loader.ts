@@ -44,10 +44,12 @@ function mapBackwardCompatibleKeys(configParsed: any): any {
       return {
         path: p.path,
         upstreams,
+        methods: p.methods,
         rateLimit: p.rateLimit,
         sticky: p.sticky,
         cache: p.cache,
         canary: p.canary,
+        auth: p.auth,
       };
     });
   } else if (configParsed.routes){
@@ -61,10 +63,12 @@ function mapBackwardCompatibleKeys(configParsed: any): any {
     configParsed.server.paths = configParsed.routes.map((r: any) => ({
       path: r.path,
       upstream: r.upstreams,
+      methods: r.methods,
       rateLimit: r.rateLimit,
       sticky: r.sticky,
       cache: r.cache,
       canary: r.canary,
+      auth: r.auth,
     }));
   }
 

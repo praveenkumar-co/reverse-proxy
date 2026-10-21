@@ -75,13 +75,21 @@ export const canarySchema = z
 
 export type CanaryConfigType = z.infer<typeof canarySchema>;
 
+const routeAuthSchema = z
+  .object({
+    tokens: z.array(z.string()),
+  })
+  .optional();
+
 const routeSchema = z.object({
   path: z.string(),
   upstreams: z.array(z.string()),
+  methods: z.array(z.string()).optional(),
   rateLimit: pathRateLimitSchema,
   sticky: z.boolean().default(false),
   cache: pathCacheSchema,
   canary: canarySchema,
+  auth: routeAuthSchema,
 });
 
 

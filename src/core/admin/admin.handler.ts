@@ -143,6 +143,54 @@ export async function handleAdminRequest(options: AdminHandlerOptions): Promise<
     return true;
   }
 
+  if (url === "/__cache/purge/tag" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
+    req.on("end", async () => {
+      try {
+        const { tag } = JSON.parse(body);
+        if (!tag || typeof tag !== "string") {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "tag is required" }));
+          return;
+        }
+        const keys = await cache.purgeByTag(tag);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ tag, purgedKeys: keys.length, keys }));
+      } catch {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Invalid JSON body" }));
+      }
+    });
+    return true;
+  }
+
+  if (url === "/__cache/purge/pattern" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
+    req.on("end", async () => {
+      try {
+        const { pattern } = JSON.parse(body);
+        if (!pattern || typeof pattern !== "string") {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "pattern is required" }));
+          return;
+        }
+        await cache.purgeByPattern(pattern);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ pattern, status: "purged" }));
+      } catch {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Invalid JSON body" }));
+      }
+    });
+    return true;
+  }
+
   if (url === "/__registry/register" && req.method === "POST") {
     let body = "";
     req.on("data", (chunk) => {

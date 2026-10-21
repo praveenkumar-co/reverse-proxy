@@ -10,20 +10,12 @@ import net from "net";
 import { MetricsRegistry } from "../../observability/metrics/prometheus.exporter.js";
 import { writeAccessLog } from "../../observability/logger/logger.js";
 import { tenantLogStreamer } from "../../observability/logger/tenant-log.streamer.js";
+import { getAgent } from "../proxy/connection.pool.js";
+import { RouteMatcher } from "../router/route.matcher.js";
+import type { RouteRule } from "../router/route.types.js";
 
-const httpAgent = new http.Agent({
-  keepAlive: true,
-  keepAliveMsecs: 10000,
-  maxSockets: 256,
-  maxFreeSockets: 32,
-});
-const httpsAgent = new https.Agent({
-  keepAlive: true,
-  keepAliveMsecs: 10000,
-  maxSockets: 256,
-  maxFreeSockets: 32,
-});
 const workerConfig = await rootConfigSchema.parseAsync(JSON.parse(process.env["APP_CONFIG"]!));
+const routeMatcher = new RouteMatcher(workerConfig.server.paths as RouteRule[]);
 const maxResponseBytes = workerConfig.server.maxResponseBytes ?? 25 * 1024 * 1024;
 const healthyUpstreams = new Set<string>(workerConfig.server.upstreams.map((u) => u.id));
 const metricsRegistry = new MetricsRegistry(healthyUpstreams);
@@ -110,7 +102,7 @@ process.on("message", async (rawMsg: any, handle?: any) => {
     const upstreamUrl: string | undefined = raw.upstreamUrl;
     const requestUrl = msg.url;
     const startTime = performance.now();
-    const rule = workerConfig.server.paths.find((e) => requestUrl.startsWith(e.path));
+    const rule = routeMatcher.match(requestUrl, msg.requestType);
     if (!rule) {
       const reply: WorkerReplyMessageType = {
         requestId: raw.requestId,
@@ -140,7 +132,7 @@ process.on("message", async (rawMsg: any, handle?: any) => {
     }
     const isHttps = finalUpstreamUrl.protocol === "https:";
     const transport = isHttps ? https : http;
-    const agent = isHttps ? httpsAgent : httpAgent;
+    const agent = getAgent(isHttps);
     const upstreamStaticConfig = workerConfig.server.upstreams.find(
       (u) =>
         u.url === finalUpstreamUrl.toString() || new URL(u.url).origin === finalUpstreamUrl.origin,

@@ -27,6 +27,7 @@ export const cacheSchema = z
     l1MaxSize: z.number().default(10000),
     staleWhileRevalidate: z.boolean().default(true),
     staleIfError: z.boolean().default(true),
+    staleIfErrorSeconds: z.number().default(86400),
     key: z
       .object({
         ignoreQueryParams: z.array(z.string()).default([]),
@@ -47,6 +48,7 @@ export const cacheSchema = z
     l1MaxSize: 10000,
     staleWhileRevalidate: true,
     staleIfError: true,
+    staleIfErrorSeconds: 86400,
     key: {
       ignoreQueryParams: [],
       varyHeaders: ["Accept", "Accept-Encoding"],

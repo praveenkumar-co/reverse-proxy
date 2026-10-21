@@ -6,6 +6,12 @@ import type { ICache } from "./contracts/cache.interface.js";
 import { RedisCache } from "./stores/redis.cache.js";
 import { HybridCache } from "./stores/hybrid.cache.js";
 import { DebeziumInvalidator } from "./invalidation/debezium.invalidator.js";
+import { KeyBuilder } from "./policies/key-builder.js";
+import { parseCacheControl } from "./policies/cache-control.parser.js";
+import { StaleWhileRevalidate } from "./policies/stale-while-revalidate.js";
+import { StaleIfError } from "./policies/stale-if-error.js";
+import { TagInvalidator } from "./invalidation/tag.invalidator.js";
+import { PatternInvalidator } from "./invalidation/pattern.invalidator.js";
 
 export class Cache {
   private client!: RedisClientType;
@@ -16,11 +22,22 @@ export class Cache {
   private enabled: boolean;
   private config: CacheConfig;
   private connected = false;
+  private keyBuilder: KeyBuilder;
+  private tagInvalidator = new TagInvalidator();
+  private patternInvalidator: PatternInvalidator;
+  private staleWhileRevalidate = new StaleWhileRevalidate();
+  private staleIfError = new StaleIfError();
 
   constructor(config: CacheConfig){
     this.config = config;
     this.ttlSeconds = config.ttlSeconds;
     this.enabled = config.enabled;
+    this.keyBuilder = new KeyBuilder({
+      ignoreQueryParams: config.key?.ignoreQueryParams,
+      varyHeaders: config.key?.varyHeaders,
+      prefix: "proxy",
+    });
+    this.patternInvalidator = new PatternInvalidator({ invalidate: (pattern) => this.invalidate(pattern) });
     this.client = createClient({
       socket: {
         host: config.host,
@@ -115,8 +132,30 @@ export class Cache {
     }
   }
 
-  buildKey(method: string, url: string): string {
-    return this.store.buildKey(method, url);
+  /**
+   * Builds the cache key via KeyBuilder — honors configured ignoreQueryParams and
+   * varyHeaders (e.g. Accept, Accept-Encoding) instead of naive method+path concatenation.
+   */
+  buildKey(method: string, url: string, headers: Record<string, string | string[] | undefined> = {}): string {
+    const normalizedHeaders: Record<string, string> = {};
+    for (const [k, v] of Object.entries(headers)) {
+      if (typeof v === "string") normalizedHeaders[k] = v;
+      else if (Array.isArray(v)) normalizedHeaders[k] = v.join(",");
+    }
+    return this.keyBuilder.build(method, url, normalizedHeaders);
+  }
+
+  /**
+   * Decides, from an upstream response's Cache-Control header, whether the response may be
+   * stored at all — honors no-store/no-cache/private rather than the caller doing its own
+   * substring checks.
+   */
+  isResponseCacheable(headers: Record<string, any> | undefined): boolean {
+    const raw = headers?.["cache-control"];
+    if (!raw) return true;
+    const header = Array.isArray(raw) ? raw.join(",") : String(raw);
+    const directives = parseCacheControl(header);
+    return !directives.noStore && !directives.noCache && !directives.private;
   }
 
   async get(key: string): Promise<string | null> {
@@ -136,14 +175,26 @@ export class Cache {
     }
   }
 
-  async set(key: string, value: string, ttlOverride?: number): Promise<void> {
+  async set(key: string, value: string, ttlOverride?: number, tags?: string[]): Promise<void> {
     if(!this.enabled) return;
     const ttl = ttlOverride ?? this.ttlSeconds;
     try {
       await this.store.set(key, value, ttl);
-      logger.info("Cache", `SET → ${key}`, { ttl });
+      if (tags && tags.length > 0) {
+        this.tagInvalidator.tag(key, tags);
+      }
+      logger.info("Cache", `SET → ${key}`, { ttl, tags });
     } catch (err: any){
       logger.error("Cache", `SET error: ${err.message}`);
+    }
+  }
+
+  async del(key: string): Promise<void> {
+    if(!this.enabled) return;
+    try {
+      await this.store.del(key);
+    } catch (err: any){
+      logger.error("Cache", `DEL error: ${err.message}`);
     }
   }
 
@@ -155,6 +206,39 @@ export class Cache {
     } catch (err: any){
       logger.error("Cache", `INVALIDATE error: ${err.message}`);
     }
+  }
+
+  /** Evicts every key previously tagged (via set()'s `tags` param) with the given tag. */
+  async purgeByTag(tag: string): Promise<string[]> {
+    const keys = this.tagInvalidator.getKeysForTag(tag);
+    await Promise.all(keys.map((k) => this.del(k)));
+    this.tagInvalidator.removeTag(tag);
+    logger.info("Cache", `PURGED by tag`, { tag, count: keys.length });
+    return keys;
+  }
+
+  /** Wildcard/pattern-based purge (e.g. "/api/users/*"). */
+  async purgeByPattern(pattern: string): Promise<void> {
+    await this.patternInvalidator.invalidate(pattern);
+  }
+
+  /** Stale-while-revalidate: whether a stale entry should be served + a background refresh kicked off. */
+  shouldRevalidate(key: string, ageSeconds: number, maxAgeSeconds: number): boolean {
+    if (this.config.staleWhileRevalidate === false) return false;
+    return this.staleWhileRevalidate.shouldRevalidate(key, ageSeconds, maxAgeSeconds);
+  }
+  markRevalidating(key: string): void {
+    this.staleWhileRevalidate.markRevalidating(key);
+  }
+  markRevalidationDone(key: string): void {
+    this.staleWhileRevalidate.markDone(key);
+  }
+
+  /** Stale-if-error: whether a stale entry may be served in place of the given upstream error. */
+  shouldServeStaleOnError(errorStatus: number, ageSeconds: number): boolean {
+    if (this.config.staleIfError === false) return false;
+    const window = this.config.staleIfErrorSeconds ?? 86400;
+    return this.staleIfError.shouldServeStale(errorStatus, window, ageSeconds);
   }
 
   async disconnect(): Promise<void> {

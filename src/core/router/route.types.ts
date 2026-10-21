@@ -12,6 +12,10 @@ export interface CanaryConfig {
   maxConnections?: number;
 }
 
+export interface RouteAuthConfig {
+  tokens: string[];
+}
+
 export interface RouteRule {
   path: string;
   upstream: string[];
@@ -21,5 +25,6 @@ export interface RouteRule {
   sticky?: boolean;
   stripPrefix?: boolean;
   canary?: CanaryConfig;
+  auth?: RouteAuthConfig;
 }
 
