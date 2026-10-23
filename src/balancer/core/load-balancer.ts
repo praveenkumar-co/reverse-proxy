@@ -191,6 +191,16 @@ export class LoadBalancer {
       logger.warn("CircuitBreaker", `${id} tripped to OPEN state`);
     }
   }
+  /**
+   * Releases a HALF_OPEN probe slot for a request that was selected for this upstream but
+   * never actually reached it (e.g. rejected by a local bulkhead before dispatch). Unlike
+   * recordFailure/recordSuccess, this must not affect the breaker's health model at all —
+   * the upstream was never contacted, so it was neither proven healthy nor unhealthy.
+   */
+  public cancelProbe(id: string){
+    const cb = circuitBreakerManager.get(id);
+    cb?.cancelProbe();
+  }
   public pickFiltered(
     healthyIds: Set<string>,
     clientIp?: string,

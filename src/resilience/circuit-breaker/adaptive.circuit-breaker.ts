@@ -24,6 +24,9 @@ export class AdaptiveCircuitBreaker implements ICircuitBreaker {
     }
     return true;
   }
+  // No half-open probe concept in the adaptive model (it's a continuous drop-probability, not
+  // a CLOSED/OPEN/HALF_OPEN state machine) — nothing to release.
+  public cancelProbe(): void {}
   public getStats(){
     return {
       requests: this.requests,

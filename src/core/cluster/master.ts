@@ -111,8 +111,21 @@ interface PendingRequest {
   payload: WorkerMessageType;
   clientIp: string;
   res: http.ServerResponse;
+  worker: Worker;
 }
 const pendingRequests = new Map<string, PendingRequest>();
+
+/**
+ * Mutable per-logical-request handle threaded through dispatchToWorker (and updated on every
+ * retry attempt) so a `req.on('close')` listener registered once, at the top of the request,
+ * can always reach whichever attempt is currently in flight — including ones created by
+ * retries after the listener was registered.
+ */
+interface AbortHandle {
+  requestId?: string;
+  worker?: Worker;
+  aborted: boolean;
+}
 
 interface MetricQueryRequest {
   resolve: (snapshots: any[]) => void;
@@ -582,7 +595,13 @@ export async function createServer(config: CreateServerConfig) {
       attemptedUpstreams: Set<string> = new Set(),
       startTime = performance.now(),
       previousSleepMs?: number,
+      abortHandle?: AbortHandle,
     ) {
+      if (abortHandle?.aborted) {
+        // The client was already gone before this attempt (including retries) even started —
+        // don't bother picking an upstream or spending a worker/connection slot on it.
+        return;
+      }
       globalRetryBudget.recordRequest();
       const pathRule = routeMatcher.match(payload.url, payload.requestType);
       const allowedUpstreams = pathRule?.upstream ?? [];
@@ -740,10 +759,14 @@ export async function createServer(config: CreateServerConfig) {
         }
         if (!bulkhead.enter()) {
           logger.warn("Resilience", `Bulkhead capacity reached for upstream: ${upstreamId}`);
+          // This upstream may have just been selected via a HALF_OPEN circuit-breaker probe
+          // grant — but it's being rejected locally (capacity, not health) before ever being
+          // contacted, so release that probe slot neutrally rather than leaving it stuck.
+          lb.cancelProbe(upstreamId);
           const retryConfig = ACTIVE_CONFIG.server.loadBalancing.retry;
           const retryAllowed = globalRetryBudget.recordRetry();
           if (retryAllowed && attempt < retryConfig.maxAttempts) {
-            dispatchToWorker(payload, clientIp, res, attempt + 1, attemptedUpstreams, startTime);
+            dispatchToWorker(payload, clientIp, res, attempt + 1, attemptedUpstreams, startTime, undefined, abortHandle);
           } else {
             res.writeHead(503, { "Content-Type": "application/json" });
             res.end(
@@ -767,6 +790,7 @@ export async function createServer(config: CreateServerConfig) {
         upstreamBulkheads.get(upstreamId)?.leave();
         metricsRegistry.recordActiveConnection(upstreamId, -1);
         lb.releaseConnection(upstreamId);
+        lb.cancelProbe(upstreamId); // selected, but never actually contacted — see cancelProbe
         res.writeHead(503);
         res.end("Service not found in registry");
         return;
@@ -795,6 +819,7 @@ export async function createServer(config: CreateServerConfig) {
         upstreamBulkheads.get(upstreamId)?.leave();
         metricsRegistry.recordActiveConnection(upstreamId, -1);
         lb.releaseConnection(upstreamId);
+        lb.cancelProbe(upstreamId); // selected, but never actually contacted — see cancelProbe
         res.writeHead(500);
         res.end("No worker available");
         return;
@@ -832,6 +857,10 @@ export async function createServer(config: CreateServerConfig) {
           );
         }
       }, ACTIVE_CONFIG.server.readTimeoutMs);
+      if (abortHandle) {
+        abortHandle.requestId = requestId;
+        abortHandle.worker = worker;
+      }
       pendingRequests.set(requestId, {
         timer,
         upstreamId,
@@ -839,6 +868,7 @@ export async function createServer(config: CreateServerConfig) {
         payload,
         clientIp,
         res,
+        worker,
         resolve: async (rawReply: any) => {
           const reply = await workerMessageReplySchema.parseAsync(rawReply);
           const retryConfig = ACTIVE_CONFIG.server.loadBalancing.retry;
@@ -892,6 +922,8 @@ export async function createServer(config: CreateServerConfig) {
                   attempt + 1,
                   attemptedUpstreams,
                   startTime,
+                  undefined,
+                  abortHandle,
                 );
               } else {
                 const retryConf = ACTIVE_CONFIG.server.resilience?.retry;
@@ -935,6 +967,7 @@ export async function createServer(config: CreateServerConfig) {
                     attemptedUpstreams,
                     startTime,
                     jitterDelay,
+                    abortHandle,
                   );
                 }, jitterDelay);
               }
@@ -1196,16 +1229,19 @@ export async function createServer(config: CreateServerConfig) {
       }
       const serviceInstance = registry.get(upstreamId);
       if (!serviceInstance) {
+        lb.cancelProbe(upstreamId); // selected via pickFiltered, but never actually contacted
         socket.destroy();
         return;
       }
       if (WORKER_POOL.length === 0) {
+        lb.cancelProbe(upstreamId);
         socket.destroy();
         return;
       }
       const workerIndex = Math.floor(Math.random() * WORKER_POOL.length);
       const worker = WORKER_POOL[workerIndex];
       if (!worker) {
+        lb.cancelProbe(upstreamId);
         socket.destroy();
         return;
       }
@@ -1505,6 +1541,44 @@ export async function createServer(config: CreateServerConfig) {
         const chunks: Buffer[] = [];
         let receivedBytes = 0;
         let rejected = false;
+
+        // If the client disconnects while the upstream is still streaming (or before it even
+        // starts), don't leave that upstream request running to completion for nobody — abort
+        // it on the worker side and release every resource (bulkhead slot, connection count,
+        // circuit-breaker half-open probe slot) it was holding.
+        // Note: this listens on the *response* object's 'close', not the request's. Node
+        // fires req.on('close') once the request body has been fully read — effectively
+        // immediately for a bodyless GET — which is unrelated to whether the connection
+        // dropped before a response went out. res.on('close') is the one that actually means
+        // "the underlying connection was terminated before res.end() completed."
+        const abortHandle: AbortHandle = { aborted: false };
+        c.res.on("close", () => {
+          if (c.res.writableEnded) return; // normal completion, not an abort
+          abortHandle.aborted = true;
+          if (abortHandle.requestId && abortHandle.worker) {
+            try {
+              abortHandle.worker.send(JSON.stringify({ type: "ABORT_REQUEST", requestId: abortHandle.requestId }));
+            } catch {}
+          }
+          const pending = abortHandle.requestId ? pendingRequests.get(abortHandle.requestId) : undefined;
+          if (pending) {
+            clearTimeout(pending.timer);
+            pendingRequests.delete(abortHandle.requestId!);
+            upstreamBulkheads.get(pending.upstreamId)?.leave();
+            metricsRegistry.recordActiveConnection(pending.upstreamId, -1);
+            lb.releaseConnection(pending.upstreamId);
+            // Treated pessimistically (like a timeout) since we'll never know the real
+            // outcome — this is also what releases a held HALF_OPEN probe slot rather than
+            // leaving it stuck until the breaker's own recovery window expires again.
+            lb.recordFailure(pending.upstreamId);
+            logger.warn(
+              "Master",
+              "Client disconnected before response completed — aborted in-flight upstream request",
+              { upstreamId: pending.upstreamId },
+            );
+          }
+        });
+
         const sendPayload = (bodyBuffer: Buffer) => {
           const body = bodyBuffer.length > 0 ? bodyBuffer.toString("binary") : null;
           const payload: WorkerMessageType = {
@@ -1513,7 +1587,7 @@ export async function createServer(config: CreateServerConfig) {
             body: body,
             url: `${c.req.url}`,
           };
-          dispatchToWorker(payload, clientIP, c.res);
+          dispatchToWorker(payload, clientIP, c.res, 0, new Set(), performance.now(), undefined, abortHandle);
         };
 
         if (c.req.readableEnded) {
@@ -1586,22 +1660,61 @@ export async function createServer(config: CreateServerConfig) {
       if (isShuttingDown) return;
       isShuttingDown = true;
       logger.info("Master", `Received ${signal} — draining and shutting down`);
-      for (const worker of WORKER_POOL) {
+
+      if (healthCheckInterval) {
+        clearInterval(healthCheckInterval);
+        healthCheckInterval = undefined;
+      }
+
+      // Signal workers to drain (same IPC message + pattern reloadServerConfig() already uses
+      // for retiring old workers on hot-reload) rather than hard-killing them immediately —
+      // each worker now tracks its own in-flight upstream requests and exits on its own once
+      // they finish (see worker.ts's GRACEFUL_SHUTDOWN/maybeExitWhenDrained).
+      const workersToRetire = [...WORKER_POOL];
+      WORKER_POOL.length = 0;
+      for (const worker of workersToRetire) {
         try {
-          worker.kill("SIGTERM");
+          worker.send(JSON.stringify({ type: "GRACEFUL_SHUTDOWN" }));
         } catch {}
       }
-      WORKER_POOL.length = 0;
+
       await cache.disconnect().catch(() => {});
-      httpServer.close();
-      if (httpsServer) {
-        httpsServer.close(() => {
-          process.exit(0);
-        });
-      } else {
+
+      // Wait at least as long as a legitimate in-flight request is allowed to take, so this
+      // doesn't cut off a slow-but-healthy response that was about to finish on its own.
+      const drainTimeoutMs = Math.max(10000, (ACTIVE_CONFIG.server.readTimeoutMs ?? 15000) + 2000);
+      let settled = false;
+      const hardDeadline = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        logger.warn("Master", `Drain timeout (${drainTimeoutMs}ms) exceeded — forcing shutdown`);
+        for (const worker of workersToRetire) {
+          try {
+            if (!worker.isDead()) worker.kill("SIGTERM");
+          } catch {}
+        }
         process.exit(0);
+      }, drainTimeoutMs);
+      hardDeadline.unref();
+
+      // server.close() stops accepting *new* connections but waits for in-flight ones to
+      // finish naturally before its callback fires — exiting before that callback would cut
+      // off a response mid-flight for whoever is still actively being served.
+      const closers: Promise<void>[] = [new Promise<void>((resolve) => httpServer.close(() => resolve()))];
+      if (httpsServer) {
+        closers.push(new Promise<void>((resolve) => httpsServer!.close(() => resolve())));
       }
-      setTimeout(() => process.exit(0), 1000).unref();
+      await Promise.all(closers);
+
+      if (settled) return; // the hard deadline already fired and is handling shutdown
+      settled = true;
+      clearTimeout(hardDeadline);
+      for (const worker of workersToRetire) {
+        try {
+          if (!worker.isDead()) worker.kill("SIGTERM");
+        } catch {}
+      }
+      process.exit(0);
     }
     process.on("SIGTERM", () => void gracefulShutdown("SIGTERM"));
     process.on("SIGINT", () => void gracefulShutdown("SIGINT"));

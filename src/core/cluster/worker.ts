@@ -14,7 +14,14 @@ import { getAgent } from "../proxy/connection.pool.js";
 import { RouteMatcher } from "../router/route.matcher.js";
 import type { RouteRule } from "../router/route.types.js";
 
-const workerConfig = await rootConfigSchema.parseAsync(JSON.parse(process.env["APP_CONFIG"]!));
+let workerConfig: Awaited<ReturnType<typeof rootConfigSchema.parseAsync>>;
+try {
+  const rawAppConfig = JSON.parse(process.env["APP_CONFIG"]!);
+  workerConfig = await rootConfigSchema.parseAsync(rawAppConfig);
+} catch (err: any) {
+  logger.error(`Worker:${process.pid}`, `Fatal: invalid APP_CONFIG at startup — ${err.message}`);
+  process.exit(1);
+}
 const routeMatcher = new RouteMatcher(workerConfig.server.paths as RouteRule[]);
 const maxResponseBytes = workerConfig.server.maxResponseBytes ?? 25 * 1024 * 1024;
 const healthyUpstreams = new Set<string>(workerConfig.server.upstreams.map((u) => u.id));
@@ -22,6 +29,31 @@ const metricsRegistry = new MetricsRegistry(healthyUpstreams);
 if (workerConfig.observability?.tenantDelivery?.mode === "webhook") {
   tenantLogStreamer.configure(workerConfig.observability.tenantDelivery.exportEndpoints);
 }
+
+// Tracks in-flight upstream requests by requestId so (a) a client abort (relayed from master
+// as ABORT_REQUEST) can immediately destroy the matching upstream socket instead of letting it
+// run to completion for nobody, and (b) GRACEFUL_SHUTDOWN can wait for genuinely in-flight work
+// to finish before this process exits, rather than hard-killing mid-request.
+interface ActiveRequestEntry {
+  proxyReq: http.ClientRequest;
+  clearTimers: () => void;
+}
+const activeRequests = new Map<string, ActiveRequestEntry>();
+let draining = false;
+
+function maybeExitWhenDrained() {
+  if (draining && activeRequests.size === 0) {
+    logger.info(`Worker:${process.pid}`, "Drain complete — exiting");
+    process.exit(0);
+  }
+}
+
+function sendReplyAndCleanup(requestId: string | undefined, reply: Record<string, unknown>) {
+  if (requestId) activeRequests.delete(requestId);
+  if (process.send) process.send(JSON.stringify(reply));
+  maybeExitWhenDrained();
+}
+
 process.on("message", async (rawMsg: any, handle?: any) => {
   try {
     const parsed = typeof rawMsg === "string" ? JSON.parse(rawMsg) : rawMsg;
@@ -30,7 +62,26 @@ process.on("message", async (rawMsg: any, handle?: any) => {
     }
 
     if (parsed.type === "GRACEFUL_SHUTDOWN") {
-      logger.info(`Worker:${process.pid}`, "Gracefully draining connections");
+      logger.info(
+        `Worker:${process.pid}`,
+        `Gracefully draining connections (${activeRequests.size} in flight)`,
+      );
+      draining = true;
+      maybeExitWhenDrained();
+      return;
+    }
+
+    if (parsed.type === "ABORT_REQUEST") {
+      const entry = parsed.requestId ? activeRequests.get(parsed.requestId) : undefined;
+      if (entry) {
+        logger.info(`Worker:${process.pid}`, "Aborting in-flight upstream request — client disconnected", {
+          requestId: parsed.requestId,
+        });
+        entry.clearTimers();
+        entry.proxyReq.destroy();
+        activeRequests.delete(parsed.requestId);
+        maybeExitWhenDrained();
+      }
       return;
     }
 
@@ -112,7 +163,7 @@ process.on("message", async (rawMsg: any, handle?: any) => {
         error: "Route not found",
         data: "",
       };
-      if (process.send) process.send(JSON.stringify(reply));
+      sendReplyAndCleanup(raw.requestId, reply);
       return;
     }
     let finalUpstreamUrl: URL;
@@ -127,7 +178,7 @@ process.on("message", async (rawMsg: any, handle?: any) => {
           error: "Upstream not found",
           data: "",
         };
-        if (process.send) process.send(JSON.stringify(reply));
+        sendReplyAndCleanup(raw.requestId, reply);
         return;
       }
       finalUpstreamUrl = new URL(upstream.url);
@@ -270,7 +321,7 @@ process.on("message", async (rawMsg: any, handle?: any) => {
             error: "Upstream response exceeded maximum allowed size",
             data: "",
           };
-          if (process.send) process.send(JSON.stringify(reply));
+          sendReplyAndCleanup(raw.requestId, reply);
           return;
         }
         chunks.push(chunk);
@@ -302,7 +353,7 @@ process.on("message", async (rawMsg: any, handle?: any) => {
                 statusCode: upstreamRes.statusCode ?? 200,
                 headers: err ? forwardHeaders : { ...forwardHeaders, "content-encoding": "gzip" },
               };
-              if (process.send) process.send(JSON.stringify(reply));
+              sendReplyAndCleanup(raw.requestId, reply);
             });
           } else {
             const reply: WorkerReplyMessageType = {
@@ -311,7 +362,7 @@ process.on("message", async (rawMsg: any, handle?: any) => {
               statusCode: upstreamRes.statusCode ?? 200,
               headers: forwardHeaders,
             };
-            if (process.send) process.send(JSON.stringify(reply));
+            sendReplyAndCleanup(raw.requestId, reply);
           }
         };
         if (upstreamEncoding === "gzip") {
@@ -325,7 +376,7 @@ process.on("message", async (rawMsg: any, handle?: any) => {
                 statusCode: upstreamRes.statusCode ?? 200,
                 headers: upstreamRes.headers,
               };
-              if (process.send) process.send(JSON.stringify(reply));
+              sendReplyAndCleanup(raw.requestId, reply);
             } else {
               sendReply(decompressed);
             }
@@ -335,6 +386,15 @@ process.on("message", async (rawMsg: any, handle?: any) => {
         }
       });
     });
+    if (raw.requestId) {
+      activeRequests.set(raw.requestId, {
+        proxyReq,
+        clearTimers: () => {
+          clearTimeout(connectTimeoutTimer);
+          clearTimeout(readTimeoutTimer);
+        },
+      });
+    }
     connectTimeoutTimer = setTimeout(() => {
       proxyReq.destroy();
       recordAndLog(504, 0, workerConfig.server.connectTimeoutMs);
@@ -344,7 +404,7 @@ process.on("message", async (rawMsg: any, handle?: any) => {
         error: "Connect Timeout",
         data: "",
       };
-      if (process.send) process.send(JSON.stringify(reply));
+      sendReplyAndCleanup(raw.requestId, reply);
     }, workerConfig.server.connectTimeoutMs);
     readTimeoutTimer = setTimeout(() => {
       proxyReq.destroy();
@@ -355,7 +415,7 @@ process.on("message", async (rawMsg: any, handle?: any) => {
         error: "Read Timeout",
         data: "",
       };
-      if (process.send) process.send(JSON.stringify(reply));
+      sendReplyAndCleanup(raw.requestId, reply);
     }, workerConfig.server.readTimeoutMs);
     proxyReq.on("error", (err) => {
       clearTimeout(connectTimeoutTimer);
@@ -368,7 +428,7 @@ process.on("message", async (rawMsg: any, handle?: any) => {
         error: `Upstream connection failed: ${err.message}`,
         data: "",
       };
-      if (process.send) process.send(JSON.stringify(reply));
+      sendReplyAndCleanup(raw.requestId, reply);
     });
     if (msg.body) {
       proxyReq.write(Buffer.from(msg.body, "binary"));

@@ -51,6 +51,11 @@ export class ClassicCircuitBreaker implements ICircuitBreaker {
     }
     return true;
   }
+  public cancelProbe(){
+    if(this.state === "HALF_OPEN" && this.halfOpenProbesInFlight > 0){
+      this.halfOpenProbesInFlight--;
+    }
+  }
   public getState(){
     return this.state;
   }
