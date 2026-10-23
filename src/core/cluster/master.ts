@@ -844,9 +844,19 @@ export async function createServer(config: CreateServerConfig) {
           const retryConfig = ACTIVE_CONFIG.server.loadBalancing.retry;
           const errorStatus = reply.statusCode ?? 502;
           const isRetryable =
-            reply.errorCode ||
+            (reply.errorCode && reply.errorCode !== "404") ||
             (reply.statusCode && retryConfig.statusCodes.includes(reply.statusCode));
-          if (isRetryable) {
+          if (reply.errorCode === "404") {
+            // The worker found no route matching this path/method (e.g. a method-guarded
+            // route rejecting this verb). No amount of retrying changes that — it's a
+            // routing mismatch, not a transient upstream failure — so fail fast with the
+            // real status instead of burning retry attempts and surfacing a misleading 502.
+            upstreamBulkheads.get(upstreamId!)?.leave();
+            metricsRegistry.recordActiveConnection(upstreamId!, -1);
+            lb.releaseConnection(upstreamId!);
+            res.writeHead(404, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: reply.error || "Route not found" }));
+          } else if (isRetryable) {
             logger.warn(
               "Master",
               `Upstream failure: errorCode=${reply.errorCode}, status=${reply.statusCode}`,
@@ -948,6 +958,26 @@ export async function createServer(config: CreateServerConfig) {
                 }
               })();
             }
+          } else if (reply.statusCode && reply.statusCode >= 500) {
+            // A plain (non-connection-level) 5xx isn't in retryConfig.statusCodes by default,
+            // so it lands here rather than in the isRetryable branch above — still worth a
+            // stale-if-error check before relaying the error, for a cacheable GET/HEAD.
+            lb.recordFailure(upstreamId!);
+            passiveProbe.record({
+              upstreamId: upstreamId!,
+              statusCode: reply.statusCode,
+              latencyMs: performance.now() - startTime,
+            });
+            upstreamBulkheads.get(upstreamId!)?.leave();
+            metricsRegistry.recordActiveConnection(upstreamId!, -1);
+            lb.releaseConnection(upstreamId!);
+            void (async () => {
+              const servedStale = await tryServeStaleOnError(payload, pathRule, reply.statusCode!, res);
+              if (!servedStale) {
+                res.writeHead(reply.statusCode!, { "Content-Type": "application/json" });
+                res.end(reply.data || "Internal Server Error");
+              }
+            })();
           } else {
             let responseData: Buffer | string = reply.data;
             if (reply.isCompressed && reply.encoding === "gzip") {

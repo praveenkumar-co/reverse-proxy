@@ -1,3 +1,5 @@
+import { generateSpanId } from "./w3c-trace-context.js";
+
 export interface Span {
   traceId: string;
   spanId: string;
@@ -17,10 +19,15 @@ export class Tracer {
    */
   constructor(private readonly maxSpans: number = 10_000){}
 
-  startSpan(name: string, traceId: string, attributes: Record<string, string> = {}): Span {
+  /**
+   * `spanId` is optional so callers that already minted a W3C-compliant span id (16 hex
+   * chars, e.g. tracingMiddleware deriving one for the traceparent header) can hand it in
+   * directly instead of this generating its own and the two diverging.
+   */
+  startSpan(name: string, traceId: string, attributes: Record<string, string> = {}, spanId?: string): Span {
     const span: Span = {
       traceId,
-      spanId: Math.random().toString(36).slice(2),
+      spanId: spanId ?? generateSpanId(),
       name,
       startMs: Date.now(),
       attributes,

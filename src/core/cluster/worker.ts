@@ -101,8 +101,10 @@ process.on("message", async (rawMsg: any, handle?: any) => {
     };
     const upstreamUrl: string | undefined = raw.upstreamUrl;
     const requestUrl = msg.url;
+    // Query params must never influence route lookup — only the path prefix should.
+    const cleanPath = (msg.url || "/").split("?")[0] ?? "/";
     const startTime = performance.now();
-    const rule = routeMatcher.match(requestUrl, msg.requestType);
+    const rule = routeMatcher.match(cleanPath, msg.requestType);
     if (!rule) {
       const reply: WorkerReplyMessageType = {
         requestId: raw.requestId,
