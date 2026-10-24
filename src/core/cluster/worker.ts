@@ -450,7 +450,8 @@ process.on("message", async (rawMsg: any, handle?: any) => {
       };
       sendReplyAndCleanup(raw.requestId, reply);
     }, workerConfig.server.readTimeoutMs);
-    proxyReq.on("error", (err) => {
+    proxyReq.on("error", (err: any) => {
+      logger.error(`Worker:${process.pid}`, `proxyReq error: ${err.message} (${err.code})`);
       clearTimeout(connectTimeoutTimer);
       clearTimeout(readTimeoutTimer);
       const latency = performance.now() - startTime;
