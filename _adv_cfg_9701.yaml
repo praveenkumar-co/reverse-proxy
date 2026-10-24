@@ -1,0 +1,24 @@
+
+server:
+  port: 9701
+  workers: 1
+  backlog: 8192
+  rateLimit:
+    enabled: false
+  upstreams:
+    - id: u1
+      url: http://127.0.0.1:19701
+  paths:
+    - path: /
+      upstream: [u1]
+  loadBalancing:
+    strategy: round-robin
+    retry:
+      maxAttempts: 0
+      statusCodes: []
+  resilience:
+    circuitBreaker:
+      mode: classic
+      failureThreshold: 5000
+  connectTimeoutMs: 10000
+  readTimeoutMs: 30000

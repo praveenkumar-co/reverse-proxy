@@ -33,7 +33,7 @@ export function resolveClientIp(
     trustProxy ||
     (options.trustedProxies?.some((p) => normalizeAddress(p) === remoteAddress) ?? false);
 
-  if (isTrustedPeer) {
+  if (isTrustedPeer){
     const xff = req.headers['x-forwarded-for'];
     const xffValue = Array.isArray(xff) ? xff[0] : xff;
     const first = xffValue?.split(',')[0]?.trim();

@@ -1,0 +1,17 @@
+
+server:
+  port: 9709
+  workers: 4
+  upstreams:
+    - id: u1
+      url: http://127.0.0.1:19709
+  paths:
+    - path: /
+      upstream: [u1]
+  loadBalancing:
+    strategy: round-robin
+    retry:
+      maxAttempts: 0
+      statusCodes: []
+  connectTimeoutMs: 3000
+  readTimeoutMs: 5000

@@ -1,0 +1,28 @@
+
+server:
+  port: 9706
+  workers: 2
+  upstreams:
+    - id: u1
+      url: http://127.0.0.1:19706
+  paths:
+    - path: /
+      upstream: [u1]
+  loadBalancing:
+    strategy: round-robin
+    retry:
+      maxAttempts: 3
+      statusCodes: [502, 503, 504]
+  resilience:
+    retry:
+      retryOn:
+        localNodeFailure: true
+        systemOverload: true
+      retryMutatingMethods: false
+      budgetPercent: 15
+    circuitBreaker:
+      mode: classic
+      failureThreshold: 200
+      recoveryTimeMs: 60000
+  connectTimeoutMs: 3000
+  readTimeoutMs: 5000

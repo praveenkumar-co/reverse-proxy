@@ -23,7 +23,8 @@
     "test:live": "node tests/live-integration-test.mjs",
     "test:universal": "node tests/universal-app-test.mjs",
     "generate-certs": "bash scripts/generate-certs.sh",
-    "lint": "eslint src --ext .ts"
+    "lint": "eslint src --ext .ts",
+    "test:exploit": "node tests/adversarial-exploit-harness.mjs"
   },
   "keywords": [
     "reverse-proxy",

@@ -1,0 +1,20 @@
+
+server:
+  port: 9704
+  workers: 4
+  backlog: 8192
+  rateLimit:
+    enabled: false
+  upstreams:
+    - id: u1
+      url: http://127.0.0.1:19704
+  paths:
+    - path: /
+      upstream: [u1]
+  loadBalancing:
+    strategy: round-robin
+    retry:
+      maxAttempts: 0
+      statusCodes: []
+  connectTimeoutMs: 4000
+  readTimeoutMs: 6000

@@ -103,6 +103,50 @@ const upstreamBulkheads = new Map<string, Bulkhead>();
 let nextWorkerIndex = 0;
 let isShuttingDown = false;
 
+// ── IPC Backpressure Queue ────────────────────────────────────────────────────
+// worker.send() returns false when the IPC pipe's internal write buffer is full.
+// Ignoring that return value silently drops messages (Bug A: 997/2000 dropped
+// under a 2000-concurrent-request flood through 1 worker). We queue the payload
+// and flush it the moment the channel drains.
+const workerSendQueues = new Map<Worker, string[]>();
+function workerSend(worker: Worker, msg: string): void {
+  const existing = workerSendQueues.get(worker);
+  if (existing) {
+    // Channel is already backed up — enqueue, don't send now
+    existing.push(msg);
+    return;
+  }
+  const ok = worker.send(msg);
+  if (!ok) {
+    // Pipe full — create a queue and wait for drain
+    const q: string[] = [msg];
+    workerSendQueues.set(worker, q);
+    const onDrain = () => {
+      const queue = workerSendQueues.get(worker);
+      if (!queue) return;
+      // Flush everything that accumulated while we were waiting
+      while (queue.length > 0) {
+        const next = queue[0]!;
+        const flushed = worker.send(next);
+        if (flushed) {
+          queue.shift();
+        } else {
+          // Still full — wait for another drain
+          (worker.process as any).once("drain", onDrain);
+          return;
+        }
+      }
+      workerSendQueues.delete(worker);
+    };
+    (worker.process as any).once("drain", onDrain);
+  }
+}
+
+// Prevent duplicate cluster 'exit' listeners when reloadServerConfig() calls
+// createServer() again on hot-reload. Node's cluster module is a singleton —
+// adding the same logical listener a second time doubles worker respawns.
+let clusterExitHandlerInstalled = false;
+
 interface PendingRequest {
   resolve: (parsed: any) => void;
   timer: NodeJS.Timeout;
@@ -562,18 +606,26 @@ export async function createServer(config: CreateServerConfig) {
         throw err;
       }
     }
-    cluster.on("exit", (worker) => {
-      if (isShuttingDown) return;
-      const idx = WORKER_POOL.indexOf(worker);
-      if (idx !== -1) {
-        WORKER_POOL.splice(idx, 1);
-        const newWorker = cluster.fork({
-          APP_CONFIG: JSON.stringify(ACTIVE_CONFIG),
-        });
-        setupWorkerMessageHandling(newWorker);
-        WORKER_POOL.push(newWorker);
-      }
-    });
+    if (!clusterExitHandlerInstalled) {
+      clusterExitHandlerInstalled = true;
+      cluster.on("exit", (worker) => {
+        if (isShuttingDown) return;
+        const idx = WORKER_POOL.indexOf(worker);
+        if (idx !== -1) {
+          WORKER_POOL.splice(idx, 1);
+          const newWorker = cluster.fork({
+            APP_CONFIG: JSON.stringify(ACTIVE_CONFIG),
+          });
+          setupWorkerMessageHandling(newWorker);
+          WORKER_POOL.push(newWorker);
+          // Clear the dead worker's pending send queue — any buffered messages
+          // will never drain (the process is gone); they'll be handled by the
+          // master's gateway-timeout machinery instead.
+          workerSendQueues.delete(worker);
+          logger.info("Master", `Worker ${worker.id} exited unexpectedly — respawned as worker ${newWorker.id}`);
+        }
+      });
+    }
     if (ACTIVE_CONFIG.observability?.tenantDelivery?.mode === "webhook") {
       tenantLogStreamer.configure(ACTIVE_CONFIG.observability.tenantDelivery.exportEndpoints);
     }
@@ -1119,7 +1171,11 @@ export async function createServer(config: CreateServerConfig) {
           }
         },
       });
-      worker.send(
+      // Use backpressure-safe workerSend: if the IPC pipe's write buffer is full
+      // (worker.send() returns false), the message is queued and flushed on 'drain'
+      // instead of being silently dropped. Fixes 49.85% message loss under flood.
+      workerSend(
+        worker,
         JSON.stringify({
           ...enrichedPayload,
           requestId,
@@ -1557,7 +1613,7 @@ export async function createServer(config: CreateServerConfig) {
           abortHandle.aborted = true;
           if (abortHandle.requestId && abortHandle.worker) {
             try {
-              abortHandle.worker.send(JSON.stringify({ type: "ABORT_REQUEST", requestId: abortHandle.requestId }));
+              workerSend(abortHandle.worker, JSON.stringify({ type: "ABORT_REQUEST", requestId: abortHandle.requestId }));
             } catch {}
           }
           const pending = abortHandle.requestId ? pendingRequests.get(abortHandle.requestId) : undefined;
@@ -1674,7 +1730,7 @@ export async function createServer(config: CreateServerConfig) {
       WORKER_POOL.length = 0;
       for (const worker of workersToRetire) {
         try {
-          worker.send(JSON.stringify({ type: "GRACEFUL_SHUTDOWN" }));
+          workerSend(worker, JSON.stringify({ type: "GRACEFUL_SHUTDOWN" }));
         } catch {}
       }
 

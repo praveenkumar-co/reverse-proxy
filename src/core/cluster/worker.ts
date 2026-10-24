@@ -48,9 +48,42 @@ function maybeExitWhenDrained() {
   }
 }
 
+const replyQueue: string[] = [];
+let replyDrainListening = false;
+
+function safeProcessSend(msg: string): void {
+  if (!process.send) return;
+  if (replyQueue.length > 0) {
+    replyQueue.push(msg);
+    return;
+  }
+  const ok = process.send(msg);
+  if (!ok) {
+    replyQueue.push(msg);
+    if (!replyDrainListening) {
+      replyDrainListening = true;
+      const onDrain = () => {
+        while (replyQueue.length > 0) {
+          const next = replyQueue[0]!;
+          const flushed = process.send!(next);
+          if (flushed) {
+            replyQueue.shift();
+          } else {
+            (process as any).once("drain", onDrain);
+            return;
+          }
+        }
+        replyDrainListening = false;
+        maybeExitWhenDrained();
+      };
+      (process as any).once("drain", onDrain);
+    }
+  }
+}
+
 function sendReplyAndCleanup(requestId: string | undefined, reply: Record<string, unknown>) {
   if (requestId) activeRequests.delete(requestId);
-  if (process.send) process.send(JSON.stringify(reply));
+  safeProcessSend(JSON.stringify(reply));
   maybeExitWhenDrained();
 }
 

@@ -1,0 +1,19 @@
+
+server:
+  port: 9705
+  workers: 2
+  upstreams:
+    - id: u1
+      url: http://127.0.0.1:19705
+  paths:
+    - path: /
+      upstream: [u1]
+  loadBalancing:
+    strategy: round-robin
+    retry:
+      maxAttempts: 0
+      statusCodes: []
+  connectTimeoutMs: 3000
+  readTimeoutMs: 5000
+  headersTimeout: 8000
+  keepAliveTimeout: 10000
