@@ -118,27 +118,34 @@ function workerSend(worker: Worker, msg: string): void {
   }
   const ok = worker.send(msg);
   if (!ok) {
-    // Pipe full — create a queue and wait for drain
+    // Pipe full. ChildProcess does NOT emit a 'drain' event — that's a signal only
+    // Writable streams emit, and the underlying IPC channel here isn't exposed as one.
+    // Waiting on `(worker.process as any).once("drain", ...)` subscribes to an event
+    // that never fires, so queued messages sat forever (Bug A: 1,543/2,000 hung under
+    // a flood). setImmediate gives the child a tick to read from its end of the pipe,
+    // then we retry — polling for the pipe to clear rather than waiting on a dead event.
     const q: string[] = [msg];
     workerSendQueues.set(worker, q);
-    const onDrain = () => {
+    const flush = () => {
       const queue = workerSendQueues.get(worker);
-      if (!queue) return;
-      // Flush everything that accumulated while we were waiting
+      if (!queue || queue.length === 0) {
+        workerSendQueues.delete(worker);
+        return;
+      }
       while (queue.length > 0) {
         const next = queue[0]!;
         const flushed = worker.send(next);
         if (flushed) {
           queue.shift();
         } else {
-          // Still full — wait for another drain
-          (worker.process as any).once("drain", onDrain);
+          // Still full — yield control and retry next tick
+          setImmediate(flush);
           return;
         }
       }
       workerSendQueues.delete(worker);
     };
-    (worker.process as any).once("drain", onDrain);
+    setImmediate(flush);
   }
 }
 
