@@ -110,42 +110,51 @@ let isShuttingDown = false;
 // and flush it the moment the channel drains.
 const workerSendQueues = new Map<Worker, string[]>();
 function workerSend(worker: Worker, msg: string): void {
+  if (worker.isDead() || !worker.isConnected()) {
+    workerSendQueues.delete(worker);
+    return;
+  }
   const existing = workerSendQueues.get(worker);
   if (existing) {
-    // Channel is already backed up — enqueue, don't send now
     existing.push(msg);
     return;
   }
-  const ok = worker.send(msg);
-  if (!ok) {
-    // Pipe full. ChildProcess does NOT emit a 'drain' event — that's a signal only
-    // Writable streams emit, and the underlying IPC channel here isn't exposed as one.
-    // Waiting on `(worker.process as any).once("drain", ...)` subscribes to an event
-    // that never fires, so queued messages sat forever (Bug A: 1,543/2,000 hung under
-    // a flood). setImmediate gives the child a tick to read from its end of the pipe,
-    // then we retry — polling for the pipe to clear rather than waiting on a dead event.
-    const q: string[] = [msg];
-    workerSendQueues.set(worker, q);
-    const flush = () => {
-      const queue = workerSendQueues.get(worker);
-      if (!queue || queue.length === 0) {
-        workerSendQueues.delete(worker);
-        return;
-      }
-      while (queue.length > 0) {
-        const next = queue[0]!;
-        const flushed = worker.send(next);
-        if (flushed) {
-          queue.shift();
-        } else {
-          // Still full — yield control and retry next tick
-          setImmediate(flush);
+  try {
+    const ok = worker.send(msg);
+    if (!ok) {
+      const q: string[] = [msg];
+      workerSendQueues.set(worker, q);
+      const flush = () => {
+        if (worker.isDead() || !worker.isConnected()) {
+          workerSendQueues.delete(worker);
           return;
         }
-      }
-      workerSendQueues.delete(worker);
-    };
-    setImmediate(flush);
+        const queue = workerSendQueues.get(worker);
+        if (!queue || queue.length === 0) {
+          workerSendQueues.delete(worker);
+          return;
+        }
+        while (queue.length > 0) {
+          const next = queue[0]!;
+          try {
+            const flushed = worker.send(next);
+            if (flushed) {
+              queue.shift();
+            } else {
+              setImmediate(flush);
+              return;
+            }
+          } catch {
+            workerSendQueues.delete(worker);
+            return;
+          }
+        }
+        workerSendQueues.delete(worker);
+      };
+      setImmediate(flush);
+    }
+  } catch {
+    workerSendQueues.delete(worker);
   }
 }
 
@@ -865,10 +874,10 @@ export async function createServer(config: CreateServerConfig) {
         upstreamUrl: serviceInstance.url,
         clientIp,
       };
-      logger.info(
-        "LoadBalancer",
-        `Routed ${payload.requestType} ${payload.url} -> ${upstreamId} (${serviceInstance.url})`,
-      );
+      // Per-request routing log removed from the hot path: even gated by minLevel, the
+      // template literal above is still constructed as a call argument on every request,
+      // and under default (info) log level the synchronous stdout write for each one adds
+      // up to measurable event-loop lag under a high-concurrency flood.
       const workerIndex =
         attempt === 0
           ? nextWorkerIndex++ % WORKER_POOL.length
@@ -1179,15 +1188,21 @@ export async function createServer(config: CreateServerConfig) {
         },
       });
       // Use backpressure-safe workerSend: if the IPC pipe's write buffer is full
-      // (worker.send() returns false), the message is queued and flushed on 'drain'
-      // instead of being silently dropped. Fixes 49.85% message loss under flood.
-      workerSend(
-        worker,
-        JSON.stringify({
-          ...enrichedPayload,
-          requestId,
-        }),
-      );
+      // (worker.send() returns false), the message is queued and flushed via setImmediate
+      // instead of being silently dropped. Deferred one tick via the outer setImmediate so
+      // building this specific payload's JSON string doesn't run back-to-back with every
+      // other concurrent request's synchronous work in the same turn of the event loop —
+      // spreading the per-request serialization cost across more turns under a flood,
+      // rather than one long unbroken synchronous chain starving the loop.
+      setImmediate(() => {
+        workerSend(
+          worker,
+          JSON.stringify({
+            ...enrichedPayload,
+            requestId,
+          }),
+        );
+      });
     }
     let httpServer!: http.Server;
     const wsUpgradeHandler = (req: http.IncomingMessage, socket: net.Socket, head: Buffer) => {

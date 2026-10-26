@@ -59,6 +59,12 @@ function safeProcessSend(msg: string): void {
   }
   const ok = process.send(msg);
   if (!ok) {
+    // Same root cause as master.ts's workerSend: process.send()'s IPC channel does not
+    // emit a 'drain' event (that's a Writable-stream-only signal), so
+    // `(process as any).once("drain", onDrain)` subscribes to an event that never fires —
+    // queued replies sat forever, which is exactly what surfaced as 30s gateway timeouts on
+    // the master side (the worker had successfully handled the request but its reply never
+    // made it back). setImmediate polls for the pipe to clear instead of waiting on a dead event.
     replyQueue.push(msg);
     if (!replyDrainListening) {
       replyDrainListening = true;
@@ -69,14 +75,14 @@ function safeProcessSend(msg: string): void {
           if (flushed) {
             replyQueue.shift();
           } else {
-            (process as any).once("drain", onDrain);
+            setImmediate(onDrain);
             return;
           }
         }
         replyDrainListening = false;
         maybeExitWhenDrained();
       };
-      (process as any).once("drain", onDrain);
+      setImmediate(onDrain);
     }
   }
 }

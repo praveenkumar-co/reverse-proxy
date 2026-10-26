@@ -89,10 +89,15 @@ async function main(){
       config: validatedConfig,
     });
     let watchDebounceTimer: NodeJS.Timeout;
+    let lastMtimeMs = 0;
+    try { lastMtimeMs = fs.statSync(configPath).mtimeMs; } catch {}
     const triggerReload = () => {
       clearTimeout(watchDebounceTimer);
       watchDebounceTimer = setTimeout(async () => {
-        try{
+        try {
+          const stats = fs.statSync(configPath);
+          if (stats.mtimeMs <= lastMtimeMs) return;
+          lastMtimeMs = stats.mtimeMs;
           const rawConfig = await parseYAMLConfig(configPath);
           const newConfig = await validateConfig(rawConfig);
           await reloadServerConfig(newConfig);
