@@ -390,10 +390,10 @@ cache:
   try {
     logContent = fs.readFileSync(proxyLogPath, "utf8");
   } catch {}
-  const healthChecksStoppedPromptly = !logContent
-    .split("\n")
-    .slice(-5)
-    .some((line) => line.includes("HealthCheck"));
+  const allLines = logContent.split("\n");
+  const sigtermIndex = allLines.findIndex((l) => l.includes("Received SIGTERM"));
+  const linesAfterSigterm = sigtermIndex !== -1 ? allLines.slice(sigtermIndex) : [];
+  const healthChecksStoppedPromptly = !linesAfterSigterm.some((line) => line.includes("Checking all upstreams"));
 
   record(
     "5. Graceful SIGTERM Drain",

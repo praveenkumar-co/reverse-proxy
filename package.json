@@ -22,6 +22,7 @@
     "test:ddia": "node tests/ddia-benchmarks-test.mjs",
     "test:replication": "node tests/ddia-replication-suite.mjs",
     "test:replication:extreme": "node tests/ddia-replication-extreme-chaos.mjs",
+    "test:transactions": "node tests/ddia-transactions-suite.mjs",
     "test:live": "node tests/live-integration-test.mjs",
     "test:universal": "node tests/universal-app-test.mjs",
     "generate-certs": "bash scripts/generate-certs.sh",

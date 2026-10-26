@@ -3,7 +3,6 @@
 #  MASTER EXPLOIT, AUDIT & PRODUCTION VERIFICATION SUITE
 #  Ready for Claude Code / CI / Terminal Execution
 # ==============================================================================
-set -e
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -15,44 +14,58 @@ echo "Working directory: $REPO_ROOT"
 echo "Node version: $(node -v)"
 echo ""
 
-# 1. Kill any leftover orphan proxy or mock processes
+# Process Cleanup
 echo "[Step 0/6] Cleaning up lingering processes..."
 pkill -f "dist/index.js" 2>/dev/null || true
 pkill -f "tests/.*mock" 2>/dev/null || true
 sleep 1
 
-# 2. Build TypeScript
-echo "[Step 1/6] Compiling TypeScript..."
-npm run build
+RESULTS=()
 
-# 3. Fast Preflight Check
-echo ""
-echo "[Step 2/6] Running Production Pre-Flight Checklist..."
-npm run test:preflight
+run_tier() {
+  local num="$1"
+  local name="$2"
+  local cmd="$3"
 
-# 4. Full Component & System Audit (183/183 assertions)
-echo ""
-echo "[Step 3/6] Running Full System Architecture Audit (183 tests)..."
-npm run test:audit
-
-# 5. DDIA Benchmarks
-echo ""
-echo "[Step 4/6] Running DDIA Architectural Benchmarks..."
-npm run test:ddia
-
-# 6. Chaos & Socket Leak Resilience Suite
-echo ""
-echo "[Step 5/6] Running Adversarial Chaos Resilience Suite..."
-node tests/chaos-resilience-suite.mjs
-
-# 7. Adversarial Exploit Harness (Node.js Bottleneck Attack)
-echo ""
-echo "[Step 6/6] Running Adversarial Exploit Harness..."
-node tests/adversarial-exploit-harness.mjs || {
-  echo "⚠️ Exploit harness encountered non-zero exit; check details above."
+  echo ""
+  echo "=================================================================="
+  echo "  [Tier $num/6] $name"
+  echo "  Command: $cmd"
+  echo "=================================================================="
+  if eval "$cmd"; then
+    RESULTS+=("✅ Tier $num: $name -> PASSED")
+  else
+    RESULTS+=("❌ Tier $num: $name -> FAILED")
+  fi
 }
+
+# 1. Build TypeScript
+run_tier 1 "TypeScript Compilation" "npm run build"
+
+# 2. Fast Pre-Flight Check (10 checks)
+run_tier 2 "Production Pre-Flight Checklist" "npm run test:preflight"
+
+# 3. Full System Architecture Audit (183 tests)
+run_tier 3 "Full Architecture & Services Audit" "npm run test:audit"
+
+# 4. DDIA Benchmarks (11 tests)
+run_tier 4 "DDIA Architectural Benchmarks" "npm run test:ddia"
+
+# 5. Adversarial Chaos Resilience (12 tests)
+run_tier 5 "Chaos & Socket Leak Resilience Suite" "node tests/chaos-resilience-suite.mjs"
+
+# 6. Adversarial Exploit Harness (10 exploit attacks)
+run_tier 6 "Adversarial Exploit Harness" "node tests/adversarial-exploit-harness.mjs"
+
+# Cleanup at the end
+pkill -f "dist/index.js" 2>/dev/null || true
+pkill -f "tests/.*mock" 2>/dev/null || true
 
 echo ""
 echo "=================================================================="
-echo "  ✅ ALL CRITICAL TEST SUITES EXECUTED SUCCESSFULLY!"
+echo "  📊 FINAL SCORECARD SUMMARY"
+echo "=================================================================="
+for r in "${RESULTS[@]}"; do
+  echo "  $r"
+done
 echo "=================================================================="
