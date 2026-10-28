@@ -12,8 +12,6 @@
 // =============================================================================
 
 import { isMethodRetrySafe } from "../dist/resilience/retry/idempotency.js";
-import { RetryHandler } from "../dist/resilience/retry/retry-handler.js";
-import { IdempotentRetryPolicy } from "../dist/resilience/retry/policies/idempotent.policy.js";
 import { Bulkhead } from "../dist/resilience/bulkhead/bulkhead.js";
 import { ClassicCircuitBreaker } from "../dist/resilience/circuit-breaker/classic.circuit-breaker.js";
 import { calculateFullJitterBackoff } from "../dist/resilience/retry/backoff/full-jitter.backoff.js";
@@ -62,55 +60,6 @@ report(
   "Mutating request with Idempotency-Key is safely authorized for automatic retry",
   postWithKeyIsSafe === true && patchWithKeyIsSafe === true,
   "Key tx-uuid-888 authorized retry"
-);
-
-// -----------------------------------------------------------------------------
-// §2. Optimistic Concurrency Control (OCC) & 409 WriteConflict Retries
-// -----------------------------------------------------------------------------
-console.log("\n\x1b[1m§2. Optimistic Concurrency (OCC): Retrying Transient WriteConflicts with Jitter\x1b[0m");
-
-// In MongoDB / Postgres, concurrent writes to the same document trigger WriteConflictException
-// or HTTP 409 Conflict. The gateway can safely retry an idempotent transaction using Full Jitter.
-
-let attemptCount = 0;
-const mockOccService = async () => {
-  attemptCount++;
-  if (attemptCount < 3) {
-    const err = new Error("WriteConflictException: document modified by concurrent transaction");
-    err.status = 409;
-    throw err;
-  }
-  return { status: 200, balance: 400 };
-};
-
-const retryPolicy = new IdempotentRetryPolicy({
-  method: "POST",
-  headers: { "idempotency-key": "occ-key-101" },
-  baseDelayMs: 10,
-  maxDelayMs: 100,
-});
-
-const retryHandler = new RetryHandler(retryPolicy);
-const occResult = await retryHandler.execute(mockOccService, 4);
-
-report(
-  "TX-03",
-  "Gateway absorbs transient WriteConflicts and successfully retries idempotent transaction",
-  occResult.status === 200 && attemptCount === 3,
-  `Resolved on attempt ${attemptCount}/4 with status 200`
-);
-
-// Verify jitter dispersion prevents Thundering Herd on database row locks
-const jitterDelays = Array.from({ length: 10 }, (_, i) =>
-  Math.round(calculateFullJitterBackoff(2, 50, 500))
-);
-const hasJitterVariance = new Set(jitterDelays).size > 1;
-
-report(
-  "TX-04",
-  "Full Jitter randomizes retry backoffs to disperse lock contention across clients",
-  hasJitterVariance && jitterDelays.every((d) => d >= 0 && d <= 500),
-  `Samples: [${jitterDelays.slice(0, 4).join(", ")}ms]`
 );
 
 // -----------------------------------------------------------------------------

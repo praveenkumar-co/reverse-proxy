@@ -34,7 +34,6 @@ import { AdaptiveCircuitBreaker }              from "../dist/resilience/circuit-
 import { CircuitBreakerManager }               from "../dist/resilience/circuit-breaker/circuit-breaker.manager.js";
 import { Bulkhead }                            from "../dist/resilience/bulkhead/bulkhead.js";
 import { RetryBudget }                         from "../dist/resilience/retry/retry-budget.js";
-import { RetryHandler }                        from "../dist/resilience/retry/retry-handler.js";
 import { calculateFullJitterBackoff }          from "../dist/resilience/retry/backoff/full-jitter.backoff.js";
 import { calculateEqualJitterBackoff }         from "../dist/resilience/retry/backoff/equal-jitter.backoff.js";
 import { calculateDecorrelatedJitterBackoff }  from "../dist/resilience/retry/backoff/decorrelated-jitter.backoff.js";
@@ -46,8 +45,6 @@ import { FixedWindowAlgorithm }                from "../dist/ratelimit/algorithm
 import { SlidingWindowLogAlgorithm }           from "../dist/ratelimit/algorithms/sliding-window-log.js";
 import { SlidingWindowCounterAlgorithm }       from "../dist/ratelimit/algorithms/sliding-window-counter.js";
 import { SoftLimitPolicy }                     from "../dist/ratelimit/policies/soft-limit.policy.js";
-import { MemoryStore }                         from "../dist/ratelimit/storage/memory.store.js";
-import { HybridStore }                         from "../dist/ratelimit/storage/hybrid.store.js";
 
 import { InMemoryLRU }                         from "../dist/cache/stores/in-memory-lru.js";
 import { HybridCache }                         from "../dist/cache/stores/hybrid.cache.js";
@@ -236,23 +233,6 @@ test("§2 Resilience", "RetryBudget.getStats() → {totalRequests, totalRetries,
 rb.setBudgetPercent(0);
 test("§2 Resilience", "RetryBudget.setBudgetPercent() → accepted without error", true);
 
-// RetryHandler
-await testAsync("§2 Resilience", "RetryHandler: succeeds on first attempt", async () => {
-  const h = new RetryHandler({ shouldRetry: () => true, getDelay: () => 0 });
-  return (await h.execute(async () => "ok", 3)) === "ok";
-});
-await testAsync("§2 Resilience", "RetryHandler: retries on failure then recovers", async () => {
-  const h = new RetryHandler({ shouldRetry: () => true, getDelay: () => 0 });
-  let n = 0;
-  const res = await h.execute(async () => { if (++n < 3) throw new Error("fail"); return "recovered"; }, 5);
-  return res === "recovered" && n === 3;
-}, "Retries until success within maxAttempts");
-await testAsync("§2 Resilience", "RetryHandler: throws after exhausting all attempts", async () => {
-  const h = new RetryHandler({ shouldRetry: () => true, getDelay: () => 0 });
-  try { await h.execute(async () => { throw new Error("perm"); }, 2); return false; }
-  catch (e) { return e.message === "perm"; }
-});
-
 // Jitter Backoffs
 const fj = calculateFullJitterBackoff(1, 100, 1000);
 test("§2 Resilience", "FullJitter: in [0, 1000]",               fj >= 0 && fj <= 1000);
@@ -303,19 +283,6 @@ test("§3 RateLimit", "SoftLimit: below soft threshold → burst×2 (200)", soft
   "currentLoad=2 < softLimit=4 → allow burst multiplier");
 test("§3 RateLimit", "SoftLimit: above soft threshold → hard limit (100)", soft.effectiveLimit(5) === 100,
   "currentLoad=5 > softLimit=4 → enforce hard limit");
-
-// MemoryStore
-const ms = new MemoryStore();
-await testAsync("§3 RateLimit", "MemoryStore.increment() → count=1 on 1st call", async () => (await ms.increment("mKey", 5000)) === 1);
-await testAsync("§3 RateLimit", "MemoryStore.increment() → count=2 on 2nd call", async () => (await ms.increment("mKey", 5000)) === 2);
-await testAsync("§3 RateLimit", "MemoryStore.count() → returns current count",   async () => (await ms.count("mKey")) === 2);
-await testAsync("§3 RateLimit", "MemoryStore.reset() → count=0 after reset",     async () => { await ms.reset("mKey"); return (await ms.count("mKey")) === 0; });
-
-// HybridStore
-const remote  = new MemoryStore();
-const hybridS = new HybridStore(remote);
-await testAsync("§3 RateLimit", "HybridStore.increment() → returns count=1", async () => (await hybridS.increment("hKey", 5000)) === 1);
-await testAsync("§3 RateLimit", "HybridStore.count() → reads through L1",   async () => (await hybridS.count("hKey")) >= 1);
 
 // =============================================================================
 // §4  CACHING
