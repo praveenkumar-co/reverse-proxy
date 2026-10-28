@@ -532,11 +532,25 @@ test("§6 Pipeline", "createContext: method assigned",              ctx0.req.met
 test("§6 Pipeline", "createContext: url assigned",                 ctx0.req.url === "/test");
 test("§6 Pipeline", "createContext: headers accessible",           ctx0.req.headers?.host === "localhost");
 
-// X-Forwarded-For takes precedence
+// X-Forwarded-For is ignored by default (trustProxy defaults to false) — otherwise any
+// direct client could set its own X-Forwarded-For and pick whatever IP it likes, bypassing
+// per-IP rate limiting entirely.
 const xffReq = { method:"POST", url:"/x", headers:{ host:"h", "x-forwarded-for":"203.0.113.5" }, socket:{ remoteAddress:"10.0.0.1" } };
-const xffCtx = createContext(xffReq, res0);
-test("§6 Pipeline", "createContext: X-Forwarded-For overrides socket IP", xffCtx.clientIp === "203.0.113.5",
-  "Real client IP in multi-hop proxy setups comes from X-Forwarded-For");
+const xffCtxUntrusted = createContext(xffReq, res0);
+test("§6 Pipeline", "createContext: X-Forwarded-For ignored by default (untrusted peer)", xffCtxUntrusted.clientIp === "10.0.0.1",
+  "Without trustProxy+trustedProxies, the socket address is authoritative — a client cannot spoof its IP via X-Forwarded-For");
+
+// X-Forwarded-For IS honored, but only from a peer explicitly listed in trustedProxies, and
+// only the rightmost hop not itself a known trusted proxy — so an attacker prepending extra
+// fake hops onto the header can't get them taken as the real client IP either.
+const xffCtxTrusted = createContext(xffReq, res0, { trustProxy: true, trustedProxies: ["10.0.0.1"] });
+test("§6 Pipeline", "createContext: X-Forwarded-For honored from a trusted proxy peer", xffCtxTrusted.clientIp === "203.0.113.5",
+  "Real client IP in multi-hop proxy setups comes from X-Forwarded-For, once the immediate peer is explicitly trusted");
+
+const xffChainReq = { method:"POST", url:"/x", headers:{ host:"h", "x-forwarded-for":"203.0.113.5, 10.0.0.1" }, socket:{ remoteAddress:"10.0.0.1" } };
+const xffChainCtx = createContext(xffChainReq, res0, { trustProxy: true, trustedProxies: ["10.0.0.1"] });
+test("§6 Pipeline", "createContext: X-Forwarded-For reads the rightmost untrusted hop", xffChainCtx.clientIp === "203.0.113.5",
+  "Skips past the trusted proxy's own appended hop instead of blindly taking the leftmost (client-controlled) value");
 
 // RouteMatcher — uses Array.find() (first-match), so specific rules must come BEFORE general ones.
 // The production config loader sorts by path-length descending before passing to RouteMatcher.

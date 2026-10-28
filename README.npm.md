@@ -109,9 +109,11 @@ ninja-reverse-proxy --config config.yaml
 You can also embed Ninja Reverse Proxy directly inside your Node.js application:
 
 ```typescript
-import { createServer } from 'ninja-reverse-proxy';
+import { createServer, validateConfig } from 'ninja-reverse-proxy';
 
-await createServer({
+// validateConfig fills in every schema default (workers, timeouts, resilience, ...), the
+// same way a config.yaml file would when loaded via the CLI.
+const config = await validateConfig({
   server: {
     port: 8080,
     upstreams: [
@@ -128,6 +130,12 @@ await createServer({
       strategy: 'round-robin',
     }
   }
+});
+
+await createServer({
+  port: config.server.port,
+  workerCount: config.server.workers || 1,
+  config,
 });
 
 console.log('🚀 Ninja Reverse Proxy listening on port 8080');

@@ -63,6 +63,7 @@ server:
   port: ${PROXY_PORT}
   workers: 1
   trustProxy: true
+  trustedProxies: ["127.0.0.1", "::1"]
   connectTimeoutMs: 5000
   readTimeoutMs: 15000
 

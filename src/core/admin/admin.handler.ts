@@ -1,5 +1,7 @@
 import type http from "http";
 import crypto from "node:crypto";
+import dns from "node:dns";
+import net from "node:net";
 import type { RootConfigType } from "../../config/schemas/server.schema.js";
 import type { LoadBalancer } from "../../balancer/index.js";
 import type { Cache } from "../../cache/cache-manager.js";
@@ -37,6 +39,74 @@ function isAuthorizedAdminRequest(req: http.IncomingMessage, config: RootConfigT
   const provided = extractAdminToken(req);
   if (!provided) return false;
   return safeCompare(provided, expected);
+}
+
+/**
+ * Link-local and cloud metadata ranges a registered upstream must never resolve to —
+ * independent of any registrationAllowlist, since these exist specifically so an allowlist
+ * misconfiguration (or a DNS name resolving there) can't still reach them.
+ *   169.254.0.0/16  — IPv4 link-local, covers the AWS/GCP/Azure metadata IP 169.254.169.254
+ *   fe80::/10       — IPv6 link-local
+ *   fd00:ec2::254   — AWS IMDSv2 IPv6 metadata address
+ */
+function isLinkLocalOrMetadataAddress(address: string): boolean {
+  const normalized = address.replace(/^::ffff:/, "");
+  if (net.isIP(normalized) === 4) {
+    const parts = normalized.split(".").map(Number);
+    return parts[0] === 169 && parts[1] === 254;
+  }
+  if (net.isIP(normalized) === 6) {
+    const lower = normalized.toLowerCase();
+    return lower.startsWith("fe80:") || lower.startsWith("fe80::") || lower === "fd00:ec2::254";
+  }
+  return false;
+}
+
+function isAllowlistedHost(hostname: string, allowlist: string[]): boolean {
+  if (allowlist.length === 0) return true;
+  const lower = hostname.toLowerCase();
+  return allowlist.some((entry) => {
+    const e = entry.toLowerCase();
+    return e.startsWith(".") ? lower === e.slice(1) || lower.endsWith(e) : lower === e;
+  });
+}
+
+/**
+ * Validates a tenant-supplied upstream URL before the proxy ever registers (and later
+ * dispatches real traffic to) it. Without this, POST /__registry/register accepted any URL,
+ * letting a tenant point the proxy at an internal-only service or a cloud metadata endpoint
+ * (e.g. 169.254.169.254) and read back whatever it returns through the proxy's own response.
+ * Resolves the hostname via DNS rather than only pattern-matching the literal string, so a
+ * DNS name that resolves to a blocked address can't bypass the check either.
+ */
+async function assertSafeRegistrationUrl(rawUrl: string, allowlist: string[]): Promise<void> {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error("Invalid URL");
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(`Scheme "${parsed.protocol}" is not allowed — only http/https`);
+  }
+  if (!isAllowlistedHost(parsed.hostname, allowlist)) {
+    throw new Error(`Host "${parsed.hostname}" is not in the registration allowlist`);
+  }
+  const literalIpKind = net.isIP(parsed.hostname);
+  const addresses: string[] = [];
+  if (literalIpKind !== 0) {
+    addresses.push(parsed.hostname);
+  } else {
+    try {
+      const results = await dns.promises.lookup(parsed.hostname, { all: true, verbatim: true });
+      addresses.push(...results.map((r) => r.address));
+    } catch {
+      throw new Error(`Could not resolve host "${parsed.hostname}"`);
+    }
+  }
+  if (addresses.some((addr) => isLinkLocalOrMetadataAddress(addr))) {
+    throw new Error(`Host "${parsed.hostname}" resolves to a link-local/metadata address, which is never allowed`);
+  }
 }
 
 export interface AdminHandlerOptions {
@@ -196,12 +266,20 @@ export async function handleAdminRequest(options: AdminHandlerOptions): Promise<
     req.on("data", (chunk) => {
       body += chunk;
     });
-    req.on("end", () => {
+    req.on("end", async () => {
       try {
         const { id, url: serviceUrl, metadata } = JSON.parse(body);
         if (!id || !serviceUrl) {
           res.writeHead(400);
           res.end(JSON.stringify({ error: "id and url are required" }));
+          return;
+        }
+        try {
+          await assertSafeRegistrationUrl(serviceUrl, config.admin.registrationAllowlist ?? []);
+        } catch (err: any) {
+          logger.warn("Admin", `Rejected unsafe upstream registration: ${err.message}`, { id, url: serviceUrl });
+          res.writeHead(403, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: err.message }));
           return;
         }
         const service = registry.register({ id, url: serviceUrl, metadata });

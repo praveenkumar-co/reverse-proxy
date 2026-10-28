@@ -1152,11 +1152,11 @@ export async function createServer(config: CreateServerConfig) {
                 : undefined;
               await cache.set(cacheKey, cachePayload, physicalTtlSeconds, tags);
             }
+            // CORS headers are NOT set here — the corsMiddleware pipeline stage already set
+            // them (via setHeader) based on this route's actual cors config; hardcoding a
+            // wildcard+credentials pair here would silently override that decision for every
+            // response, which is exactly the vulnerability FIX-P1 closed.
             const responseHeaders: Record<string, any> = {
-              "Access-Control-Allow-Origin": "*",
-              "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
-              "Access-Control-Allow-Headers": "*",
-              "Access-Control-Allow-Credentials": "true",
               "X-Upstream-Id": upstreamId,
               ...(reply.headers || {}),
             };
@@ -1220,11 +1220,9 @@ export async function createServer(config: CreateServerConfig) {
           streamState.isCacheable = isCacheable && isCacheMethod;
           if (streamState.isCacheable) streamState.cacheChunks = [];
 
+          // CORS headers are NOT set here — see the matching comment in the legacy buffered
+          // reply branch above; the corsMiddleware pipeline stage already decided them.
           const responseHeaders: Record<string, any> = {
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
-            "Access-Control-Allow-Headers": "*",
-            "Access-Control-Allow-Credentials": "true",
             "X-Upstream-Id": upstreamId,
             ...(headersReply.headers || {}),
           };
@@ -1538,8 +1536,15 @@ export async function createServer(config: CreateServerConfig) {
       });
       const pipeline = new MiddlewarePipeline();
 
-      // CORS middleware
-      pipeline.use(corsMiddleware());
+      // CORS middleware — looked up per-route so a route can require an explicit origin list
+      // before credentialed CORS is ever sent; a route with no cors config gets the safe
+      // (non-credentialed, any-origin) default.
+      pipeline.use(async (c, next) => {
+        const url = new URL(c.req.url!, `https://${c.req.headers.host}`);
+        const pathRule = routeMatcher.match(url.pathname, c.req.method);
+        const guard = corsMiddleware(pathRule?.cors ?? {});
+        await guard(c, next);
+      });
 
       // Tracing middleware
       pipeline.use(tracingMiddleware());

@@ -227,6 +227,7 @@ server:
   listen: ${PROXY_PORT}
   workers: 2
   trustProxy: true
+  trustedProxies: ["127.0.0.1", "::1"]
   compression: false
 
 tls:

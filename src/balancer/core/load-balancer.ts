@@ -130,9 +130,17 @@ export class LoadBalancer {
     }
     return false;
   }
+  // Decay factor for the s.requests/s.failures counters strategies read (e.g.
+  // adaptive-wrr.strategy.ts's errorRate = failures/(requests+1)) — same EWMA-style decay
+  // AdaptiveCircuitBreaker already uses for its own requests/accepts counters, so a request
+  // from five minutes ago doesn't carry the same weight as one from five seconds ago.
+  private readonly requestDecayFactor = 0.95;
+
   public recordSuccess(id: string, latencyMs = 0){
     const s = this.states.get(id);
     if(!s) return;
+    s.requests = s.requests * this.requestDecayFactor + 1;
+    s.failures = s.failures * this.requestDecayFactor;
     s.responseTime =
       this.ewmaAlpha * latencyMs + (1 - this.ewmaAlpha) * s.responseTime;
     const cb = circuitBreakerManager.getOrCreate(
@@ -172,6 +180,8 @@ export class LoadBalancer {
   public recordFailure(id: string){
     const s = this.states.get(id);
     if(!s) return;
+    s.requests = s.requests * this.requestDecayFactor + 1;
+    s.failures = s.failures * this.requestDecayFactor + 1;
     const cb = circuitBreakerManager.getOrCreate(
       id,
       this.circuitBreakerConfig.mode,

@@ -50,6 +50,7 @@ function mapBackwardCompatibleKeys(configParsed: any): any {
         cache: p.cache,
         canary: p.canary,
         auth: p.auth,
+        cors: p.cors,
       };
     });
   } else if (configParsed.routes){
@@ -69,6 +70,7 @@ function mapBackwardCompatibleKeys(configParsed: any): any {
       cache: r.cache,
       canary: r.canary,
       auth: r.auth,
+      cors: r.cors,
     }));
   }
 

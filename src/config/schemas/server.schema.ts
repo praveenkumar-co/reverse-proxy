@@ -81,6 +81,15 @@ const routeAuthSchema = z
   })
   .optional();
 
+// credentials requires an explicit, non-empty origins list — enforced in cors.middleware.ts
+// (a route with credentials:true but no origins just never sends the credentials header).
+const routeCorsSchema = z
+  .object({
+    origins: z.array(z.string()).optional(),
+    credentials: z.boolean().default(false),
+  })
+  .optional();
+
 const routeSchema = z.object({
   path: z.string(),
   upstreams: z.array(z.string()),
@@ -90,6 +99,7 @@ const routeSchema = z.object({
   cache: pathCacheSchema,
   canary: canarySchema,
   auth: routeAuthSchema,
+  cors: routeCorsSchema,
 });
 
 
@@ -97,7 +107,11 @@ export const serverSchema = z.object({
   host: z.string().default("0.0.0.0"),
   port: z.number().default(8080),
   workers: z.number().default(0), // 0 = auto (CPU count)
-  trustProxy: z.boolean().default(true),
+  // Defaults to false: trusting X-Forwarded-For from an unverified peer lets any client claim
+  // any IP it likes, which bypasses per-IP rate limiting. Must be explicitly enabled, and only
+  // takes effect when trustedProxies is non-empty (enforced below) — the header is honored
+  // only from those specific known peers.
+  trustProxy: z.boolean().default(false),
   // Peer socket addresses (post ::ffff:-normalization) allowed to supply X-Forwarded-For
   // even when trustProxy is false — e.g. a known internal load balancer's IP.
   trustedProxies: z.array(z.string()).optional(),
@@ -134,7 +148,14 @@ export const serverSchema = z.object({
   accessLog: z.string().optional(),
   eventLog: z.string().optional(),
   headers: z.array(z.any()).optional(),
-});
+}).refine(
+  (data) => !data.trustProxy || (data.trustedProxies && data.trustedProxies.length > 0),
+  {
+    message:
+      "server.trustProxy is true but server.trustedProxies is empty — list the specific proxy IPs allowed to set X-Forwarded-For, or leave trustProxy false",
+    path: ["trustedProxies"],
+  },
+);
 
 export const tlsSchema = z
   .object({

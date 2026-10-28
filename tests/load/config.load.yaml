@@ -4,6 +4,7 @@ server:
   listen: 9080
   workers: 6
   trustProxy: true
+  trustedProxies: ["127.0.0.1", "::1"]
   connectTimeoutMs: 3000
   readTimeoutMs: 5000
   compression: false

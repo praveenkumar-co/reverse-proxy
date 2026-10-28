@@ -203,6 +203,7 @@ server:
   listen: ${PROXY_PORT}
   workers: ${PROXY_WORKERS}
   trustProxy: true
+  trustedProxies: ["127.0.0.1", "::1"]
   compression: false
   backlog: ${LISTEN_BACKLOG}
 

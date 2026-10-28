@@ -59,6 +59,10 @@ export class TenantLogStreamer {
   public async flush(){
     if (this.globalSize === 0) return;
 
+    // Flushed in parallel rather than one tenant awaited after another — previously a single
+    // slow or unreachable webhook delayed every other tenant's logs behind it (head-of-line
+    // blocking), even though they share nothing but this one interval timer.
+    const tasks: Promise<void>[] = [];
     for (const [tenantId, entries] of this.queue.entries()){
       if (entries.length === 0) continue;
 
@@ -70,13 +74,14 @@ export class TenantLogStreamer {
       }
 
       const batch = entries.splice(0, entries.length);
-      this.globalSize -= batch.length; 
+      this.globalSize -= batch.length;
 
-      await this.sendLogs(tenantId, destination, batch);
+      tasks.push(this.sendLogs(tenantId, destination, batch));
     }
+    await Promise.all(tasks);
   }
 
-  private async sendLogs(tenantId: string, destination: string, logs: TenantLogEntry[]){
+  private async sendLogs(tenantId: string, destination: string, logs: TenantLogEntry[], attempt = 0): Promise<void> {
     try {
       const response = await fetch(destination, {
         method: "POST",
@@ -85,12 +90,19 @@ export class TenantLogStreamer {
           "X-Tenant-ID": tenantId,
         },
         body: JSON.stringify({ tenantId, logs }),
+        // Bounds how long one tenant's unreachable/slow webhook can occupy this attempt —
+        // without it, a hanging fetch() never resolves and this batch of logs is held
+        // forever rather than being retried or dropped.
+        signal: AbortSignal.timeout(5000),
       });
       if (!response.ok){
         logger.warn(`TenantLogStreamer:${process.pid}`, `Webhook response failed for tenant ${tenantId}: ${response.statusText}`);
       }
     } catch (err: any){
-      logger.error(`TenantLogStreamer:${process.pid}`, `Failed to dispatch logs to tenant ${tenantId} webhook: ${err.message}`);
+      if (attempt < 1){
+        return this.sendLogs(tenantId, destination, logs, attempt + 1);
+      }
+      logger.error(`TenantLogStreamer:${process.pid}`, `Failed to dispatch logs to tenant ${tenantId} webhook after retry: ${err.message}`);
     }
   }
 }

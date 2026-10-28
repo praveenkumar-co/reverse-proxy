@@ -15,7 +15,6 @@ import { PatternInvalidator } from "./invalidation/pattern.invalidator.js";
 
 export class Cache {
   private client!: RedisClientType;
-  private subClient?: RedisClientType;
   private store!: ICache;
   private invalidator?: DebeziumInvalidator;
   private ttlSeconds: number;
@@ -50,6 +49,10 @@ export class Cache {
           return retries * 500;
         },
       },
+      // Commands issued while disconnected fail fast instead of queuing indefinitely —
+      // HybridCache's try/catch around every L2 call then falls back to its L1 memory cache
+      // immediately rather than a request hanging on a command that may never get sent.
+      disableOfflineQueue: true,
     }) as RedisClientType;
     this.client.on("error", (err) => {
       logger.error("Cache", `Redis error: ${err.message}`);
@@ -79,57 +82,28 @@ export class Cache {
     return this.client;
   }
 
+  /**
+   * Does not block on Redis actually becoming reachable — connecting is kicked off in the
+   * background and this returns immediately, so a down/unreachable Redis no longer stalls
+   * proxy startup for ~11s (5 reconnect attempts at 500ms/1000ms/.../2500ms before node-redis
+   * gives up and rejects). The proxy serves from HybridCache's L1 memory layer alone until
+   * the "connect" event fires and flips `connected` to true.
+   *
+   * CDC used to subscribe over Redis pub/sub, which silently drops events published while
+   * reconnecting (pub/sub has no replay or acknowledgment) — that subscription has been
+   * removed rather than reworked into a Streams consumer group. Debezium events can still be
+   * delivered via handleDebeziumEvent() (e.g. a webhook endpoint that calls it directly) when
+   * `debezium.enabled` is configured.
+   */
   async connect(): Promise<void> {
     if(!this.enabled){
       logger.info("Cache", "Caching disabled — skipping Redis connection");
       return;
     }
-    try {
-      await this.client.connect();
-      this.connected = true;
-
-      if(this.config.debezium?.enabled){
-        await this.setupDebeziumSubscriber();
-      }
-    } catch (err: any){
+    this.client.connect().catch((err: any) => {
       logger.error("Cache", `Failed to connect to Redis: ${err.message}`);
       this.connected = false;
-    }
-  }
-  private async setupDebeziumSubscriber(): Promise<void> {
-    const dbzConfig = this.config.debezium!;
-    try {
-      this.subClient = createClient({
-        socket: {
-          host: this.config.host,
-          port: this.config.port,
-        },
-      }) as RedisClientType;
-
-      this.subClient.on("error", (err) => {
-        logger.error("Cache", `Debezium subscriber Redis error: ${err.message}`);
-      });
-
-      await this.subClient.connect();
-      logger.info(
-        "Cache",
-        `Debezium subscriber connected, listening on channel: ${dbzConfig.channel}`,
-      );
-      this.invalidator = new DebeziumInvalidator(
-        dbzConfig.mappings ?? [],
-        (pattern) => this.invalidate(pattern),
-      );
-
-      await this.subClient.subscribe(dbzConfig.channel, async (message) => {
-        try {
-          await this.invalidator!.handle(message);
-        } catch (err: any){
-          logger.error("Cache", `Debezium handle failed: ${err.message}`);
-        }
-      });
-    } catch (err: any){
-      logger.error("Cache", `Failed to setup Debezium subscriber: ${err.message}`);
-    }
+    });
   }
 
   /**
@@ -244,9 +218,6 @@ export class Cache {
   async disconnect(): Promise<void> {
     if(this.connected){
       try {
-        if(this.subClient){
-          await this.subClient.quit();
-        }
         await this.client.quit();
       } catch {}
       this.connected = false;

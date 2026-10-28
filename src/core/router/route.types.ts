@@ -16,6 +16,11 @@ export interface RouteAuthConfig {
   tokens: string[];
 }
 
+export interface RouteCorsConfig {
+  origins?: string[];
+  credentials?: boolean;
+}
+
 export interface RouteRule {
   path: string;
   upstream: string[];
@@ -26,5 +31,6 @@ export interface RouteRule {
   stripPrefix?: boolean;
   canary?: CanaryConfig;
   auth?: RouteAuthConfig;
+  cors?: RouteCorsConfig;
 }
 

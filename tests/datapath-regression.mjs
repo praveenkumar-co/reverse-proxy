@@ -307,7 +307,6 @@ const CONFIG_YAML = `
 server:
   listen: ${PROXY_PORT}
   workers: 1
-  trustProxy: true
   compression: false
   maxResponseBytes: ${30 * 1024 * 1024}
 
