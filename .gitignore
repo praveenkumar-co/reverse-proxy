@@ -24,3 +24,4 @@ scripts/**/*.d.ts.map
 flow_archit.t
 .DS_Store
 .excalidraw
+_*_cfg_*.yaml

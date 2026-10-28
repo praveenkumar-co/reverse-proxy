@@ -233,8 +233,6 @@ reverse-proxy/
 │   │   │   └── middleware.pipeline.ts         # Onion-model middleware pipeline runner
 │   │   ├── proxy/                             # Network Proxying & Connection Pools
 │   │   │   ├── connection.pool.ts             # Persistent httpAgent & httpsAgent connection pools
-│   │   │   ├── http.handler.ts                # HTTP request streaming & response forwarding
-│   │   │   ├── upstream.client.ts             # Upstream client request dispatcher
 │   │   │   └── websocket.handler.ts           # L4 bidirectional TCP pipe tunnel for WebSockets
 │   │   └── router/                            # Route Matching & Path Rules
 │   │       ├── route.matcher.ts               # First-match router with method guards
@@ -306,10 +304,6 @@ reverse-proxy/
 │   │   │   ├── classic.circuit-breaker.ts     # CLOSED → OPEN → HALF_OPEN state machine
 │   │   │   ├── contracts/
 │   │   │   │   └── circuit-breaker.interface.ts # ICircuitBreaker contract
-│   │   │   └── states/                        # Circuit breaker states
-│   │   │       ├── closed.state.ts            # ClosedState: normal traffic flow
-│   │   │       ├── half-open.state.ts         # HalfOpenState: trial request probing
-│   │   │       └── open.state.ts              # OpenState: fast-fail 503 rejection
 │   │   └── retry/                             # Retry Engine
 │   │       ├── retry-budget.ts                # Capped retry ratio budget (e.g. max 15%)
 │   │       ├── retry-handler.ts               # Execution wrapper with retry policies

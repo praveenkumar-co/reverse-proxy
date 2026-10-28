@@ -1,9 +1,7 @@
 export * from './rate-limiter.js';
 export type { RateLimiterOptions } from './rate-limiter.js';
-export type { ILimiter } from './contracts/limiter.interface.js';
 export type { IRateLimitStore } from './contracts/storage.interface.js';
 export { MemoryStore } from './storage/memory.store.js';
-export { RedisStore } from './storage/redis.store.js';
 export { HybridStore } from './storage/hybrid.store.js';
 export { FixedWindowAlgorithm } from './algorithms/fixed-window.js';
 export { SlidingWindowLogAlgorithm } from './algorithms/sliding-window-log.js';
