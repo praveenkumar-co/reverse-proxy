@@ -12,6 +12,8 @@ An enterprise-grade, high-throughput reverse proxy and resilience gateway built 
 - **Traffic Management & Resilience**: `npm run test:ddia` (11 distributed systems benchmarks)
 - **Chaos & Socket Leak Suite**: `node tests/chaos-resilience-suite.mjs` (12/12 adversarial tests)
 - **Aggressive Fire Stress Test**: `npm run test:fire` (10,000 req wave, backend drop chaos, memory fence)
+- **Deep Architecture & Wiring Audit**: `npm run audit:arch` (Evaluates 125 files, reachability graph, 18 capabilities)
+- **Claude Code Audit Directive**: See `AUDIT_DIRECTIVE_FOR_CLAUDE.md` for full instructions to perform an adversarial codebase inspection
 - **Master Verification Runner**: `bash scripts/master-test-and-audit.sh` (Runs all suites in sequence)
 
 ## Architecture Overview

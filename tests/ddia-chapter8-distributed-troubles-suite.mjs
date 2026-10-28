@@ -1,5 +1,6 @@
 import http from "node:http";
 import net from "node:net";
+import fs from "node:fs";
 import { performance } from "node:perf_hooks";
 import { calculateFullJitterBackoff } from "../dist/resilience/retry/backoff/full-jitter.backoff.js";
 import { AdaptiveCircuitBreaker } from "../dist/resilience/circuit-breaker/adaptive.circuit-breaker.js";
@@ -134,8 +135,11 @@ console.log("==================================================================\
 // -----------------------------------------------------------------------------
 console.log("\x1b[1m§1. Unreliable Networks: Deterministic Socket Timeouts under TCP Black Hole\x1b[0m");
 
-const blackHoleServer = net.createServer(() => {
-  // Accepts TCP handshake but sends no HTTP data (simulating silent partition)
+const activeSockets = new Set();
+const blackHoleServer = net.createServer((sock) => {
+  activeSockets.add(sock);
+  sock.on("close", () => activeSockets.delete(sock));
+  sock.on("error", () => {});
 });
 await new Promise((resolve) => blackHoleServer.listen(0, "127.0.0.1", resolve));
 const blackHolePort = blackHoleServer.address().port;
@@ -165,6 +169,12 @@ try {
 }
 
 const elapsedNet = performance.now() - startNet;
+
+// Clean up sockets before closing server to prevent hanging
+for (const s of activeSockets) {
+  s.destroy();
+}
+activeSockets.clear();
 await new Promise((resolve) => blackHoleServer.close(resolve));
 
 report(
@@ -260,6 +270,10 @@ for (let i = 0; i < 30; i++) {
   else adaptiveBreaker.recordFailure();
 }
 const pausedDropProb = adaptiveBreaker.getStats().dropProbability;
+
+if (typeof gcServer.closeAllConnections === "function") {
+  gcServer.closeAllConnections();
+}
 await new Promise((resolve) => gcServer.close(resolve));
 
 report(
@@ -298,6 +312,9 @@ const r3 = await realHttpRequest(fencePort, "POST", "/state", { "x-fencing-token
 const r4 = await realHttpRequest(fencePort, "POST", "/state", {});
 const r5 = await realHttpRequest(fencePort, "GET", "/state", {});
 
+if (typeof fenceServer.closeAllConnections === "function") {
+  fenceServer.closeAllConnections();
+}
 await new Promise((resolve) => fenceServer.close(resolve));
 
 report(
@@ -326,10 +343,11 @@ report(
 // -----------------------------------------------------------------------------
 console.log("\n\x1b[1m§6. Dynamic Discovery: Dead Node Eviction upon Heartbeat Lease Expiry\x1b[0m");
 
+const registryTestFile = `proxy_registry_test_ch8_${Date.now()}.json`;
 const registry = new ServiceRegistry({
   heartbeatTimeoutMs: 60,
   cleanupIntervalMs: 20,
-  persistencePath: "proxy_registry_test_ch8.json",
+  persistencePath: registryTestFile,
 });
 
 registry.register({ id: "node-healthy", url: "http://127.0.0.1:9001", metadata: { dynamic: "true" } });
@@ -345,6 +363,13 @@ const healthy = registry.getHealthy();
 const healthyContainsActive = healthy.some((s) => s.id === "node-healthy");
 const healthyExcludesDead = !healthy.some((s) => s.id === "node-partitioned");
 const deadStatusIsDown = registry.get("node-partitioned")?.status === "DOWN";
+
+// Clean up registry test file
+try {
+  if (fs.existsSync(registryTestFile)) {
+    fs.unlinkSync(registryTestFile);
+  }
+} catch {}
 
 report(
   "EVICT-01",

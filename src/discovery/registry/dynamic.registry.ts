@@ -51,16 +51,19 @@ export class ServiceRegistry {
     }
   }
   private async saveSnapshot(){
+    const tmpFile = `${this.persistencePath}.tmp.${process.pid}.${Date.now()}_${Math.random().toString(36).slice(2)}`;
     try{
       const plainObj: Record<string, ServiceInstance> = {};
       for(const [id, s] of this.services.entries()){
         plainObj[id] = s;
       }
-      const tmpFile = `${this.persistencePath}.tmp.${process.pid}.${Date.now()}_${Math.random().toString(36).slice(2)}`;
       await fs.writeFile(tmpFile, JSON.stringify(plainObj, null, 2), "utf-8");
       await fs.rename(tmpFile, this.persistencePath);
     }catch (err: any){
       logger.error("Registry", `Failed to save disk snapshot: ${err.message}`);
+      try {
+        await fs.unlink(tmpFile);
+      } catch {}
     }
   }
   register(
