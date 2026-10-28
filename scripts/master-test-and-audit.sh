@@ -48,8 +48,8 @@ run_tier 2 "Production Pre-Flight Checklist" "npm run test:preflight"
 # 3. Full System Architecture Audit (183 tests)
 run_tier 3 "Full Architecture & Services Audit" "npm run test:audit"
 
-# 4. DDIA Benchmarks (11 tests)
-run_tier 4 "DDIA Architectural Benchmarks" "npm run test:ddia"
+# 4. Traffic Management & Resilience Benchmarks (11 tests)
+run_tier 4 "Traffic Management & Resilience Benchmarks" "npm run test:ddia"
 
 # 5. Adversarial Chaos Resilience (12 tests)
 run_tier 5 "Chaos & Socket Leak Resilience Suite" "node tests/chaos-resilience-suite.mjs"

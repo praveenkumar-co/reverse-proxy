@@ -1,11 +1,11 @@
 // =============================================================================
-// NINJA REVERSE PROXY — DDIA ARCHITECTURAL BENCHMARK & PRINCIPLES VERIFICATION
+// REVERSE PROXY — DISTRIBUTED RESILIENCE & LOAD BALANCER BENCHMARKS
 // =============================================================================
-// Proves the 4 core concepts from Designing Data-Intensive Applications (DDIA):
+// Verifies core distributed systems traffic management capabilities:
 //   1. Head-of-Line Blocking Mitigation (Round-Robin vs. Least-Connections)
 //   2. Tail Latency & Percentiles (p50, p90, p95, p99, p99.9 via Prometheus Histograms)
 //   3. Bulkhead Concurrency Isolation (Preventing Queue Saturation)
-//   4. Google SRE Adaptive Circuit Breaker (Client-Side Throttling)
+//   4. Adaptive Circuit Breaker (Client-Side Throttling)
 //   5. Thundering Herd Prevention (Full Jitter Backoff vs. Plain Exponential)
 // =============================================================================
 
@@ -40,7 +40,7 @@ function percentile(sortedArr, p) {
 }
 
 console.log("\n==================================================================");
-console.log("   DDIA ARCHITECTURAL BENCHMARK & LOAD BALANCER VERIFICATION     ");
+console.log("   DISTRIBUTED RESILIENCE & TRAFFIC MANAGEMENT BENCHMARKS         ");
 console.log("==================================================================\n");
 
 // -----------------------------------------------------------------------------

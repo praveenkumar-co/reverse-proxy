@@ -23,11 +23,13 @@
     "test:replication": "node tests/ddia-replication-suite.mjs",
     "test:replication:extreme": "node tests/ddia-replication-extreme-chaos.mjs",
     "test:transactions": "node tests/ddia-transactions-suite.mjs",
+    "test:chapter8": "node tests/ddia-chapter8-distributed-troubles-suite.mjs",
     "test:live": "node tests/live-integration-test.mjs",
     "test:universal": "node tests/universal-app-test.mjs",
     "generate-certs": "bash scripts/generate-certs.sh",
     "lint": "eslint src --ext .ts",
-    "test:exploit": "node tests/adversarial-exploit-harness.mjs"
+    "test:exploit": "node tests/adversarial-exploit-harness.mjs",
+    "test:fire": "node tests/aggressive-fire-test.mjs"
   },
   "keywords": [
     "reverse-proxy",

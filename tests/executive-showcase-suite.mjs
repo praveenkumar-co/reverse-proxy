@@ -525,10 +525,10 @@ async function pillar1() {
 }
 
 // ----------------------------------------------------------------------------
-// Pillar 2: DDIA Load Balancing
+// Pillar 2: Traffic Routing & Load Balancing
 // ----------------------------------------------------------------------------
 async function pillar2() {
-  console.log("\n--- Pillar 2: DDIA Load Balancing ---");
+  console.log("\n--- Pillar 2: Traffic Routing & Load Balancing ---");
 
   const beforeFast = state.fast.calls;
   const beforeSlow = state.slow.calls;
@@ -537,7 +537,7 @@ async function pillar2() {
   const fastShare = state.fast.calls - beforeFast;
   const slowShare = state.slow.calls - beforeSlow;
   record(
-    "2. DDIA Load Balancing",
+    "2. Traffic Routing & Load Balancing",
     "Least-connections shifts load to the fast backend over the slow one",
     fastShare > slowShare,
     `fast=${fastShare}, slow=${slowShare} (of ${N})`,
@@ -545,7 +545,7 @@ async function pillar2() {
 
   const rCanary = await request("GET", "/canary-test", { headers: { "x-canary": "beta" } });
   record(
-    "2. DDIA Load Balancing",
+    "2. Traffic Routing & Load Balancing",
     "Canary header x-canary:beta forces traffic to the candidate upstream",
     rCanary.headers["x-upstream-id"] === "canary-candidate",
     `routed-to=${rCanary.headers["x-upstream-id"]}`,
@@ -566,7 +566,7 @@ async function pillar2() {
     allPinned = false;
   }
   record(
-    "2. DDIA Load Balancing",
+    "2. Traffic Routing & Load Balancing",
     "Sticky session cookie pins subsequent requests to the same upstream",
     Boolean(cookieStr) && allPinned,
     `pinned-to=${pinnedUpstream}, cookie-set=${Boolean(cookieStr)}`,
