@@ -3,7 +3,14 @@ import https from "https";
 import { readFileSync } from "fs";
 import zlib from "zlib";
 import { rootConfigSchema } from "../../config/schemas/server.schema.js";
-import { workerMessageSchema, type WorkerReplyMessageType } from "./ipc.protocol.js";
+import {
+  workerMessageSchema,
+  type WorkerReplyMessageType,
+  type HttpReplyHeadersType,
+  type HttpReplyChunkType,
+  type HttpReplyEndType,
+  type HttpReplyAbortType,
+} from "./ipc.protocol.js";
 import { logger } from "../../observability/logger/logger.js";
 import { tunnelWebSocket } from "../proxy/websocket.handler.js";
 import net from "net";
@@ -48,49 +55,29 @@ function maybeExitWhenDrained() {
   }
 }
 
-const replyQueue: string[] = [];
-let replyDrainListening = false;
-
-function safeProcessSend(msg: string): void {
-  if (!process.send) return;
-  if (replyQueue.length > 0) {
-    replyQueue.push(msg);
+function safeProcessSend(msg: string, onSent?: () => void): void {
+  if (!process.send) {
+    onSent?.();
     return;
   }
-  const ok = process.send(msg);
-  if (!ok) {
-    // Same root cause as master.ts's workerSend: process.send()'s IPC channel does not
-    // emit a 'drain' event (that's a Writable-stream-only signal), so
-    // `(process as any).once("drain", onDrain)` subscribes to an event that never fires —
-    // queued replies sat forever, which is exactly what surfaced as 30s gateway timeouts on
-    // the master side (the worker had successfully handled the request but its reply never
-    // made it back). setImmediate polls for the pipe to clear instead of waiting on a dead event.
-    replyQueue.push(msg);
-    if (!replyDrainListening) {
-      replyDrainListening = true;
-      const onDrain = () => {
-        while (replyQueue.length > 0) {
-          const next = replyQueue[0]!;
-          const flushed = process.send!(next);
-          if (flushed) {
-            replyQueue.shift();
-          } else {
-            setImmediate(onDrain);
-            return;
-          }
-        }
-        replyDrainListening = false;
-        maybeExitWhenDrained();
-      };
-      setImmediate(onDrain);
-    }
+  // process.send() returning false means Node's own IPC channel buffer is over its high
+  // water mark — the message is still queued and will be delivered by Node itself. It does
+  // NOT mean the send failed. Re-sending here (as this used to) put a second copy of the same
+  // message on the wire under backpressure, which is what caused duplicate upstream POSTs
+  // under concurrent load — the worker-side half of the same bug as master.ts's workerSend.
+  // The optional callback form tells us when this specific write actually completed, which is
+  // what graceful-shutdown draining needs (so the process doesn't exit before its last reply
+  // is flushed) without resending anything.
+  try {
+    process.send(msg, onSent as any);
+  } catch {
+    onSent?.();
   }
 }
 
 function sendReplyAndCleanup(requestId: string | undefined, reply: Record<string, unknown>) {
   if (requestId) activeRequests.delete(requestId);
-  safeProcessSend(JSON.stringify(reply));
-  maybeExitWhenDrained();
+  safeProcessSend(JSON.stringify(reply), () => maybeExitWhenDrained());
 }
 
 process.on("message", async (rawMsg: any, handle?: any) => {
@@ -317,7 +304,12 @@ process.on("message", async (rawMsg: any, handle?: any) => {
     }
 
     if (msg.body) {
-      forwardHeaders["content-length"] = Buffer.byteLength(msg.body).toString();
+      // msg.body is the binary-safe latin1 ("binary") encoding master.ts uses to relay
+      // arbitrary request bytes through JSON — Buffer.byteLength's default utf8 encoding
+      // would overcount any byte >= 0x80, understating how much data proxyReq.write()
+      // actually sends below and leaving the upstream's parser waiting for bytes that will
+      // never arrive.
+      forwardHeaders["content-length"] = Buffer.byteLength(msg.body, "binary").toString();
     }
 
     const requestOptions: http.RequestOptions = {
@@ -332,98 +324,208 @@ process.on("message", async (rawMsg: any, handle?: any) => {
         ...(caBuffer ? { ca: caBuffer } : {}),
       }),
     };
+    const finalizeActiveRequest = () => {
+      if (raw.requestId) activeRequests.delete(raw.requestId);
+      maybeExitWhenDrained();
+    };
     const proxyReq = transport.request(requestOptions, (upstreamRes) => {
       clearTimeout(connectTimeoutTimer);
-      const chunks: Buffer[] = [];
-      let receivedBytes = 0;
-      let aborted = false;
-      upstreamRes.on("data", (chunk: Buffer) => {
-        if (aborted) return;
-        receivedBytes += chunk.length;
-        // Symmetric to the request-side cap: an upstream (compromised, misconfigured, or
-        // simply serving a huge payload) could otherwise exhaust worker memory, since the
-        // whole response is buffered before any of it is relayed to the client.
-        if (receivedBytes > maxResponseBytes) {
-          aborted = true;
-          clearTimeout(readTimeoutTimer);
-          upstreamRes.destroy();
-          proxyReq.destroy();
-          logger.error(
-            `Worker:${process.pid}`,
-            `Upstream response exceeded ${maxResponseBytes}-byte cap — aborting`,
-            { upstreamId: raw.upstreamId, url: requestUrl },
-          );
-          recordAndLog(502, receivedBytes, performance.now() - startTime);
-          const reply: WorkerReplyMessageType = {
-            requestId: raw.requestId,
-            errorCode: "502",
-            error: "Upstream response exceeded maximum allowed size",
-            data: "",
-          };
-          sendReplyAndCleanup(raw.requestId, reply);
-          return;
-        }
-        chunks.push(chunk);
-      });
-      upstreamRes.on("end", () => {
-        if (aborted) return;
-        clearTimeout(readTimeoutTimer);
-        const bodyBuffer = Buffer.concat(chunks);
-        const acceptEncoding = msg.headers["accept-encoding"] || "";
-        const contentType = upstreamRes.headers["content-type"] || "";
-        const isCompressible = /json|text|javascript|css/.test(contentType);
-        const upstreamEncoding = upstreamRes.headers["content-encoding"];
-        const forwardHeaders = { ...upstreamRes.headers };
-        delete forwardHeaders["content-encoding"];
-        const latency = performance.now() - startTime;
-        recordAndLog(upstreamRes.statusCode ?? 200, bodyBuffer.length, latency);
-        const sendReply = (rawBody: Buffer) => {
-          if (
-            workerConfig.server.compression &&
-            isCompressible &&
-            acceptEncoding.includes("gzip")
-          ) {
-            zlib.gzip(rawBody, (err, compressed) => {
-              const reply = {
-                requestId: raw.requestId,
-                data: err ? rawBody.toString("utf8") : compressed.toString("base64"),
-                isCompressed: !err,
-                encoding: err ? undefined : "gzip",
-                statusCode: upstreamRes.statusCode ?? 200,
-                headers: err ? forwardHeaders : { ...forwardHeaders, "content-encoding": "gzip" },
-              };
-              sendReplyAndCleanup(raw.requestId, reply);
-            });
-          } else {
+      const statusCode = upstreamRes.statusCode ?? 200;
+      const isErrorish = statusCode >= 400;
+
+      if (isErrorish) {
+        // Error-ish responses stay fully buffered: master.ts's retry/stale-if-error decision
+        // needs the complete body before it can choose to retry, serve a cached fallback, or
+        // relay the error as-is — and once that decision is made it may discard this body
+        // entirely, which only works if nothing has been written to the client yet. Error
+        // bodies are small in practice, so buffering them costs nothing, unlike a success body
+        // (which streams below).
+        const chunks: Buffer[] = [];
+        let receivedBytes = 0;
+        let aborted = false;
+        upstreamRes.on("data", (chunk: Buffer) => {
+          if (aborted) return;
+          receivedBytes += chunk.length;
+          if (receivedBytes > maxResponseBytes) {
+            aborted = true;
+            clearTimeout(readTimeoutTimer);
+            upstreamRes.destroy();
+            proxyReq.destroy();
+            logger.error(
+              `Worker:${process.pid}`,
+              `Upstream response exceeded ${maxResponseBytes}-byte cap — aborting`,
+              { upstreamId: raw.upstreamId, url: requestUrl },
+            );
+            recordAndLog(502, receivedBytes, performance.now() - startTime);
             const reply: WorkerReplyMessageType = {
               requestId: raw.requestId,
-              data: rawBody.toString("utf8"),
-              statusCode: upstreamRes.statusCode ?? 200,
-              headers: forwardHeaders,
+              errorCode: "502",
+              error: "Upstream response exceeded maximum allowed size",
+              data: "",
             };
             sendReplyAndCleanup(raw.requestId, reply);
+            return;
           }
-        };
-        if (upstreamEncoding === "gzip") {
-          zlib.gunzip(bodyBuffer, (err, decompressed) => {
-            if (err) {
-              const reply: WorkerReplyMessageType = {
-                requestId: raw.requestId,
-                data: bodyBuffer.toString("base64"),
-                isCompressed: true,
-                encoding: "gzip",
-                statusCode: upstreamRes.statusCode ?? 200,
-                headers: upstreamRes.headers,
-              };
-              sendReplyAndCleanup(raw.requestId, reply);
-            } else {
-              sendReply(decompressed);
-            }
+          chunks.push(chunk);
+        });
+        upstreamRes.on("end", () => {
+          if (aborted) return;
+          clearTimeout(readTimeoutTimer);
+          const bodyBuffer = Buffer.concat(chunks);
+          const latency = performance.now() - startTime;
+          recordAndLog(statusCode, bodyBuffer.length, latency);
+          const reply: WorkerReplyMessageType = {
+            requestId: raw.requestId,
+            // Binary-safe latin1 round-trip through JSON — unlike utf8, it never mangles a
+            // byte sequence that happens to be invalid UTF-8 (e.g. a binary error body).
+            data: bodyBuffer.toString("binary"),
+            statusCode,
+            headers: { ...upstreamRes.headers },
+          };
+          sendReplyAndCleanup(raw.requestId, reply);
+        });
+        return;
+      }
+
+      // Success-ish response: stream headers, then body chunks, then end, as they arrive —
+      // so time-to-first-byte tracks the upstream's own TTFB (required for SSE/long-poll)
+      // instead of waiting for the whole body, and a large body is never buffered whole in
+      // worker memory.
+      const acceptEncoding = msg.headers["accept-encoding"] || "";
+      const contentType = String(upstreamRes.headers["content-type"] || "");
+      const isCompressible = /json|text|javascript|css/.test(contentType);
+      const upstreamEncoding = upstreamRes.headers["content-encoding"];
+      // Only ever recompress a response the upstream sent uncompressed. An already-compressed
+      // upstream response is passed through untouched — bytes and Content-Encoding both —
+      // instead of being decompressed and (sometimes) recompressed as it was before.
+      const shouldGzip =
+        !upstreamEncoding &&
+        Boolean(workerConfig.server.compression) &&
+        isCompressible &&
+        acceptEncoding.includes("gzip");
+
+      const replyHeaders: Record<string, any> = { ...upstreamRes.headers };
+      if (shouldGzip) {
+        replyHeaders["content-encoding"] = "gzip";
+        delete replyHeaders["content-length"]; // length changes once recompressed
+      }
+
+      safeProcessSend(
+        JSON.stringify({
+          type: "HTTP_REPLY_HEADERS",
+          requestId: raw.requestId,
+          statusCode,
+          headers: replyHeaders,
+        } satisfies HttpReplyHeadersType),
+      );
+
+      let streamedBytes = 0;
+      let aborted = false;
+
+      const resetReadTimeout = () => {
+        clearTimeout(readTimeoutTimer);
+        readTimeoutTimer = setTimeout(() => {
+          aborted = true;
+          upstreamRes.destroy();
+          proxyReq.destroy();
+          logger.warn(`Worker:${process.pid}`, "Upstream response stalled — aborting stream", {
+            upstreamId: raw.upstreamId,
           });
-        } else {
-          sendReply(bodyBuffer);
+          safeProcessSend(
+            JSON.stringify({
+              type: "HTTP_REPLY_ABORT",
+              requestId: raw.requestId,
+              reason: "read timeout",
+            } satisfies HttpReplyAbortType),
+            finalizeActiveRequest,
+          );
+        }, workerConfig.server.readTimeoutMs);
+      };
+      resetReadTimeout();
+
+      const abortOversized = () => {
+        aborted = true;
+        clearTimeout(readTimeoutTimer);
+        upstreamRes.destroy();
+        proxyReq.destroy();
+        logger.error(
+          `Worker:${process.pid}`,
+          `Upstream response exceeded ${maxResponseBytes}-byte cap mid-stream — aborting connection`,
+          { upstreamId: raw.upstreamId, url: requestUrl },
+        );
+        recordAndLog(statusCode, streamedBytes, performance.now() - startTime);
+        safeProcessSend(
+          JSON.stringify({
+            type: "HTTP_REPLY_ABORT",
+            requestId: raw.requestId,
+            reason: "response exceeded maximum allowed size",
+          } satisfies HttpReplyAbortType),
+          finalizeActiveRequest,
+        );
+      };
+
+      const sendChunk = (buf: Buffer) => {
+        streamedBytes += buf.length;
+        if (streamedBytes > maxResponseBytes) {
+          abortOversized();
+          return;
         }
+        safeProcessSend(
+          JSON.stringify({
+            type: "HTTP_REPLY_CHUNK",
+            requestId: raw.requestId,
+            data: buf.toString("base64"),
+          } satisfies HttpReplyChunkType),
+        );
+      };
+
+      const finishStream = () => {
+        if (aborted) return;
+        clearTimeout(readTimeoutTimer);
+        const latency = performance.now() - startTime;
+        recordAndLog(statusCode, streamedBytes, latency);
+        safeProcessSend(
+          JSON.stringify({ type: "HTTP_REPLY_END", requestId: raw.requestId } satisfies HttpReplyEndType),
+          finalizeActiveRequest,
+        );
+      };
+
+      upstreamRes.on("error", () => {
+        if (aborted) return;
+        aborted = true;
+        clearTimeout(readTimeoutTimer);
+        safeProcessSend(
+          JSON.stringify({
+            type: "HTTP_REPLY_ABORT",
+            requestId: raw.requestId,
+            reason: "upstream response error",
+          } satisfies HttpReplyAbortType),
+          finalizeActiveRequest,
+        );
       });
+
+      if (shouldGzip) {
+        const gzipStream = zlib.createGzip();
+        gzipStream.on("data", (c: Buffer) => {
+          if (!aborted) sendChunk(c);
+        });
+        gzipStream.on("end", finishStream);
+        upstreamRes.on("data", (chunk: Buffer) => {
+          if (aborted) return;
+          resetReadTimeout();
+          gzipStream.write(chunk);
+        });
+        upstreamRes.on("end", () => {
+          if (!aborted) gzipStream.end();
+        });
+      } else {
+        upstreamRes.on("data", (chunk: Buffer) => {
+          if (aborted) return;
+          resetReadTimeout();
+          sendChunk(chunk);
+        });
+        upstreamRes.on("end", finishStream);
+      }
     });
     if (raw.requestId) {
       activeRequests.set(raw.requestId, {

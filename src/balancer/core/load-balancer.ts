@@ -201,6 +201,19 @@ export class LoadBalancer {
     const cb = circuitBreakerManager.get(id);
     cb?.cancelProbe();
   }
+  /**
+   * A client disconnecting mid-request tells us nothing about the upstream's own health — it
+   * was still busy serving a request nobody will read the answer to. Unlike recordFailure,
+   * this releases the connection slot and any held HALF_OPEN probe slot without touching the
+   * circuit breaker's failure count or state, so a run of impatient clients can never trip the
+   * breaker for every other tenant sharing a perfectly healthy upstream.
+   */
+  public recordAbort(id: string){
+    const s = this.states.get(id);
+    if(s && s.activeConnections > 0) s.activeConnections--;
+    const cb = circuitBreakerManager.get(id);
+    cb?.cancelProbe();
+  }
   public pickFiltered(
     healthyIds: Set<string>,
     clientIp?: string,

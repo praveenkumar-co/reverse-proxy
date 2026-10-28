@@ -10,7 +10,14 @@ import os from "node:os";
 import { createClient } from "redis";
 import type { RedisClientType } from "redis";
 
-import { workerMessageReplySchema, type WorkerMessageType } from "./ipc.protocol.js";
+import {
+  workerMessageReplySchema,
+  type WorkerMessageType,
+  type HttpReplyHeadersType,
+  type HttpReplyChunkType,
+  type HttpReplyEndType,
+  type HttpReplyAbortType,
+} from "./ipc.protocol.js";
 
 import {
   initialHealthCheck,
@@ -103,59 +110,19 @@ const upstreamBulkheads = new Map<string, Bulkhead>();
 let nextWorkerIndex = 0;
 let isShuttingDown = false;
 
-// ── IPC Backpressure Queue ────────────────────────────────────────────────────
-// worker.send() returns false when the IPC pipe's internal write buffer is full.
-// Ignoring that return value silently drops messages (Bug A: 997/2000 dropped
-// under a 2000-concurrent-request flood through 1 worker). We queue the payload
-// and flush it the moment the channel drains.
-const workerSendQueues = new Map<Worker, string[]>();
+// worker.send() returns false when the IPC pipe's internal write buffer is over its high
+// water mark — same signal as a Writable stream's write() returning false. It does NOT mean
+// the message failed or was dropped; Node has already queued it internally and will deliver
+// it. The previous implementation here re-sent the same message when send() returned false,
+// believing it had to retry a failed send — under concurrent load that put a second copy of
+// the message on the wire, which is what caused duplicate upstream POSTs (each duplicate
+// delivery to the worker became its own independent upstream request). No retry, no queue:
+// just send once and let Node's own channel handle backpressure.
 function workerSend(worker: Worker, msg: string): void {
-  if (worker.isDead() || !worker.isConnected()) {
-    workerSendQueues.delete(worker);
-    return;
-  }
-  const existing = workerSendQueues.get(worker);
-  if (existing) {
-    existing.push(msg);
-    return;
-  }
+  if (worker.isDead() || !worker.isConnected()) return;
   try {
-    const ok = worker.send(msg);
-    if (!ok) {
-      const q: string[] = [msg];
-      workerSendQueues.set(worker, q);
-      const flush = () => {
-        if (worker.isDead() || !worker.isConnected()) {
-          workerSendQueues.delete(worker);
-          return;
-        }
-        const queue = workerSendQueues.get(worker);
-        if (!queue || queue.length === 0) {
-          workerSendQueues.delete(worker);
-          return;
-        }
-        while (queue.length > 0) {
-          const next = queue[0]!;
-          try {
-            const flushed = worker.send(next);
-            if (flushed) {
-              queue.shift();
-            } else {
-              setImmediate(flush);
-              return;
-            }
-          } catch {
-            workerSendQueues.delete(worker);
-            return;
-          }
-        }
-        workerSendQueues.delete(worker);
-      };
-      setImmediate(flush);
-    }
-  } catch {
-    workerSendQueues.delete(worker);
-  }
+    worker.send(msg);
+  } catch {}
 }
 
 // Prevent duplicate cluster 'exit' listeners when reloadServerConfig() calls
@@ -164,7 +131,16 @@ function workerSend(worker: Worker, msg: string): void {
 let clusterExitHandlerInstalled = false;
 
 interface PendingRequest {
+  // Used for the old single-shot reply: a connection-level failure (no upstream response at
+  // all) or an error-ish upstream status (>=400) that master may still retry or serve from
+  // stale cache — see worker.ts's isErrorish split.
   resolve: (parsed: any) => void;
+  // Used for a success-ish upstream response (<400), streamed as it arrives rather than
+  // buffered — see the HTTP_REPLY_HEADERS/CHUNK/END/ABORT protocol in ipc.protocol.ts.
+  onHeaders?: (reply: HttpReplyHeadersType) => void;
+  onChunk?: (reply: HttpReplyChunkType) => void;
+  onEnd?: (reply: HttpReplyEndType) => void;
+  onAbort?: (reply: HttpReplyAbortType) => void;
   timer: NodeJS.Timeout;
   upstreamId: string;
   startTime: number;
@@ -212,6 +188,35 @@ function setupWorkerMessageHandling(worker: Worker) {
           if (query.pendingWorkers.size === 0) {
             query.resolve(query.results);
           }
+        }
+        return;
+      }
+      if (parsed.type === "HTTP_REPLY_HEADERS") {
+        const pending = parsed.requestId ? pendingRequests.get(parsed.requestId) : undefined;
+        if (pending) {
+          clearTimeout(pending.timer);
+          pending.onHeaders?.(parsed);
+        }
+        return;
+      }
+      if (parsed.type === "HTTP_REPLY_CHUNK") {
+        const pending = parsed.requestId ? pendingRequests.get(parsed.requestId) : undefined;
+        pending?.onChunk?.(parsed);
+        return;
+      }
+      if (parsed.type === "HTTP_REPLY_END") {
+        const pending = parsed.requestId ? pendingRequests.get(parsed.requestId) : undefined;
+        if (pending) {
+          pendingRequests.delete(parsed.requestId);
+          pending.onEnd?.(parsed);
+        }
+        return;
+      }
+      if (parsed.type === "HTTP_REPLY_ABORT") {
+        const pending = parsed.requestId ? pendingRequests.get(parsed.requestId) : undefined;
+        if (pending) {
+          pendingRequests.delete(parsed.requestId);
+          pending.onAbort?.(parsed);
         }
         return;
       }
@@ -306,7 +311,9 @@ function parseCookies(cookieHeader: string | undefined): Record<string, string> 
 function createNoopResponse(): http.ServerResponse {
   return {
     writeHead: () => {},
+    write: () => true,
     end: () => {},
+    destroy: () => {},
     writableEnded: false,
   } as unknown as http.ServerResponse;
 }
@@ -333,12 +340,10 @@ async function tryServeStaleOnError(
     const cached = JSON.parse(cachedJson);
     const ageSeconds = cached.storedAt ? (Date.now() - cached.storedAt) / 1000 : Infinity;
     if (!cache.shouldServeStaleOnError(errorStatus, ageSeconds)) return false;
-    const bodyBuf =
-      cached.isCompressed && cached.encoding === "gzip"
-        ? Buffer.from(cached.body, "base64")
-        : typeof cached.body === "string"
-          ? Buffer.from(cached.body)
-          : cached.body;
+    // Cache entries always store the body as base64 (binary-safe, unlike the old utf8
+    // round-trip) regardless of whether the original response was itself compressed — see
+    // the onEnd streaming handler in dispatchToWorker.
+    const bodyBuf = Buffer.from(cached.body, "base64");
     res.writeHead(cached.statusCode ?? 200, { ...(cached.headers || {}), "X-Cache": "STALE-ON-ERROR" });
     res.end(payload.requestType === "HEAD" ? undefined : bodyBuf);
     logger.warn("Cache", `Served stale response in place of upstream error (status=${errorStatus})`, { cacheKey });
@@ -634,10 +639,6 @@ export async function createServer(config: CreateServerConfig) {
           });
           setupWorkerMessageHandling(newWorker);
           WORKER_POOL.push(newWorker);
-          // Clear the dead worker's pending send queue — any buffered messages
-          // will never drain (the process is gone); they'll be handled by the
-          // master's gateway-timeout machinery instead.
-          workerSendQueues.delete(worker);
           logger.info("Master", `Worker ${worker.id} exited unexpectedly — respawned as worker ${newWorker.id}`);
         }
       });
@@ -929,6 +930,15 @@ export async function createServer(config: CreateServerConfig) {
         abortHandle.requestId = requestId;
         abortHandle.worker = worker;
       }
+      // Accumulated across the onHeaders/onChunk/onEnd callbacks below for this one attempt.
+      const streamState: {
+        statusCode?: number;
+        replyHeaders?: any;
+        isCacheMethod: boolean;
+        isCacheable: boolean;
+        cacheChunks?: Buffer[];
+        totalBytes: number;
+      } = { isCacheMethod: false, isCacheable: false, totalBytes: 0 };
       pendingRequests.set(requestId, {
         timer,
         upstreamId,
@@ -1085,9 +1095,12 @@ export async function createServer(config: CreateServerConfig) {
               responseData = Buffer.from(reply.data, "base64");
             }
             const latencyMs = performance.now() - startTime;
+            // reply.data (when still a string here) is worker.ts's binary-safe latin1
+            // encoding, not utf8 — Buffer.byteLength must match or it miscounts any byte >=
+            // 0x80.
             const responseBytes =
               typeof responseData === "string"
-                ? Buffer.byteLength(responseData)
+                ? Buffer.byteLength(responseData, "binary")
                 : responseData.length;
             lb.recordSuccess(upstreamId!, latencyMs);
             passiveProbe.record({
@@ -1182,9 +1195,141 @@ export async function createServer(config: CreateServerConfig) {
                 setCookieList.length === 1 ? setCookieList[0] : setCookieList;
             }
             res.writeHead(reply.statusCode ?? 200, responseHeaders);
-            res.end(responseData);
+            // responseData (when still a string) is worker.ts's binary-safe latin1 encoding —
+            // must be written back with the matching encoding or high bytes get corrupted by
+            // Node's default utf8 write encoding.
+            if (typeof responseData === "string") res.end(responseData, "binary");
+            else res.end(responseData);
             // Access log is written by the worker process
           }
+        },
+        onHeaders: (headersReply: HttpReplyHeadersType) => {
+          const isCacheMethod = payload.requestType === "GET" || payload.requestType === "HEAD";
+          const hasSetCookie = !!headersReply.headers?.["set-cookie"];
+          const effectiveCache = getEffectiveCache(ACTIVE_CONFIG);
+          const isCacheable =
+            (headersReply.statusCode === 200 || headersReply.statusCode === 301) &&
+            !payload.headers["authorization"] &&
+            !hasSetCookie &&
+            pathRule?.cache?.enabled !== false &&
+            cache.isResponseCacheable(headersReply.headers);
+
+          streamState.statusCode = headersReply.statusCode;
+          streamState.replyHeaders = headersReply.headers;
+          streamState.isCacheMethod = isCacheMethod;
+          streamState.isCacheable = isCacheable && isCacheMethod;
+          if (streamState.isCacheable) streamState.cacheChunks = [];
+
+          const responseHeaders: Record<string, any> = {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+            "Access-Control-Allow-Credentials": "true",
+            "X-Upstream-Id": upstreamId,
+            ...(headersReply.headers || {}),
+          };
+          if (effectiveCache?.enabled && isCacheMethod) {
+            responseHeaders["X-Cache"] = "MISS";
+          }
+          delete responseHeaders["transfer-encoding"];
+          delete responseHeaders["connection"];
+          if (routeStage) {
+            responseHeaders["X-Route-Stage"] = routeStage;
+          }
+          const setCookieList: string[] = [];
+          const upstreamSetCookie = headersReply.headers?.["set-cookie"];
+          if (upstreamSetCookie) {
+            if (Array.isArray(upstreamSetCookie)) setCookieList.push(...upstreamSetCookie);
+            else setCookieList.push(upstreamSetCookie);
+          }
+          if (pathRule?.sticky) {
+            const maxAge = ACTIVE_CONFIG.server.loadBalancing.stickyCookieTtlMs
+              ? `; Max-Age=${Math.round(ACTIVE_CONFIG.server.loadBalancing.stickyCookieTtlMs / 1000)}`
+              : "";
+            setCookieList.push(
+              `${ACTIVE_CONFIG.server.loadBalancing.stickyCookieName ?? "NINJA_ROUTE"}=${upstreamId}; Path=/; HttpOnly; SameSite=Lax${maxAge}`,
+            );
+          }
+          if (setCanaryCookieVal && pathRule?.canary) {
+            const cName = pathRule.canary.stickyCookieName || "NINJA_CANARY";
+            setCookieList.push(`${cName}=${setCanaryCookieVal}; Path=/; HttpOnly; SameSite=Lax`);
+          }
+          if (setCookieList.length > 0) {
+            responseHeaders["Set-Cookie"] = setCookieList.length === 1 ? setCookieList[0] : setCookieList;
+          }
+          res.writeHead(headersReply.statusCode ?? 200, responseHeaders);
+        },
+        onChunk: (chunkReply: HttpReplyChunkType) => {
+          const buf = Buffer.from(chunkReply.data, "base64");
+          streamState.totalBytes += buf.length;
+          if (streamState.cacheChunks) streamState.cacheChunks.push(buf);
+          if (!res.writableEnded) res.write(buf);
+        },
+        onEnd: () => {
+          void (async () => {
+            const latencyMs = performance.now() - startTime;
+            lb.recordSuccess(upstreamId!, latencyMs);
+            passiveProbe.record({
+              upstreamId: upstreamId!,
+              statusCode: streamState.statusCode ?? 200,
+              latencyMs,
+            });
+            upstreamBulkheads.get(upstreamId!)?.leave();
+            metricsRegistry.recordActiveConnection(upstreamId!, -1);
+            lb.releaseConnection(upstreamId!);
+            if (streamState.isCacheMethod) {
+              metricsRegistry.recordCacheOp("miss");
+            }
+            if (streamState.isCacheable && streamState.cacheChunks) {
+              const effectiveCache = getEffectiveCache(ACTIVE_CONFIG);
+              const parsedUrl = new URL(payload.url, "http://dummy");
+              const cacheKey = cache.buildKey(
+                payload.requestType,
+                parsedUrl.pathname + parsedUrl.search,
+                payload.headers,
+              );
+              const maxAgeSeconds = pathRule?.cache?.ttlSeconds ?? effectiveCache.ttlSeconds;
+              const physicalTtlSeconds = maxAgeSeconds + (effectiveCache.staleIfErrorSeconds ?? 86400);
+              const bodyBuffer = Buffer.concat(streamState.cacheChunks);
+              const cachePayload = JSON.stringify({
+                statusCode: streamState.statusCode ?? 200,
+                headers: streamState.replyHeaders ?? {},
+                // Always base64 — binary-safe regardless of what the response content was.
+                body: bodyBuffer.toString("base64"),
+                storedAt: Date.now(),
+                maxAgeSeconds,
+              });
+              const tagHeader =
+                streamState.replyHeaders?.["cache-tag"] ?? streamState.replyHeaders?.["x-cache-tags"];
+              const tags = tagHeader
+                ? (Array.isArray(tagHeader) ? tagHeader.join(",") : String(tagHeader))
+                    .split(",")
+                    .map((t: string) => t.trim())
+                    .filter(Boolean)
+                : undefined;
+              await cache.set(cacheKey, cachePayload, physicalTtlSeconds, tags);
+            }
+            if (!res.writableEnded) res.end();
+          })();
+        },
+        onAbort: (abortReply: HttpReplyAbortType) => {
+          logger.error(
+            "Master",
+            `Upstream response aborted mid-stream: ${abortReply.reason ?? "unknown"}`,
+            { upstreamId },
+          );
+          lb.recordFailure(upstreamId!);
+          passiveProbe.record({
+            upstreamId: upstreamId!,
+            statusCode: 502,
+            latencyMs: performance.now() - startTime,
+          });
+          upstreamBulkheads.get(upstreamId!)?.leave();
+          metricsRegistry.recordActiveConnection(upstreamId!, -1);
+          lb.releaseConnection(upstreamId!);
+          try {
+            res.destroy();
+          } catch {}
         },
       });
       // Use backpressure-safe workerSend: if the IPC pipe's write buffer is full
@@ -1536,12 +1681,10 @@ export async function createServer(config: CreateServerConfig) {
                     ...(cached.headers || {}),
                     "X-Cache": isFresh ? "HIT" : "STALE",
                   });
-                  const bodyBuf =
-                    cached.isCompressed && cached.encoding === "gzip"
-                      ? Buffer.from(cached.body, "base64")
-                      : typeof cached.body === "string"
-                        ? Buffer.from(cached.body)
-                        : cached.body;
+                  // Cache entries always store the body as base64 (binary-safe) regardless of
+                  // whether the original response was itself compressed — see the onEnd
+                  // streaming handler in dispatchToWorker.
+                  const bodyBuf = Buffer.from(cached.body, "base64");
                   if (c.req.method === "HEAD") {
                     c.res.end();
                   } else {
@@ -1644,11 +1787,13 @@ export async function createServer(config: CreateServerConfig) {
             pendingRequests.delete(abortHandle.requestId!);
             upstreamBulkheads.get(pending.upstreamId)?.leave();
             metricsRegistry.recordActiveConnection(pending.upstreamId, -1);
-            lb.releaseConnection(pending.upstreamId);
-            // Treated pessimistically (like a timeout) since we'll never know the real
-            // outcome — this is also what releases a held HALF_OPEN probe slot rather than
-            // leaving it stuck until the breaker's own recovery window expires again.
-            lb.recordFailure(pending.upstreamId);
+            // A client hanging up mid-request says nothing about the upstream's health — it
+            // may have been about to answer perfectly fine. recordAbort releases the
+            // connection slot and any held HALF_OPEN probe slot (so it isn't stuck until the
+            // breaker's own recovery window expires) without counting a failure, so a run of
+            // impatient clients can never trip the breaker for every other tenant sharing this
+            // upstream.
+            lb.recordAbort(pending.upstreamId);
             logger.warn(
               "Master",
               "Client disconnected before response completed — aborted in-flight upstream request",
