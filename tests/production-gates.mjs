@@ -1,0 +1,721 @@
+#!/usr/bin/env node
+// =============================================================================
+//  PRODUCTION GATE SUITE — NINJA REVERSE PROXY
+// =============================================================================
+//  Five hard gates a build must clear before it is allowed to call itself
+//  production-ready. Each gate starts its own instance of the proxy from
+//  dist/ against local mock upstreams, drives it, and asserts a single
+//  pass/fail condition. The suite exits 1 if any gate fails.
+//
+//  Gate 1: Slow client               — proxy RSS growth bounded while a
+//                                       client trickles a 200MB response.
+//  Gate 2: Large upload              — a 100MB streamed POST reaches the
+//                                       upstream byte-for-byte, RSS bounded.
+//  Gate 3: Master off the datapath   — master's CPU share stays small across
+//                                       5,000 requests.
+//  Gate 4: Throughput                — sustained RPS beats 2x the current
+//                                       test:fire Phase 1 baseline.
+//  Gate 5: Rate limit across workers — a per-IP limit holds even though the
+//                                       proxy runs 4 worker processes.
+// =============================================================================
+
+import http from "node:http";
+import crypto from "node:crypto";
+import { spawn, execSync } from "node:child_process";
+import path from "node:path";
+import fs from "node:fs";
+import os from "node:os";
+import { fileURLToPath } from "node:url";
+import { performance } from "node:perf_hooks";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.resolve(__dirname, "..");
+
+const G = (s) => `\x1b[32m${s}\x1b[0m`;
+const R = (s) => `\x1b[31m${s}\x1b[0m`;
+const Y = (s) => `\x1b[33m${s}\x1b[0m`;
+const C = (s) => `\x1b[36m${s}\x1b[0m`;
+const BOLD = (s) => `\x1b[1m${s}\x1b[0m`;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const results = [];
+
+function record(name, passed, detail = "") {
+  results.push({ name, passed, detail });
+  const icon = passed ? G("✅ PASSED") : R("❌ FAILED");
+  console.log(`  ${icon} ${name}`);
+  if (detail) console.log(`            ${Y("↳")} ${detail}`);
+}
+
+// -----------------------------------------------------------------------------
+// Process-tree helpers (RSS + cumulative CPU time), same technique as
+// aggressive-fire-test.mjs: measure the proxy's real process tree, not this
+// harness's own memory/CPU, since master+workers is what we're gating.
+// -----------------------------------------------------------------------------
+function getChildPids(pid) {
+  try {
+    return execSync(`pgrep -P ${pid}`, { stdio: ["ignore", "pipe", "ignore"] })
+      .toString()
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map(Number);
+  } catch {
+    return [];
+  }
+}
+
+function getProcessTreeRssKB(rootPid) {
+  const pids = [rootPid, ...getChildPids(rootPid)];
+  try {
+    const out = execSync(`ps -o rss= -p ${pids.join(",")}`, { stdio: ["ignore", "pipe", "ignore"] }).toString();
+    return out
+      .split("\n")
+      .map((s) => parseInt(s.trim(), 10))
+      .filter((n) => !Number.isNaN(n))
+      .reduce((a, b) => a + b, 0);
+  } catch {
+    return 0;
+  }
+}
+
+// Parses `ps -o time=` output ("MM:SS.ss", "HH:MM:SS[.ss]", or "DD-HH:MM:SS")
+// into fractional seconds of cumulative CPU time for one process.
+function parseCpuTimeToSeconds(raw) {
+  const s = raw.trim();
+  if (!s) return 0;
+  let days = 0;
+  let rest = s;
+  if (s.includes("-")) {
+    const [d, r] = s.split("-");
+    days = parseInt(d, 10) || 0;
+    rest = r ?? "0:00";
+  }
+  const parts = rest.split(":").map(Number);
+  let seconds = 0;
+  if (parts.length === 3) seconds = parts[0] * 3600 + parts[1] * 60 + parts[2];
+  else if (parts.length === 2) seconds = parts[0] * 60 + parts[1];
+  else seconds = parts[0] || 0;
+  return days * 86400 + seconds;
+}
+
+function getCpuSecondsByPid(pids) {
+  const map = new Map();
+  if (pids.length === 0) return map;
+  try {
+    const out = execSync(`ps -o pid=,time= -p ${pids.join(",")}`, { stdio: ["ignore", "pipe", "ignore"] }).toString();
+    for (const line of out.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const sep = trimmed.indexOf(" ");
+      if (sep === -1) continue;
+      const pid = parseInt(trimmed.slice(0, sep), 10);
+      const timeStr = trimmed.slice(sep + 1).trim();
+      if (!Number.isNaN(pid)) map.set(pid, parseCpuTimeToSeconds(timeStr));
+    }
+  } catch {}
+  return map;
+}
+
+// -----------------------------------------------------------------------------
+// Proxy process lifecycle — mirrors aggressive-fire-test.mjs's startProxy:
+// same registry-snapshot race avoidance (delete before every start), same
+// tmpdir-only config/log files, same /__ready + x-admin-token readiness poll.
+// -----------------------------------------------------------------------------
+let proxyProc = null;
+async function startProxy(cfgYaml, port, { readyTimeoutMs = 15000 } = {}) {
+  const registrySnapshotPath = path.join(REPO_ROOT, "proxy_registry_backup.json");
+  try { fs.unlinkSync(registrySnapshotPath); } catch {}
+  const cfgPath = path.join(os.tmpdir(), `_gate_cfg_${port}.yaml`);
+  fs.writeFileSync(cfgPath, cfgYaml);
+  const logFile = path.join(os.tmpdir(), `gate-proxy-${port}.log`);
+  const out = fs.openSync(logFile, "w");
+
+  proxyProc = spawn(process.execPath, ["dist/index.js", "--config", cfgPath], {
+    cwd: REPO_ROOT,
+    env: { ...process.env, ADMIN_SECRET: "gate-secret", NODE_ENV: "production" },
+    stdio: ["ignore", out, out],
+  });
+
+  const deadline = Date.now() + readyTimeoutMs;
+  while (Date.now() < deadline) {
+    await sleep(250);
+    try {
+      await new Promise((resolve, reject) => {
+        const req = http.get(
+          { host: "127.0.0.1", port, path: "/__ready", timeout: 400, headers: { "x-admin-token": "gate-secret" } },
+          (res) => {
+            res.resume();
+            if (res.statusCode === 200) resolve();
+            else reject();
+          },
+        );
+        req.on("error", reject);
+      });
+      return proxyProc.pid;
+    } catch {}
+  }
+  throw new Error(`Proxy port ${port} never became ready.`);
+}
+
+function stopProxy() {
+  if (proxyProc && proxyProc.exitCode === null) {
+    try { proxyProc.kill("SIGTERM"); } catch {}
+  }
+  proxyProc = null;
+}
+
+// -----------------------------------------------------------------------------
+// Load-generation helpers shared by Gate 3 and Gate 4.
+// -----------------------------------------------------------------------------
+async function fireFixedCount(port, totalRequests, concurrency, pathName) {
+  const agent = new http.Agent({ keepAlive: true, maxSockets: concurrency });
+  let issued = 0, completed = 0, errors = 0;
+  const tStart = performance.now();
+  async function workerLoop() {
+    while (true) {
+      const mySlot = ++issued;
+      if (mySlot > totalRequests) break;
+      await new Promise((resolve) => {
+        const req = http.get({ host: "127.0.0.1", port, path: pathName, agent, timeout: 6000 }, (res) => {
+          res.resume();
+          if (res.statusCode === 200) completed++; else errors++;
+          resolve();
+        });
+        req.on("error", () => { errors++; resolve(); });
+        req.on("timeout", () => { req.destroy(); errors++; resolve(); });
+      });
+    }
+  }
+  await Promise.all(Array.from({ length: concurrency }, () => workerLoop()));
+  agent.destroy();
+  const elapsedSec = (performance.now() - tStart) / 1000;
+  return { completed, errors, elapsedSec, rps: completed / elapsedSec };
+}
+
+async function fireFixedDuration(port, durationMs, concurrency, pathName) {
+  const agent = new http.Agent({ keepAlive: true, maxSockets: concurrency });
+  let completed = 0, errors = 0;
+  let running = true;
+  const tStart = performance.now();
+  async function workerLoop() {
+    while (running) {
+      await new Promise((resolve) => {
+        const req = http.get({ host: "127.0.0.1", port, path: pathName, agent, timeout: 6000 }, (res) => {
+          res.resume();
+          if (res.statusCode === 200) completed++; else errors++;
+          resolve();
+        });
+        req.on("error", () => { errors++; resolve(); });
+        req.on("timeout", () => { req.destroy(); errors++; resolve(); });
+      });
+    }
+  }
+  const timer = setTimeout(() => { running = false; }, durationMs);
+  await Promise.all(Array.from({ length: concurrency }, () => workerLoop()));
+  clearTimeout(timer);
+  agent.destroy();
+  const elapsedSec = (performance.now() - tStart) / 1000;
+  return { completed, errors, elapsedSec, rps: completed / elapsedSec };
+}
+
+// -----------------------------------------------------------------------------
+// Gate 1: Slow client — proxy must not balloon in memory just because a
+// client is draining a large response slowly. Upstream streams a real 200MB
+// body (backpressure-respecting via res.write()'s return value); the client
+// throttles its own consumption to ~1MB/s for a 10s window via pause/resume.
+// -----------------------------------------------------------------------------
+async function gate1_slowClientMemory() {
+  console.log(`\n${BOLD("─── GATE 1: Slow-Client Memory Bound (200MB @ 1MB/s, 10s) ────")}`);
+  const PORT = 9801, UP = 19801;
+  const TOTAL_BYTES = 200 * 1024 * 1024;
+
+  const upstream = http.createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Length": String(TOTAL_BYTES) });
+    const chunk = Buffer.alloc(64 * 1024, 0x58);
+    let written = 0;
+    function writeMore() {
+      while (written < TOTAL_BYTES) {
+        const remaining = TOTAL_BYTES - written;
+        const buf = remaining >= chunk.length ? chunk : chunk.subarray(0, remaining);
+        written += buf.length;
+        if (!res.write(buf)) {
+          res.once("drain", writeMore);
+          return;
+        }
+      }
+      res.end();
+    }
+    writeMore();
+  });
+  await new Promise((r) => upstream.listen(UP, "127.0.0.1", r));
+
+  let pid;
+  try {
+    pid = await startProxy(`
+server:
+  port: ${PORT}
+  workers: 2
+  maxResponseBytes: 314572800
+  readTimeoutMs: 60000
+  rateLimit:
+    enabled: false
+  upstreams:
+    - id: u1
+      url: http://127.0.0.1:${UP}
+  paths:
+    - path: /
+      upstream: [u1]
+`, PORT);
+  } catch (err) {
+    record("Slow client: proxy RSS growth stays under 100MB while trickling a 200MB response", false, err.message);
+    await new Promise((r) => upstream.close(r));
+    return;
+  }
+
+  await new Promise((resolve) => {
+    const req = http.get({ host: "127.0.0.1", port: PORT, path: "/warmup", timeout: 5000 }, (res) => { res.resume(); resolve(); });
+    req.on("error", () => resolve());
+  });
+  await sleep(300);
+
+  const baselineRssMB = getProcessTreeRssKB(pid) / 1024;
+  let peakRssMB = baselineRssMB;
+  let received = 0;
+  const RATE_BYTES_PER_SEC = 1 * 1024 * 1024;
+  const WINDOW_MS = 10000;
+
+  await new Promise((resolve) => {
+    const req = http.get({ host: "127.0.0.1", port: PORT, path: "/slow-download", timeout: WINDOW_MS + 15000 }, (res) => {
+      const start = performance.now();
+      res.pause();
+      const sampler = setInterval(() => {
+        const rss = getProcessTreeRssKB(pid) / 1024;
+        if (rss > peakRssMB) peakRssMB = rss;
+      }, 500);
+      const admit = () => {
+        const elapsedSec = (performance.now() - start) / 1000;
+        const allowed = RATE_BYTES_PER_SEC * elapsedSec;
+        if (received < allowed) res.resume();
+        else res.pause();
+      };
+      const ticker = setInterval(admit, 50);
+      res.on("data", (chunk) => {
+        received += chunk.length;
+        admit();
+      });
+      const finish = () => {
+        clearInterval(ticker);
+        clearInterval(sampler);
+        req.destroy();
+        resolve();
+      };
+      setTimeout(finish, WINDOW_MS);
+      res.on("end", finish);
+      res.on("error", finish);
+    });
+    req.on("error", () => resolve());
+  });
+
+  const growthMB = peakRssMB - baselineRssMB;
+  record(
+    "Slow client: proxy RSS growth stays under 100MB while trickling a 200MB response at 1MB/s for 10s",
+    growthMB < 100,
+    `Baseline: ${baselineRssMB.toFixed(1)}MB | Peak: ${peakRssMB.toFixed(1)}MB | Growth: ${growthMB.toFixed(1)}MB | Client received: ${(received / 1024 / 1024).toFixed(1)}MB of 200MB`
+  );
+
+  stopProxy();
+  await new Promise((r) => upstream.close(r));
+  await sleep(500);
+}
+
+// -----------------------------------------------------------------------------
+// Gate 2: Large streamed upload — a 100MB chunked POST (no Content-Length,
+// so it exercises the streaming byte-accounting path rather than the
+// Content-Length pre-check) must reach the upstream with a matching
+// SHA-256, without the proxy's RSS growing by 100MB+ in the process.
+//
+// The route below carries a `maxBodyBytes: 209715200` override attempting
+// to raise the per-route body limit to 200MB. There is currently no such
+// config knob in src/config/schemas — request bodies are capped by a
+// hardcoded 10MB constant in src/core/cluster/master.ts regardless of what
+// the route config says, so this field is silently ignored by the zod
+// schema today. It is left in the test config as the gate's stated contract
+// for when that knob is added.
+// -----------------------------------------------------------------------------
+async function gate2_largeUpload() {
+  console.log(`\n${BOLD("─── GATE 2: Large Streamed Upload (100MB, SHA-256 integrity) ─")}`);
+  const PORT = 9802, UP = 19802;
+  const SIZE = 100 * 1024 * 1024;
+
+  let upstreamBytesReceived = 0;
+  const upstream = http.createServer((req, res) => {
+    const hash = crypto.createHash("sha256");
+    req.on("data", (c) => { hash.update(c); upstreamBytesReceived += c.length; });
+    req.on("end", () => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ sha256: hash.digest("hex"), bytes: upstreamBytesReceived }));
+    });
+  });
+  await new Promise((r) => upstream.listen(UP, "127.0.0.1", r));
+
+  let pid;
+  try {
+    pid = await startProxy(`
+server:
+  port: ${PORT}
+  workers: 2
+  maxResponseBytes: 52428800
+  readTimeoutMs: 60000
+  rateLimit:
+    enabled: false
+  upstreams:
+    - id: u1
+      url: http://127.0.0.1:${UP}
+  paths:
+    - path: /
+      upstream: [u1]
+      maxBodyBytes: 209715200
+`, PORT);
+  } catch (err) {
+    record("Large upload: 100MB streamed POST reaches upstream intact (SHA-256 match), RSS growth < 100MB", false, err.message);
+    await new Promise((r) => upstream.close(r));
+    return;
+  }
+
+  await sleep(300);
+  const baselineRssMB = getProcessTreeRssKB(pid) / 1024;
+  let peakRssMB = baselineRssMB;
+  const sampler = setInterval(() => {
+    const rss = getProcessTreeRssKB(pid) / 1024;
+    if (rss > peakRssMB) peakRssMB = rss;
+  }, 300);
+
+  const clientHash = crypto.createHash("sha256");
+  let status = 0;
+  let responseBody = "";
+  let uploadError = null;
+
+  await new Promise((resolve) => {
+    let stopped = false;
+    const req = http.request(
+      {
+        host: "127.0.0.1",
+        port: PORT,
+        path: "/upload",
+        method: "POST",
+        headers: { "Transfer-Encoding": "chunked", "Content-Type": "application/octet-stream" },
+        timeout: 60000,
+      },
+      (res) => {
+        status = res.statusCode;
+        res.on("data", (c) => { responseBody += c; });
+        res.on("end", resolve);
+      },
+    );
+    req.on("error", (err) => { stopped = true; uploadError = err.message; resolve(); });
+    req.on("timeout", () => { stopped = true; req.destroy(); uploadError = "client timeout"; resolve(); });
+
+    const CHUNK = 1024 * 1024; // 1MB
+    let sent = 0;
+    function writeMore() {
+      while (!stopped && sent < SIZE) {
+        const remaining = SIZE - sent;
+        const len = Math.min(CHUNK, remaining);
+        const buf = crypto.randomBytes(len);
+        clientHash.update(buf);
+        sent += len;
+        let ok;
+        try {
+          ok = req.write(buf);
+        } catch (err) {
+          stopped = true;
+          uploadError = err.message;
+          resolve();
+          return;
+        }
+        if (!ok) {
+          req.once("drain", writeMore);
+          return;
+        }
+      }
+      if (!stopped && sent >= SIZE) req.end();
+    }
+    writeMore();
+  });
+
+  clearInterval(sampler);
+  const growthMB = peakRssMB - baselineRssMB;
+  const clientDigest = clientHash.digest("hex");
+
+  let upstreamDigest = null;
+  try { upstreamDigest = JSON.parse(responseBody).sha256; } catch {}
+
+  const ok = status === 200 && upstreamDigest === clientDigest && growthMB < 100;
+  record(
+    "Large upload: 100MB streamed POST reaches upstream intact (SHA-256 match), RSS growth < 100MB",
+    ok,
+    `Status: ${status || "n/a"}${uploadError ? ` (${uploadError})` : ""} | Client SHA-256: ${clientDigest.slice(0, 12)}… | ` +
+    `Upstream SHA-256: ${upstreamDigest ? upstreamDigest.slice(0, 12) + "…" : "none"} | Upstream received: ${(upstreamBytesReceived / 1024 / 1024).toFixed(1)}MB of ${(SIZE / 1024 / 1024).toFixed(0)}MB | RSS growth: ${growthMB.toFixed(1)}MB`,
+  );
+
+  stopProxy();
+  await new Promise((r) => upstream.close(r));
+  await sleep(500);
+}
+
+// -----------------------------------------------------------------------------
+// Gate 3: Master off the datapath — the master process accepts connections
+// and routes, but should not be doing the bulk of the CPU work; that belongs
+// to the worker pool actually talking to upstreams. Measured via cumulative
+// process CPU time (ps -o time=) before/after 5,000 requests.
+// -----------------------------------------------------------------------------
+async function gate3_masterNotOnDatapath() {
+  console.log(`\n${BOLD("─── GATE 3: Master Off the Datapath (CPU Share Under Load) ───")}`);
+  const PORT = 9803, UP = 19803;
+  const upstream = http.createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end('{"ok":true}');
+  });
+  await new Promise((r) => upstream.listen(UP, "127.0.0.1", r));
+
+  let masterPid;
+  try {
+    masterPid = await startProxy(`
+server:
+  port: ${PORT}
+  workers: 2
+  rateLimit:
+    enabled: false
+  upstreams:
+    - id: u1
+      url: http://127.0.0.1:${UP}
+  paths:
+    - path: /
+      upstream: [u1]
+`, PORT);
+  } catch (err) {
+    record("Master CPU time stays under 10% of total proxy CPU time across 5,000 requests", false, err.message);
+    await new Promise((r) => upstream.close(r));
+    return;
+  }
+
+  await sleep(500);
+  const workerPidsBefore = getChildPids(masterPid);
+  const cpuBefore = getCpuSecondsByPid([masterPid, ...workerPidsBefore]);
+
+  const result = await fireFixedCount(PORT, 5000, 50, "/cpu-check");
+
+  const workerPidsAfter = getChildPids(masterPid);
+  const cpuAfter = getCpuSecondsByPid([masterPid, ...workerPidsAfter]);
+
+  const masterDelta = Math.max(0, (cpuAfter.get(masterPid) ?? 0) - (cpuBefore.get(masterPid) ?? 0));
+  let workersDelta = 0;
+  for (const wp of new Set([...workerPidsBefore, ...workerPidsAfter])) {
+    workersDelta += Math.max(0, (cpuAfter.get(wp) ?? 0) - (cpuBefore.get(wp) ?? 0));
+  }
+  const totalDelta = masterDelta + workersDelta;
+  const masterShare = totalDelta > 0 ? masterDelta / totalDelta : 0;
+
+  record(
+    "Master CPU time stays under 10% of total proxy CPU time across 5,000 requests",
+    masterShare < 0.10,
+    `Completed: ${result.completed}/5000 (errors: ${result.errors}) | Master CPU: ${masterDelta.toFixed(2)}s | Workers CPU: ${workersDelta.toFixed(2)}s | Master share: ${(masterShare * 100).toFixed(1)}%`,
+  );
+
+  stopProxy();
+  await new Promise((r) => upstream.close(r));
+  await sleep(500);
+}
+
+// -----------------------------------------------------------------------------
+// Gate 4: Throughput — must sustain at least 2x the current test:fire Phase 1
+// RPS. The baseline is measured fresh, right here, against this same build,
+// using the exact same config/method as aggressive-fire-test.mjs's Phase 1
+// (10,000 requests over 100 keep-alive connections) — rather than shelling
+// out to `npm run test:fire` itself, which would also run phases 2-5
+// (including an optional redis-server dependency) for no benefit to this
+// specific comparison. The gate load below is the autocannon-style run: 100
+// keep-alive connections, fixed 15s duration.
+// -----------------------------------------------------------------------------
+async function gate4_throughput() {
+  console.log(`\n${BOLD("─── GATE 4: Throughput ≥ 2x test:fire Phase 1 baseline ───────")}`);
+  const PORT = 9804, UP = 19804;
+  const upstream = http.createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end('{"ok":true}');
+  });
+  await new Promise((r) => upstream.listen(UP, "127.0.0.1", r));
+
+  try {
+    await startProxy(`
+server:
+  port: ${PORT}
+  workers: 2
+  rateLimit:
+    enabled: false
+  upstreams:
+    - id: u1
+      url: http://127.0.0.1:${UP}
+  paths:
+    - path: /
+      upstream: [u1]
+  loadBalancing:
+    strategy: round-robin
+    retry:
+      maxAttempts: 0
+      statusCodes: []
+  connectTimeoutMs: 5000
+  readTimeoutMs: 10000
+`, PORT);
+  } catch (err) {
+    record("Throughput reaches at least 2x the current test:fire Phase 1 baseline RPS", false, err.message);
+    await new Promise((r) => upstream.close(r));
+    return;
+  }
+
+  const baseline = await fireFixedCount(PORT, 10000, 100, "/fire1");
+  await sleep(500);
+  const loaded = await fireFixedDuration(PORT, 15000, 100, "/fire-dur");
+
+  const required = baseline.rps * 2;
+  record(
+    "Throughput reaches at least 2x the current test:fire Phase 1 baseline RPS",
+    loaded.rps >= required,
+    `Baseline (test:fire Phase 1 equivalent): ${baseline.rps.toFixed(0)} req/s (${baseline.completed}/10000 in ${baseline.elapsedSec.toFixed(2)}s) | ` +
+    `Gate load (100 conns, 15s): ${loaded.rps.toFixed(0)} req/s (${loaded.completed} completed, ${loaded.errors} errors) | Required: >=${required.toFixed(0)} req/s`,
+  );
+
+  stopProxy();
+  await new Promise((r) => upstream.close(r));
+  await sleep(500);
+}
+
+// -----------------------------------------------------------------------------
+// Gate 5: Rate limit across workers — a global per-IP limit (maxRequests=100)
+// must hold even though the proxy runs 4 worker processes. All requests come
+// from this harness, so they all share one source IP (127.0.0.1) by
+// construction — no header spoofing needed.
+// -----------------------------------------------------------------------------
+async function gate5_rateLimitAcrossWorkers() {
+  console.log(`\n${BOLD("─── GATE 5: Rate Limit Shared Across Workers ──────────────────")}`);
+  const PORT = 9805, UP = 19805;
+  const upstream = http.createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end('{"ok":true}');
+  });
+  await new Promise((r) => upstream.listen(UP, "127.0.0.1", r));
+
+  try {
+    await startProxy(`
+server:
+  port: ${PORT}
+  workers: 4
+  rateLimit:
+    enabled: true
+    storage: memory
+    algorithm: fixed-window
+    windowMs: 60000
+    maxRequests: 100
+  upstreams:
+    - id: u1
+      url: http://127.0.0.1:${UP}
+  paths:
+    - path: /
+      upstream: [u1]
+`, PORT);
+  } catch (err) {
+    record("Rate limit (maxRequests=100) holds across 4 workers for a single IP (100 ± 10 of 400 allowed)", false, err.message);
+    await new Promise((r) => upstream.close(r));
+    return;
+  }
+
+  const TOTAL = 400;
+  const CONCURRENCY = 20;
+  const agent = new http.Agent({ keepAlive: true, maxSockets: CONCURRENCY });
+  let issued = 0, allowed = 0, blocked = 0, other = 0;
+
+  async function workerLoop() {
+    while (true) {
+      const mySlot = ++issued;
+      if (mySlot > TOTAL) break;
+      await new Promise((resolve) => {
+        const req = http.get({ host: "127.0.0.1", port: PORT, path: "/rl-check", agent, timeout: 6000 }, (res) => {
+          res.resume();
+          if (res.statusCode === 200) allowed++;
+          else if (res.statusCode === 429) blocked++;
+          else other++;
+          resolve();
+        });
+        req.on("error", () => { other++; resolve(); });
+        req.on("timeout", () => { req.destroy(); other++; resolve(); });
+      });
+    }
+  }
+  await Promise.all(Array.from({ length: CONCURRENCY }, () => workerLoop()));
+  agent.destroy();
+
+  const withinBand = Math.abs(allowed - 100) <= 10;
+  record(
+    "Rate limit (maxRequests=100) holds across 4 workers for a single IP (100 ± 10 of 400 allowed, not ~400)",
+    withinBand,
+    `Allowed: ${allowed}/${TOTAL} | Blocked (429): ${blocked} | Other: ${other}`,
+  );
+
+  stopProxy();
+  await new Promise((r) => upstream.close(r));
+  await sleep(500);
+}
+
+// -----------------------------------------------------------------------------
+// Main Orchestration
+// -----------------------------------------------------------------------------
+async function main() {
+  console.log("\n" + BOLD("═".repeat(70)));
+  console.log(BOLD("  🚦 PRODUCTION GATE SUITE — NINJA REVERSE PROXY"));
+  console.log(BOLD("═".repeat(70)));
+
+  const t0 = performance.now();
+  const gates = [
+    ["Gate 1", gate1_slowClientMemory],
+    ["Gate 2", gate2_largeUpload],
+    ["Gate 3", gate3_masterNotOnDatapath],
+    ["Gate 4", gate4_throughput],
+    ["Gate 5", gate5_rateLimitAcrossWorkers],
+  ];
+  for (const [name, fn] of gates) {
+    try {
+      await fn();
+    } catch (err) {
+      console.error(R(`\n${name} threw: ${err.stack || err.message}`));
+      record(`${name} crashed instead of completing`, false, err.message);
+      stopProxy();
+    }
+  }
+  try {
+    const files = fs.readdirSync(os.tmpdir()).filter((f) => f.startsWith("_gate_cfg_"));
+    for (const f of files) fs.unlinkSync(path.join(os.tmpdir(), f));
+  } catch {}
+  try { fs.unlinkSync(path.join(REPO_ROOT, "proxy_registry_backup.json")); } catch {}
+
+  const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
+
+  console.log("\n" + BOLD("═".repeat(70)));
+  console.log(BOLD("  📊 PRODUCTION GATE SCORECARD"));
+  console.log(BOLD("═".repeat(70)));
+
+  let passed = 0;
+  for (const r of results) {
+    if (r.passed) passed++;
+    const status = r.passed ? G("PASSED") : R("FAILED");
+    console.log(`  ${r.name.padEnd(90)} [${status}]`);
+  }
+
+  console.log("─".repeat(70));
+  console.log(`  Total Passed: ${passed}/${results.length} | Total Runtime: ${elapsed}s`);
+  console.log(BOLD("═".repeat(70)) + "\n");
+
+  process.exit(passed === results.length ? 0 : 1);
+}
+
+main();
