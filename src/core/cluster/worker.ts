@@ -510,6 +510,12 @@ function createNoopResponse(): http.ServerResponse {
     end: () => {},
     destroy: () => {},
     writableEnded: false,
+    // handleProxyDispatch registers res.on("close", ...) unconditionally (to detect a real
+    // client disconnecting), and a success response is piped via res.on("finish"/"error", ...)
+    // — both need to be safe no-ops here since nobody is actually listening for this
+    // background stale-while-revalidate response.
+    on: () => {},
+    once: () => {},
   } as unknown as http.ServerResponse;
 }
 
@@ -1230,11 +1236,15 @@ async function handleProxyDispatch(
       useBufferedBody && bufferedBody !== undefined
         ? { mode: "buffered", buffer: bufferedBody }
         : { mode: "stream", req, limit: effectiveBodyLimit };
-    if (bodySource.mode === "stream") {
+    if (bodySource.mode === "stream" && hasBody) {
       // Point of no return: once we start piping the client's body into this attempt, the
       // stream can never be replayed for a later attempt. Safe here because useBufferedBody
       // already covers every case where a retry after a body-bearing failure is both policy-
-      // allowed and method-safe — reaching this branch means neither applies.
+      // allowed and method-safe — reaching this branch means neither applies. A bodyless
+      // request (the common GET/HEAD case) never reaches this "point of no return" at all:
+      // piping an empty req is a no-op, so retrying it on a later attempt is always safe —
+      // without the `hasBody` check here, retries for ordinary GETs were being blocked
+      // unconditionally just because "stream" mode was chosen.
       bodyStreamed = true;
     }
 
