@@ -1,0 +1,9 @@
+{
+  "rps": 5851.298037328355,
+  "completed": 10000,
+  "errors": 0,
+  "elapsedSec": 1.7090225,
+  "date": "2026-10-29T13:48:00.299Z",
+  "machine": "Praveens-MacBook-Air.local (darwin/arm64, 10 cpus)",
+  "node": "v20.20.2"
+}

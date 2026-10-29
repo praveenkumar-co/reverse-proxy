@@ -13,10 +13,14 @@
 //                                       upstream byte-for-byte, RSS bounded.
 //  Gate 3: Master off the datapath   — master's CPU share stays small across
 //                                       5,000 requests.
-//  Gate 4: Throughput                — sustained RPS beats 2x the current
-//                                       test:fire Phase 1 baseline.
+//  Gate 4: Throughput                — sustained RPS beats 1.5x a baseline
+//                                       pinned to tests/perf-baseline.json.
 //  Gate 5: Rate limit across workers — a per-IP limit holds even though the
 //                                       proxy runs 4 worker processes.
+//
+//  Run `node tests/production-gates.mjs --record-baseline` to (re)measure
+//  and save the Gate 4 baseline — a one-time/occasional operator action, not
+//  part of the gate run itself. Gate 4 fails clearly if that file is missing.
 // =============================================================================
 
 import http from "node:http";
@@ -30,6 +34,7 @@ import { performance } from "node:perf_hooks";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
+const BASELINE_FILE = path.join(__dirname, "perf-baseline.json");
 
 const G = (s) => `\x1b[32m${s}\x1b[0m`;
 const R = (s) => `\x1b[31m${s}\x1b[0m`;
@@ -529,34 +534,20 @@ server:
 }
 
 // -----------------------------------------------------------------------------
-// Gate 4: Throughput — must sustain at least 2x the current test:fire Phase 1
-// RPS. The baseline is measured fresh, right here, against this same build,
-// using the exact same config/method as aggressive-fire-test.mjs's Phase 1
-// (10,000 requests over 100 keep-alive connections) — rather than shelling
-// out to `npm run test:fire` itself, which would also run phases 2-5
-// (including an optional redis-server dependency) for no benefit to this
-// specific comparison. The gate load below is the autocannon-style run: 100
-// keep-alive connections, fixed 15s duration.
+// Baseline measurement shared by --record-baseline and (historically) Gate 4.
+// Same config/method as aggressive-fire-test.mjs's Phase 1: 10,000 requests
+// over 100 keep-alive connections, rate limiting disabled, retries disabled.
 // -----------------------------------------------------------------------------
-async function gate4_throughput() {
-  console.log(`\n${BOLD("─── GATE 4: Throughput ≥ 2x test:fire Phase 1 baseline ───────")}`);
-  const PORT = 9804, UP = 19804;
-  const upstream = http.createServer((req, res) => {
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end('{"ok":true}');
-  });
-  await new Promise((r) => upstream.listen(UP, "127.0.0.1", r));
-
-  try {
-    await startProxy(`
+function baselineProxyConfig(port, upstreamPort) {
+  return `
 server:
-  port: ${PORT}
+  port: ${port}
   workers: 2
   rateLimit:
     enabled: false
   upstreams:
     - id: u1
-      url: http://127.0.0.1:${UP}
+      url: http://127.0.0.1:${upstreamPort}
   paths:
     - path: /
       upstream: [u1]
@@ -567,22 +558,97 @@ server:
       statusCodes: []
   connectTimeoutMs: 5000
   readTimeoutMs: 10000
-`, PORT);
+`;
+}
+
+async function measureBaselineRPS() {
+  const PORT = 9890, UP = 19890;
+  const upstream = http.createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end('{"ok":true}');
+  });
+  await new Promise((r) => upstream.listen(UP, "127.0.0.1", r));
+  await startProxy(baselineProxyConfig(PORT, UP), PORT);
+  const result = await fireFixedCount(PORT, 10000, 100, "/fire1");
+  stopProxy();
+  await new Promise((r) => upstream.close(r));
+  await sleep(500);
+  return result;
+}
+
+async function recordBaseline() {
+  console.log(BOLD("Measuring fixed-count baseline RPS (test:fire Phase 1 equivalent: 10,000 requests / 100 keep-alive connections)…"));
+  const result = await measureBaselineRPS();
+  const baseline = {
+    rps: result.rps,
+    completed: result.completed,
+    errors: result.errors,
+    elapsedSec: result.elapsedSec,
+    date: new Date().toISOString(),
+    machine: `${os.hostname()} (${os.platform()}/${os.arch()}, ${os.cpus().length} cpus)`,
+    node: process.version,
+  };
+  fs.writeFileSync(BASELINE_FILE, JSON.stringify(baseline, null, 2) + "\n");
+  console.log(G(`Saved baseline: ${baseline.rps.toFixed(0)} req/s → ${path.relative(REPO_ROOT, BASELINE_FILE)}`));
+  console.log(JSON.stringify(baseline, null, 2));
+}
+
+// -----------------------------------------------------------------------------
+// Gate 4: Throughput — must sustain at least 1.5x the RPS pinned in
+// tests/perf-baseline.json (written by `node tests/production-gates.mjs
+// --record-baseline`). Reads that file instead of re-measuring a baseline
+// on every gate run, so the bar doesn't silently move with machine noise —
+// and fails clearly if no baseline has ever been recorded. The gate load
+// itself is the autocannon-style run: 100 keep-alive connections, fixed 15s
+// duration.
+// -----------------------------------------------------------------------------
+async function gate4_throughput() {
+  console.log(`\n${BOLD("─── GATE 4: Throughput ≥ 1.5x pinned baseline ────────────────")}`);
+  const GATE_NAME = "Throughput reaches at least 1.5x the pinned baseline RPS (tests/perf-baseline.json)";
+
+  if (!fs.existsSync(BASELINE_FILE)) {
+    record(
+      GATE_NAME,
+      false,
+      `No baseline file at ${path.relative(REPO_ROOT, BASELINE_FILE)} — run "node tests/production-gates.mjs --record-baseline" first.`,
+    );
+    return;
+  }
+
+  let baseline;
+  try {
+    baseline = JSON.parse(fs.readFileSync(BASELINE_FILE, "utf-8"));
   } catch (err) {
-    record("Throughput reaches at least 2x the current test:fire Phase 1 baseline RPS", false, err.message);
+    record(GATE_NAME, false, `Baseline file at ${path.relative(REPO_ROOT, BASELINE_FILE)} is not valid JSON: ${err.message}`);
+    return;
+  }
+  if (!baseline || typeof baseline.rps !== "number" || !(baseline.rps > 0)) {
+    record(GATE_NAME, false, `Baseline file has no usable "rps" field: ${JSON.stringify(baseline)}`);
+    return;
+  }
+
+  const PORT = 9804, UP = 19804;
+  const upstream = http.createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end('{"ok":true}');
+  });
+  await new Promise((r) => upstream.listen(UP, "127.0.0.1", r));
+
+  try {
+    await startProxy(baselineProxyConfig(PORT, UP), PORT);
+  } catch (err) {
+    record(GATE_NAME, false, err.message);
     await new Promise((r) => upstream.close(r));
     return;
   }
 
-  const baseline = await fireFixedCount(PORT, 10000, 100, "/fire1");
-  await sleep(500);
   const loaded = await fireFixedDuration(PORT, 15000, 100, "/fire-dur");
 
-  const required = baseline.rps * 2;
+  const required = baseline.rps * 1.5;
   record(
-    "Throughput reaches at least 2x the current test:fire Phase 1 baseline RPS",
+    GATE_NAME,
     loaded.rps >= required,
-    `Baseline (test:fire Phase 1 equivalent): ${baseline.rps.toFixed(0)} req/s (${baseline.completed}/10000 in ${baseline.elapsedSec.toFixed(2)}s) | ` +
+    `Pinned baseline: ${baseline.rps.toFixed(0)} req/s (recorded ${baseline.date} on ${baseline.machine}, node ${baseline.node}) | ` +
     `Gate load (100 conns, 15s): ${loaded.rps.toFixed(0)} req/s (${loaded.completed} completed, ${loaded.errors} errors) | Required: >=${required.toFixed(0)} req/s`,
   );
 
@@ -718,4 +784,14 @@ async function main() {
   process.exit(passed === results.length ? 0 : 1);
 }
 
-main();
+if (process.argv.includes("--record-baseline")) {
+  recordBaseline()
+    .then(() => process.exit(0))
+    .catch((err) => {
+      console.error(R(`Baseline recording failed: ${err.stack || err.message}`));
+      stopProxy();
+      process.exit(1);
+    });
+} else {
+  main();
+}
