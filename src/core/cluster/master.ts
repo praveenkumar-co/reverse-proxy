@@ -1338,6 +1338,13 @@ export async function createServer(config: CreateServerConfig) {
       // spreading the per-request serialization cost across more turns under a flood,
       // rather than one long unbroken synchronous chain starving the loop.
       setImmediate(() => {
+        if (abortHandle?.aborted) {
+          // The client disconnected in the gap between this attempt being set up (synchronously,
+          // above) and this deferred send actually running — the 'close' handler already cleaned
+          // up pendingRequests/bulkhead/connection-count for this requestId, so don't hand the
+          // worker a request for a client that's already gone.
+          return;
+        }
         workerSend(
           worker,
           JSON.stringify({

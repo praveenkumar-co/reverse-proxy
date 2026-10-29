@@ -46,6 +46,12 @@ interface ActiveRequestEntry {
   clearTimers: () => void;
 }
 const activeRequests = new Map<string, ActiveRequestEntry>();
+// Covers the race where master's ABORT_REQUEST for a requestId arrives before the request
+// itself (the real payload send is deferred one tick behind the abort listener registration —
+// see dispatchToWorker's setImmediate in master.ts) — remembered briefly so the request, if it
+// still arrives, is dropped instead of started. Entries expire after 30s so this can never grow
+// unbounded from an abort whose matching request never shows up at all.
+const abortedBeforeArrival = new Set<string>();
 let draining = false;
 
 function maybeExitWhenDrained() {
@@ -107,6 +113,10 @@ process.on("message", async (rawMsg: any, handle?: any) => {
         entry.proxyReq.destroy();
         activeRequests.delete(parsed.requestId);
         maybeExitWhenDrained();
+      } else if (parsed.requestId) {
+        const requestId = parsed.requestId;
+        abortedBeforeArrival.add(requestId);
+        setTimeout(() => abortedBeforeArrival.delete(requestId), 30_000);
       }
       return;
     }
@@ -176,6 +186,12 @@ process.on("message", async (rawMsg: any, handle?: any) => {
       upstreamUrl?: string;
       requestId?: string;
     };
+    if (raw.requestId && abortedBeforeArrival.delete(raw.requestId)) {
+      logger.info(`Worker:${process.pid}`, "Dropping request whose abort arrived first — client already disconnected", {
+        requestId: raw.requestId,
+      });
+      return;
+    }
     const upstreamUrl: string | undefined = raw.upstreamUrl;
     const requestUrl = msg.url;
     // Query params must never influence route lookup — only the path prefix should.

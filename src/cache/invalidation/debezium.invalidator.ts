@@ -55,13 +55,15 @@ export class DebeziumInvalidator {
       const matched = this.mappings.filter((m) => m.table === tableName);
       if(matched.length > 0){
         for(const m of matched){
-          const resolvedPath = m.pathPattern.replace("{id}", recordId); 
+          const resolvedPath = m.pathPattern.replace("{id}", recordId);
           await this.invalidateFn(resolvedPath);
         }
       }
       else {
-        await this.invalidateFn(`*${tableName}*${recordId}*`);
-        await this.invalidateFn(`*${recordId}*`);
+        logger.warn(
+          "Cache",
+          `Debezium CDC change for table=${tableName} has no mapping configured — skipping invalidation`,
+        );
       }
     } catch (err: any){
       logger.error("Cache", `Debezium event parse failed: ${err.message}`);

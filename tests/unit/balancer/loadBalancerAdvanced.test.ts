@@ -247,7 +247,8 @@ test("Cache - Debezium Event Parsing (SQL and MongoDB)", async () => {
   await (cache as any).handleDebeziumEvent(mongoEvent);
   assert.deepStrictEqual(invalidatedPatterns, ["/api/items/60d5ec4b1234567890abcdef"]);
 
-  // Test Case 3: Fallback generic cleanups (table not matched in mappings)
+  // Test Case 3: no mapping matches the table — no invalidation happens (no unscoped
+  // wildcard fallback), just a logged warning.
   const unknownEvent = JSON.stringify({
     op: "d",
     source: { table: "users" },
@@ -255,5 +256,5 @@ test("Cache - Debezium Event Parsing (SQL and MongoDB)", async () => {
   });
   invalidatedPatterns.length = 0; // reset
   await (cache as any).handleDebeziumEvent(unknownEvent);
-  assert.deepStrictEqual(invalidatedPatterns, ["*users*456*", "*456*"]);
+  assert.deepStrictEqual(invalidatedPatterns, []);
 });

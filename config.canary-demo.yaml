@@ -3,6 +3,7 @@ server:
   port: 8080
   workers: 2
   trustProxy: true
+  trustedProxies: ["127.0.0.1", "::1"]
   upstreams:
     - id: "kotlin-baseline"
       url: "http://127.0.0.1:8082"

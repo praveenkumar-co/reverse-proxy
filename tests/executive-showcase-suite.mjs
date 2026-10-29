@@ -53,7 +53,7 @@ const state = {
   staleSwr: { calls: 0 },
   canaryCandidate: { calls: 0 },
   baseline: { calls: 0 },
-  fast: { calls: 0 },
+  fast: { calls: 0, bytesReceived: 0 },
   slow: { calls: 0 },
 };
 
@@ -105,7 +105,14 @@ async function startAllMocks() {
   servers.push(
     await startMock(PORTS.fast, (req, res) => {
       state.fast.calls++;
-      consumeBody(req, () => jsonBody(res, 200, { backend: "fast", calls: state.fast.calls }));
+      let bodyBytes = 0;
+      req.on("data", (c) => {
+        bodyBytes += c.length;
+      });
+      req.on("end", () => {
+        state.fast.bytesReceived += bodyBytes;
+        jsonBody(res, 200, { backend: "fast", calls: state.fast.calls });
+      });
     }),
   );
 
@@ -677,6 +684,7 @@ async function pillar4() {
 async function pillar5() {
   console.log("\n--- Pillar 5: DoS Defense & Memory Safety ---");
 
+  const beforeFastBytes = state.fast.bytesReceived;
   const oversizedResult = await new Promise((resolve) => {
     const req = http.request(
       { host: "127.0.0.1", port: PROXY_PORT, path: "/bodylimit-test", method: "POST", headers: { "Content-Type": "application/octet-stream" } },
@@ -706,16 +714,16 @@ async function pillar5() {
     }
     writeLoop();
   });
+  const bytesReachedUpstream = state.fast.bytesReceived - beforeFastBytes;
   record(
     "5. DoS Defense & Memory Safety",
     "Streaming body > 10MB (chunked, no Content-Length) is rejected before the full 15MB arrives",
     // Either a clean 413 or the shared socket resetting (status 0) is valid evidence of
     // early enforcement — which one the client observes is a TCP-level race between the
     // proxy destroying the request stream and flushing the response, not a correctness
-    // question. What matters is that the full 15MB was never accepted.
-    (oversizedResult.status === 413 || oversizedResult.status === 0) &&
-      oversizedResult.bytesWritten < 13 * 1024 * 1024,
-    `status=${oversizedResult.status}, client wrote ~${Math.round(oversizedResult.bytesWritten / 1024 / 1024)}MB before stopping (of 15MB attempted, limit is 10MB)`,
+    // question. What matters is that the oversized body was never forwarded upstream at all.
+    (oversizedResult.status === 413 || oversizedResult.status === 0) && bytesReachedUpstream === 0,
+    `status=${oversizedResult.status}, client wrote ~${Math.round(oversizedResult.bytesWritten / 1024 / 1024)}MB before stopping (of 15MB attempted, limit is 10MB), upstream received ${bytesReachedUpstream} bytes`,
   );
 
   const rssBefore = getProcessTreeRssKB(proxyProc.pid);
