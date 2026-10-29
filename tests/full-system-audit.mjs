@@ -70,6 +70,9 @@ import { Histogram, HistogramRegistry }        from "../dist/observability/metri
 import { MetricsRegistry }                     from "../dist/observability/metrics/prometheus.exporter.js";
 import { Tracer }                              from "../dist/observability/tracing/tracer.js";
 import { ReadinessProbe }                      from "../dist/observability/health/readiness.js";
+import os                                      from "node:os";
+import path                                    from "node:path";
+import fs                                      from "node:fs";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TEST HARNESS
@@ -425,7 +428,8 @@ test("§4 Cache", "DebeziumInvalidator: INSERT (op=c) → fires callback", cdcCr
 // =============================================================================
 
 // ServiceRegistry full lifecycle
-const reg = new ServiceRegistry({ heartbeatTimeoutMs: 5000, cleanupIntervalMs: 9999999 });
+const auditRegFile = path.join(os.tmpdir(), `full_system_audit_reg_${Date.now()}_${process.pid}.json`);
+const reg = new ServiceRegistry({ heartbeatTimeoutMs: 5000, cleanupIntervalMs: 9999999, persistencePath: auditRegFile });
 
 let cbRegEvt = null; let cbDeregEvt = null;
 reg.onRegister(s => { cbRegEvt = s; });
@@ -470,6 +474,7 @@ test("§5 Discovery", "PassiveProbe: all listeners receive event",   pp2Count ==
 // Active probe: function exported and callable
 test("§5 Discovery", "checkUpstream (active probe) → exported function", typeof checkUpstream === "function",
   "Used by HealthManager to periodically ping upstreams");
+try { fs.unlinkSync(auditRegFile); } catch {}
 
 // =============================================================================
 // §6  PIPELINE & ROUTING
