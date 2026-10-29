@@ -5,5 +5,10 @@
   "elapsedSec": 1.7090225,
   "date": "2026-10-29T13:48:00.299Z",
   "machine": "Praveens-MacBook-Air.local (darwin/arm64, 10 cpus)",
-  "node": "v20.20.2"
+  "node": "v20.20.2",
+  "cpuMsPerThousand": 681.8,
+  "cpuMsPerThousandCommit": "125e1ac",
+  "cpuMsPerThousandSamples": 9,
+  "cpuMsPerThousandDate": "2026-10-29T15:10:00.000Z",
+  "cpuMsPerThousandMethod": "git worktree of main@125e1ac, 2 workers, 5000 fixed-count requests over 50 keep-alive connections, cumulative CPU time (ps -o time=) summed across master+worker pids before/after, normalized to ms per 1,000 requests, averaged over 9 runs (min 652, max 744)"
 }

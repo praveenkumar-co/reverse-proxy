@@ -25,3 +25,4 @@ flow_archit.t
 .DS_Store
 .excalidraw
 _*_cfg_*.yaml
+isolate-*.log

@@ -32,5 +32,6 @@ export interface RouteRule {
   canary?: CanaryConfig;
   auth?: RouteAuthConfig;
   cors?: RouteCorsConfig;
+  maxBodyBytes?: number;
 }
 

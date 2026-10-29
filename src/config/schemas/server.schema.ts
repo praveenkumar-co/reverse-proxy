@@ -100,6 +100,9 @@ const routeSchema = z.object({
   canary: canarySchema,
   auth: routeAuthSchema,
   cors: routeCorsSchema,
+  // Per-route override of server.maxRequestBodyBytes — e.g. a bulk-upload route that needs
+  // a higher ceiling than the rest of the API.
+  maxBodyBytes: z.number().optional(),
 });
 
 
@@ -121,6 +124,10 @@ export const serverSchema = z.object({
   // a worker will buffer in memory before aborting, so a huge/malicious upstream can't
   // exhaust worker memory.
   maxResponseBytes: z.number().default(25 * 1024 * 1024),
+  // Caps request body size while it is being streamed to the upstream; enforced per-byte
+  // during the stream (not just via the Content-Length header, which a client can omit or
+  // understate). A route may raise or lower this via its own maxBodyBytes.
+  maxRequestBodyBytes: z.number().default(10 * 1024 * 1024),
   // TCP listen() backlog — the OS-level queue of pending connections awaiting accept().
   // Node's own default (511) can drop/reset handshakes under a sudden burst of concurrent
   // connects; raise it for high-concurrency deployments.

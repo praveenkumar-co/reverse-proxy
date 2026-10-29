@@ -1,63 +1,111 @@
-import { z } from "zod";
+import type { ServiceInstance } from "../../discovery/registry/dynamic.registry.js";
 
-export const workerMessageSchema = z.object({
-  requestType: z.string(),
-  headers: z.any(),
-  body: z.string().nullable(),
-  url: z.string(),
-  requestId: z.string().optional(),
-  clientIp: z.string().optional(),
-});
+// -----------------------------------------------------------------------------
+// Master <-> worker control-plane protocol (Phase B).
+//
+// Workers own the datapath entirely — they accept client connections directly
+// (via cluster's shared-listen) and talk to upstreams directly. There is no
+// IPC for request/response bodies any more. What's left is pure control
+// plane: health/registry broadcast, registry mutation forwarding, metrics
+// aggregation, in-memory rate-limit token leasing, and lifecycle signals.
+// None of these are on the hot request path, so they aren't zod-validated —
+// same as the pre-existing GRACEFUL_SHUTDOWN/DUMP_METRICS_* messages.
+// -----------------------------------------------------------------------------
 
-// Control-plane-only reply: used when the worker never received any response from the
-// upstream at all (route not found, upstream not found, connect/read timeout, connection
-// error) — no body bytes exist to stream, so this still carries data as a single string.
-export const workerMessageReplySchema = z.object({
-  requestId: z.string().optional(),
-  data: z.string(),
-  error: z.string().optional(),
-  errorCode: z.string().optional(),
-  statusCode: z.number().optional(),
-  isCompressed: z.boolean().optional(),
-  encoding: z.string().optional(),
-  headers: z.any().optional(),
-});
+/** Master -> all workers. Broadcast whenever the registry or health set changes. */
+export interface UpdateServicesMessage {
+  type: "UPDATE_SERVICES";
+  healthyUpstreams: string[];
+  registry: ServiceInstance[];
+}
 
-// Streaming reply protocol for responses the upstream actually produced. Bodies never travel
-// as a single buffered JSON string here — HEADERS is sent the moment upstream responds (so
-// the master can start writing to the client immediately, fixing TTFB for SSE/long-poll),
-// then zero or more CHUNK messages carry body bytes as they arrive (base64, so arbitrary
-// binary survives JSON transport without the utf8 corruption of the old single-shot reply),
-// then END finalizes the response. ABORT signals the response exceeded the worker's byte cap
-// mid-stream, after headers (and possibly bytes) were already relayed to the client — at that
-// point the only safe action left is to destroy the client connection, not send a clean error.
-export const httpReplyHeadersSchema = z.object({
-  type: z.literal("HTTP_REPLY_HEADERS"),
-  requestId: z.string().optional(),
-  statusCode: z.number(),
-  headers: z.any(),
-});
+/** Master -> workers (retiring) / workers -> self-drain. */
+export interface GracefulShutdownMessage {
+  type: "GRACEFUL_SHUTDOWN";
+}
 
-export const httpReplyChunkSchema = z.object({
-  type: z.literal("HTTP_REPLY_CHUNK"),
-  requestId: z.string().optional(),
-  data: z.string(), // base64
-});
+/** Master -> one worker, to collect its local metrics snapshot. */
+export interface DumpMetricsRequestMessage {
+  type: "DUMP_METRICS_REQUEST";
+  requestId: string;
+}
 
-export const httpReplyEndSchema = z.object({
-  type: z.literal("HTTP_REPLY_END"),
-  requestId: z.string().optional(),
-});
+/** Worker -> master, reply to DUMP_METRICS_REQUEST. */
+export interface DumpMetricsResponseMessage {
+  type: "DUMP_METRICS_RESPONSE";
+  requestId: string;
+  data: any;
+}
 
-export const httpReplyAbortSchema = z.object({
-  type: z.literal("HTTP_REPLY_ABORT"),
-  requestId: z.string().optional(),
-  reason: z.string().optional(),
-});
+/** Worker -> master: "collect every worker's metrics snapshot for me" (GET /metrics). */
+export interface MetricsAggregateRequestMessage {
+  type: "METRICS_AGGREGATE_REQUEST";
+  requestId: string;
+}
 
-export type WorkerMessageType = z.infer<typeof workerMessageSchema>;
-export type WorkerReplyMessageType = z.infer<typeof workerMessageReplySchema>;
-export type HttpReplyHeadersType = z.infer<typeof httpReplyHeadersSchema>;
-export type HttpReplyChunkType = z.infer<typeof httpReplyChunkSchema>;
-export type HttpReplyEndType = z.infer<typeof httpReplyEndSchema>;
-export type HttpReplyAbortType = z.infer<typeof httpReplyAbortSchema>;
+/** Master -> requesting worker, reply to METRICS_AGGREGATE_REQUEST. */
+export interface MetricsAggregateResponseMessage {
+  type: "METRICS_AGGREGATE_RESPONSE";
+  requestId: string;
+  snapshots: any[];
+}
+
+/** Worker -> master: forward an admin registry mutation to the canonical registry. */
+export interface RegistryMutateRequestMessage {
+  type: "REGISTRY_MUTATE";
+  requestId: string;
+  action: "register" | "deregister" | "heartbeat";
+  payload: any;
+}
+
+/** Master -> requesting worker, reply to REGISTRY_MUTATE. */
+export interface RegistryMutateResponseMessage {
+  type: "REGISTRY_MUTATE_RESPONSE";
+  requestId: string;
+  result?: any;
+  error?: string;
+}
+
+/**
+ * Worker -> master: "lease me up to a batch of request permits for this key" — used only
+ * for in-memory-storage rate limiting (Redis-storage limiters talk to Redis directly from
+ * each worker and never need master at all). Batching keeps master off the request hot path:
+ * a worker only calls this when its locally-held permits for (scope,key) run out, not on
+ * every request.
+ */
+export interface RlLeaseRequestMessage {
+  type: "RL_LEASE_REQUEST";
+  requestId: string;
+  scope: string;
+  key: string;
+  windowMs: number;
+  maxRequests: number;
+  algorithm: string;
+  softLimit?: number | boolean;
+  burstMultiplier?: number;
+}
+
+/** Master -> requesting worker, reply to RL_LEASE_REQUEST. */
+export interface RlLeaseResponseMessage {
+  type: "RL_LEASE_RESPONSE";
+  requestId: string;
+  granted: number;
+  resetAt: number;
+  algorithm: string;
+  algoState?: any;
+}
+
+export type MasterToWorkerMessage =
+  | UpdateServicesMessage
+  | GracefulShutdownMessage
+  | DumpMetricsRequestMessage
+  | MetricsAggregateResponseMessage
+  | RegistryMutateResponseMessage
+  | RlLeaseResponseMessage;
+
+export type WorkerToMasterMessage =
+  | DumpMetricsResponseMessage
+  | MetricsAggregateRequestMessage
+  | RegistryMutateRequestMessage
+  | RlLeaseRequestMessage
+  | GracefulShutdownMessage;

@@ -6,10 +6,26 @@ import type { RootConfigType } from "../../config/schemas/server.schema.js";
 import type { LoadBalancer } from "../../balancer/index.js";
 import type { Cache } from "../../cache/cache-manager.js";
 import { MetricsRegistry } from "../../observability/metrics/prometheus.exporter.js";
-import { registry } from "../../discovery/registry/dynamic.registry.js";
+import type { ServiceInstance } from "../../discovery/registry/dynamic.registry.js";
 import { readinessProbe } from "../../observability/health/readiness.js";
 import type { RetryBudget } from "../../resilience/retry/retry-budget.js";
 import { logger } from "../../observability/logger/logger.js";
+
+/**
+ * Decouples admin.handler.ts from the registry's physical location. Master owns the one real
+ * ServiceRegistry; a worker (which is what actually serves /__* requests under the Phase B
+ * architecture — see worker.ts) reads its own locally-broadcast mirror directly (getAll/get/
+ * getStats are synchronous, no IPC) and forwards mutations (register/heartbeat/deregister) to
+ * master over IPC, awaiting its reply before responding to the admin client.
+ */
+export interface RegistryClient {
+  register(instance: { id: string; url: string; metadata?: Record<string, string> }): Promise<ServiceInstance>;
+  deregister(id: string): Promise<boolean>;
+  heartbeat(id: string): Promise<boolean>;
+  getAll(): ServiceInstance[];
+  get(id: string): ServiceInstance | undefined;
+  getStats(): object;
+}
 
 function safeCompare(a: string, b: string): boolean {
   const bufA = Buffer.from(a, "utf8");
@@ -119,6 +135,7 @@ export interface AdminHandlerOptions {
   metricsRegistry: MetricsRegistry;
   cache: Cache;
   collectWorkerMetricSnapshots: () => Promise<any[]>;
+  registry: RegistryClient;
 }
 
 /**
@@ -136,6 +153,7 @@ export async function handleAdminRequest(options: AdminHandlerOptions): Promise<
     metricsRegistry,
     cache,
     collectWorkerMetricSnapshots,
+    registry,
   } = options;
 
   const url = req.url ?? "/";
@@ -186,7 +204,9 @@ export async function handleAdminRequest(options: AdminHandlerOptions): Promise<
       ]),
     ];
     const aggregatedRegistry = new MetricsRegistry(healthyUpstreams);
-    aggregatedRegistry.mergeSnapshot(metricsRegistry.getSnapshot());
+    // Not merged separately here: collectWorkerMetricSnapshots() always returns every
+    // worker's snapshot including this one's own (see worker.ts's implementation), so
+    // merging metricsRegistry.getSnapshot() again on top would double-count this worker.
     for (const snap of snapshots) {
       aggregatedRegistry.mergeSnapshot(snap);
     }
@@ -282,7 +302,7 @@ export async function handleAdminRequest(options: AdminHandlerOptions): Promise<
           res.end(JSON.stringify({ error: err.message }));
           return;
         }
-        const service = registry.register({ id, url: serviceUrl, metadata });
+        const service = await registry.register({ id, url: serviceUrl, metadata });
         res.writeHead(201, { "Content-Type": "application/json" });
         res.end(
           JSON.stringify({
@@ -301,7 +321,7 @@ export async function handleAdminRequest(options: AdminHandlerOptions): Promise<
   if (url.startsWith("/__registry/heartbeat/") && req.method === "PUT") {
     const id = url.substring("/__registry/heartbeat/".length);
     if (id) {
-      const success = registry.heartbeat(id);
+      const success = await registry.heartbeat(id);
       if (success) {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ status: "OK", message: `Heartbeat for ${id} recorded` }));
@@ -319,7 +339,7 @@ export async function handleAdminRequest(options: AdminHandlerOptions): Promise<
   if (url.startsWith("/__registry/deregister/") && req.method === "DELETE") {
     const id = url.substring("/__registry/deregister/".length);
     if (id) {
-      const success = registry.deregister(id);
+      const success = await registry.deregister(id);
       if (success) {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ message: `Service ${id} deregistered` }));

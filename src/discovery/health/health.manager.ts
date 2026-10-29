@@ -40,6 +40,7 @@ export async function initialHealthCheck(
   upstreams: Array<{ id: string; url: string; healthPath?: string; tls?: any }>,
   HEALTHY_UPSTREAMS: Set<string>,
   lb?: LoadBalancer,
+  onChange?: () => void,
 ){
   logger.info("HealthCheck", "Initial health check started");
   for(const upstream of upstreams){
@@ -55,6 +56,7 @@ export async function initialHealthCheck(
     }
   }
   logger.info("HealthCheck", "Initial check done", { healthy: [...HEALTHY_UPSTREAMS] });
+  onChange?.();
 }
 interface ProbeStreak {
   consecutiveSuccesses: number;
@@ -64,9 +66,9 @@ interface ProbeStreak {
 export function startHealthChecks(
   upstreams: Array<{ id: string; url: string; healthPath?: string; tls?: any }>,
   HEALTHY_UPSTREAMS: Set<string>,
-  lb: LoadBalancer,
+  lb?: LoadBalancer,
   intervalMs = 10000,
-  options: { consecutiveFailuresToTrip?: number; consecutiveSuccessesToRecover?: number } = {},
+  options: { consecutiveFailuresToTrip?: number; consecutiveSuccessesToRecover?: number; onChange?: () => void } = {},
 ): NodeJS.Timeout {
   const consecutiveFailuresToTrip = options.consecutiveFailuresToTrip ?? 2;
   const consecutiveSuccessesToRecover = options.consecutiveSuccessesToRecover ?? 2;
@@ -96,19 +98,21 @@ export function startHealthChecks(
         const wasHealthy = HEALTHY_UPSTREAMS.has(upstream.id);
         if(!wasHealthy && probeHealthy && streak.consecutiveSuccesses >= consecutiveSuccessesToRecover){
           HEALTHY_UPSTREAMS.add(upstream.id);
-          lb.setHealthy(upstream.id, true);
+          lb?.setHealthy(upstream.id, true);
           logger.info(
             "HealthCheck",
             `${upstream.id} back ONLINE (${streak.consecutiveSuccesses} consecutive successes)`,
           );
+          options.onChange?.();
         }else if(wasHealthy && !probeHealthy && streak.consecutiveFailures >= consecutiveFailuresToTrip){
           HEALTHY_UPSTREAMS.delete(upstream.id);
-          lb.setHealthy(upstream.id, false);
+          lb?.setHealthy(upstream.id, false);
           logger.warn(
             "HealthCheck",
             `${upstream.id} is DOWN (${streak.consecutiveFailures} consecutive failures)`,
             { id: upstream.id },
           );
+          options.onChange?.();
         }else if(wasHealthy && !probeHealthy){
           logger.warn(
             "HealthCheck",
