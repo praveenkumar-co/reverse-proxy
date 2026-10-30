@@ -1,8 +1,8 @@
 import type { RequestContext } from '../core/pipeline/context.js';
 import { tracer } from '../observability/tracing/tracer.js';
 import {
-  generateTraceId,
   generateSpanId,
+  generateTraceAndSpanId,
   parseTraceParent,
   buildTraceParent,
 } from '../observability/tracing/w3c-trace-context.js';
@@ -10,8 +10,19 @@ import {
 export function tracingMiddleware(){
   return async (ctx: RequestContext, next: () => Promise<void>) => {
     const incoming = parseTraceParent(ctx.req.headers['traceparent'] as string | undefined);
-    const traceId = incoming?.traceId ?? (ctx.req.headers['x-trace-id'] as string) ?? generateTraceId();
-    const spanId = generateSpanId();
+    const existingTraceId = incoming?.traceId ?? (ctx.req.headers['x-trace-id'] as string | undefined);
+    // The common case for a proxy acting as the entry point — no incoming trace context at
+    // all — needs both a fresh trace id and span id; generateTraceAndSpanId() mints both from
+    // one crypto.randomBytes() call instead of two. A request that already carries a trace id
+    // only needs a new span id for this hop.
+    let traceId: string;
+    let spanId: string;
+    if (existingTraceId) {
+      traceId = existingTraceId;
+      spanId = generateSpanId();
+    } else {
+      ({ traceId, spanId } = generateTraceAndSpanId());
+    }
     const flags = incoming?.flags ?? '01';
     // Per the W3C spec, each hop forwards traceparent with parent-id replaced by its own
     // span id — mutating the request header here is what makes worker.ts's "forward every

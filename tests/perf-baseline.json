@@ -1,14 +1,37 @@
 {
-  "rps": 5851.298037328355,
+  "rps": 10674.536880307158,
   "completed": 10000,
   "errors": 0,
-  "elapsedSec": 1.7090225,
-  "date": "2026-10-29T13:48:00.299Z",
-  "machine": "Praveens-MacBook-Air.local (darwin/arm64, 10 cpus)",
-  "node": "v20.20.2",
-  "cpuMsPerThousand": 681.8,
-  "cpuMsPerThousandCommit": "125e1ac",
-  "cpuMsPerThousandSamples": 9,
-  "cpuMsPerThousandDate": "2026-10-29T15:10:00.000Z",
-  "cpuMsPerThousandMethod": "git worktree of main@125e1ac, 2 workers, 5000 fixed-count requests over 50 keep-alive connections, cumulative CPU time (ps -o time=) summed across master+worker pids before/after, normalized to ms per 1,000 requests, averaged over 9 runs (min 652, max 744)"
+  "elapsedSec": 0.9368087920000002,
+  "date": "2026-10-30T04:14:12.919Z",
+  "machine": "ninja-ci-linux (linux/arm64, 10 cpus)",
+  "node": "v22.23.4",
+  "cpuBaselines": {
+    "Praveens-MacBook-Air.local:darwin": {
+      "cpuMsPerThousand": 303,
+      "commit": "125e1ac",
+      "totalRequests": 20000,
+      "completed": 20000,
+      "errors": 0,
+      "date": "2026-10-30T04:03:06.439Z",
+      "node": "v20.20.2",
+      "platform": "darwin",
+      "arch": "arm64",
+      "hostname": "Praveens-MacBook-Air.local",
+      "method": "git worktree, 2 workers, fixed-count requests over 50 keep-alive connections, cumulative CPU time from `ps -o time=` summed across master+worker pids before/after, normalized to ms per 1,000 requests"
+    },
+    "ninja-ci-linux:linux": {
+      "cpuMsPerThousand": 429,
+      "commit": "125e1ac",
+      "totalRequests": 20000,
+      "completed": 20000,
+      "errors": 0,
+      "date": "2026-10-30T04:14:23.653Z",
+      "node": "v22.23.4",
+      "platform": "linux",
+      "arch": "arm64",
+      "hostname": "ninja-ci-linux",
+      "method": "git worktree, 2 workers, fixed-count requests over 50 keep-alive connections, cumulative CPU time from /proc/<pid>/stat summed across master+worker pids before/after, normalized to ms per 1,000 requests"
+    }
+  }
 }

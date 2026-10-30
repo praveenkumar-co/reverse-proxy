@@ -709,7 +709,10 @@ async function performUpstreamCall(
   headers: Record<string, any>,
   clientIp: string,
   res: http.ServerResponse,
-  bodySource: { mode: "buffered"; buffer: Buffer } | { mode: "stream"; req: http.IncomingMessage; limit: number },
+  bodySource:
+    | { mode: "empty" }
+    | { mode: "buffered"; buffer: Buffer }
+    | { mode: "stream"; req: http.IncomingMessage; limit: number },
   pathRule: RouteRule | undefined,
   routeStage: string | undefined,
   setCanaryCookieVal: string | undefined,
@@ -773,7 +776,27 @@ async function performUpstreamCall(
 
   return new Promise<AttemptOutcome>((resolveOutcome) => {
     let connectTimeoutTimer: NodeJS.Timeout;
-    let readTimeoutTimer: NodeJS.Timeout;
+    // Read-phase timeout: a socket-level idle timer (armed once upstreamRes exists, covering
+    // both the small buffered error-body path and the streamed success path) rather than a
+    // JS-level clearTimeout()+setTimeout() pair reset by hand on every single chunk. The
+    // socket's own idle timer already resets itself on any read/write activity, so this gets
+    // the identical "abort if nothing happens for readTimeoutMs" behavior without per-chunk
+    // timer churn.
+    let idleTimeoutArmed = false;
+    // Deliberately a different name from the response callback's own `upstreamRes` parameter
+    // below — it assigns into this one so onIdleTimeout/clearIdleTimeout (defined before that
+    // callback exists) can still reach it via closure, without the parameter shadowing it.
+    let activeUpstreamRes: http.IncomingMessage | undefined;
+    const onIdleTimeout = () => {
+      try { proxyReq.destroy(); } catch {}
+      try { activeUpstreamRes?.destroy(); } catch {}
+    };
+    const clearIdleTimeout = () => {
+      if (!idleTimeoutArmed) return;
+      idleTimeoutArmed = false;
+      try { activeUpstreamRes?.socket?.setTimeout(0); } catch {}
+      try { activeUpstreamRes?.socket?.removeListener("timeout", onIdleTimeout); } catch {}
+    };
     let settled = false;
     const finishOutcome = (o: AttemptOutcome) => {
       if (settled) return;
@@ -803,6 +826,7 @@ async function performUpstreamCall(
     }
 
     const proxyReq = transport.request(requestOptions, (upstreamRes) => {
+      activeUpstreamRes = upstreamRes;
       abortHandle.destroy = () => {
         try {
           proxyReq.destroy();
@@ -817,6 +841,14 @@ async function performUpstreamCall(
         return;
       }
       clearTimeout(connectTimeoutTimer);
+      // Idle timeout for the whole read phase, armed once here: the socket's own timer
+      // resets on any read/write activity, so this covers both the small buffered error-body
+      // path below and the streamed success path further down with one mechanism, and
+      // without the per-chunk clearTimeout()+setTimeout() churn a JS-level timer would need.
+      if (upstreamRes.socket) {
+        upstreamRes.socket.setTimeout(workerConfig.server.readTimeoutMs, onIdleTimeout);
+        idleTimeoutArmed = true;
+      }
       const statusCode = upstreamRes.statusCode ?? 200;
       const isErrorish = statusCode >= 400;
 
@@ -829,7 +861,7 @@ async function performUpstreamCall(
           receivedBytes += chunk.length;
           if (receivedBytes > maxResponseBytes) {
             aborted = true;
-            clearTimeout(readTimeoutTimer);
+            clearIdleTimeout();
             upstreamRes.destroy();
             proxyReq.destroy();
             recordAndLog(502, receivedBytes, performance.now() - startTime, method, cleanPath, upstreamId, headers, clientIp);
@@ -840,7 +872,7 @@ async function performUpstreamCall(
         });
         upstreamRes.on("end", () => {
           if (aborted) return;
-          clearTimeout(readTimeoutTimer);
+          clearIdleTimeout();
           const bodyBuffer = Buffer.concat(chunks);
           recordAndLog(statusCode, bodyBuffer.length, performance.now() - startTime, method, cleanPath, upstreamId, headers, clientIp);
           void finalizeErrorish(statusCode, bodyBuffer).then(finishOutcome);
@@ -848,7 +880,7 @@ async function performUpstreamCall(
         upstreamRes.on("error", () => {
           if (aborted) return;
           aborted = true;
-          clearTimeout(readTimeoutTimer);
+          clearIdleTimeout();
           finishOutcome({ kind: "terminal-error", statusCode: 502, errorMessage: "Upstream response error" });
         });
         return;
@@ -862,6 +894,32 @@ async function performUpstreamCall(
       const upstreamEncoding = upstreamRes.headers["content-encoding"];
       const shouldGzip =
         !upstreamEncoding && Boolean(workerConfig.server.compression) && isCompressible && acceptEncoding.includes("gzip");
+
+      // A declared Content-Length within the cap is trusted upfront — Node's own HTTP parser
+      // never delivers more body bytes than a well-formed response declared (extra bytes on
+      // the socket are parsed as the start of the next response, not appended to this one), so
+      // this isn't a weaker check than the streaming byte-guard below, just an earlier one.
+      // An oversized declared length is rejected before writeHead ever runs, instead of (as
+      // before) always starting to stream and only discovering the overage mid-flight.
+      const contentLengthHeader = upstreamRes.headers["content-length"];
+      let declaredContentLength: number | undefined;
+      if (typeof contentLengthHeader === "string") {
+        const parsed = Number(contentLengthHeader);
+        if (Number.isFinite(parsed) && parsed >= 0) declaredContentLength = parsed;
+      }
+      if (declaredContentLength !== undefined && declaredContentLength > maxResponseBytes) {
+        clearIdleTimeout();
+        upstreamRes.resume();
+        upstreamRes.destroy();
+        proxyReq.destroy();
+        recordAndLog(502, 0, performance.now() - startTime, method, cleanPath, upstreamId, headers, clientIp);
+        finishOutcome({ kind: "terminal-error", statusCode: 502, errorMessage: "Upstream response exceeded maximum allowed size" });
+        return;
+      }
+      // Gzip recompression changes the byte count the cap is meant to bound (the declared
+      // length describes the upstream's uncompressed body), so the active guard stays in
+      // place whenever shouldGzip is true regardless of what Content-Length declared.
+      const skipByteGuard = !shouldGzip && declaredContentLength !== undefined && declaredContentLength <= maxResponseBytes;
 
       const replyHeaders: Record<string, any> = { ...upstreamRes.headers };
       if (shouldGzip) {
@@ -911,7 +969,7 @@ async function performUpstreamCall(
       if (method === "HEAD") {
         upstreamRes.resume();
         res.end();
-        clearTimeout(readTimeoutTimer);
+        clearIdleTimeout();
         recordAndLog(statusCode, 0, performance.now() - startTime, method, cleanPath, upstreamId, headers, clientIp);
         if (isCacheMethod) metricsRegistry.recordCacheOp("miss");
         finishOutcome({ kind: "success", statusCode });
@@ -919,14 +977,6 @@ async function performUpstreamCall(
       }
 
       const cacheChunks: Buffer[] = [];
-      const resetReadTimeout = () => {
-        clearTimeout(readTimeoutTimer);
-        readTimeoutTimer = setTimeout(() => {
-          proxyReq.destroy();
-          upstreamRes.destroy();
-        }, workerConfig.server.readTimeoutMs);
-      };
-      resetReadTimeout();
 
       // Chained by hand with .pipe() rather than stream.pipeline() — pipeline()'s automatic
       // per-stream finished()/eos() bookkeeping is real overhead relative to a typical small
@@ -934,10 +984,11 @@ async function performUpstreamCall(
       // backpressure guarantee end-to-end; the cost is that *this* code must do the error-
       // propagation and cleanup pipeline() would otherwise have handled, via destroyAll below.
       //
-      // The byte-guard's onChunk hook (not a separate `upstreamRes.on('data', ...)` listener)
-      // resets the read-timeout — attaching an extra raw 'data' listener directly on
-      // upstreamRes would switch it into flowing mode independent of how fast `res` (the
-      // client) is actually draining, defeating the backpressure this chain otherwise provides.
+      // The byte-guard Transform is skipped entirely when skipByteGuard is true (declared
+      // Content-Length already proved the body is within maxResponseBytes, see above) — one
+      // fewer stream stage, and one fewer thing counting bytes, for the common case of a
+      // normal-sized, non-chunked response. It's still built for anything whose size isn't
+      // known upfront (chunked transfer-encoding, or no Content-Length at all).
       const liveStreams: Array<{ destroy?: () => void }> = [upstreamRes, res];
       let source: NodeJS.ReadableStream = upstreamRes;
       if (shouldGzip) {
@@ -945,9 +996,12 @@ async function performUpstreamCall(
         liveStreams.push(gz);
         source = source.pipe(gz);
       }
-      const byteGuard = createByteLimitGuard(maxResponseBytes, resetReadTimeout);
-      liveStreams.push(byteGuard);
-      source = source.pipe(byteGuard);
+      let byteGuard: Transform | undefined;
+      if (!skipByteGuard) {
+        byteGuard = createByteLimitGuard(maxResponseBytes);
+        liveStreams.push(byteGuard);
+        source = source.pipe(byteGuard);
+      }
       if (isCacheable) {
         const tee = createTeeTransform((buf) => cacheChunks.push(buf));
         liveStreams.push(tee);
@@ -966,7 +1020,7 @@ async function performUpstreamCall(
       const onStreamDone = () => {
         if (streamSettled) return;
         streamSettled = true;
-        clearTimeout(readTimeoutTimer);
+        clearIdleTimeout();
         void (async () => {
           const latencyMs = performance.now() - startTime;
           recordAndLog(statusCode, 0, latencyMs, method, cleanPath, upstreamId, headers, clientIp);
@@ -994,7 +1048,7 @@ async function performUpstreamCall(
       const onStreamError = (err: any) => {
         if (streamSettled) return;
         streamSettled = true;
-        clearTimeout(readTimeoutTimer);
+        clearIdleTimeout();
         destroyAll();
         if (abortHandle.aborted) {
           finishOutcome({ kind: "aborted" });
@@ -1006,7 +1060,7 @@ async function performUpstreamCall(
       res.on("finish", onStreamDone);
       res.on("error", onStreamError);
       upstreamRes.on("error", onStreamError);
-      byteGuard.on("error", onStreamError);
+      byteGuard?.on("error", onStreamError);
     });
 
     // Covers the connecting phase, before any 'response' event: if the client disconnects
@@ -1024,6 +1078,7 @@ async function performUpstreamCall(
         finishOutcome({ kind: "aborted" });
         return;
       }
+      clearIdleTimeout();
       proxyReq.destroy();
       recordAndLog(504, 0, workerConfig.server.connectTimeoutMs, method, cleanPath, upstreamId, headers, clientIp);
       finishOutcome({ kind: "retryable-error", statusCode: 504, errorMessage: "Connect Timeout" });
@@ -1031,6 +1086,7 @@ async function performUpstreamCall(
 
     proxyReq.on("error", (err: any) => {
       clearTimeout(connectTimeoutTimer);
+      clearIdleTimeout();
       if (abortHandle.aborted) {
         finishOutcome({ kind: "aborted" });
         return;
@@ -1040,7 +1096,13 @@ async function performUpstreamCall(
       finishOutcome({ kind: "retryable-error", statusCode: 502, errorMessage: `Upstream connection failed: ${err.message}` });
     });
 
-    if (bodySource.mode === "buffered") {
+    if (bodySource.mode === "empty") {
+      // The overwhelmingly common case (GET/HEAD, no body) skips stream.pipeline() entirely
+      // — profiling under load showed its internal AbortController/eos() bookkeeping (needed
+      // to replay backpressure/error state between two real streams) costing real CPU even
+      // when there's nothing to stream; a bodyless request has nothing for it to do.
+      proxyReq.end();
+    } else if (bodySource.mode === "buffered") {
       if (bodySource.buffer.length > 0) proxyReq.write(bodySource.buffer);
       proxyReq.end();
     } else {
@@ -1235,7 +1297,9 @@ async function handleProxyDispatch(
     const bodySource: Parameters<typeof performUpstreamCall>[7] =
       useBufferedBody && bufferedBody !== undefined
         ? { mode: "buffered", buffer: bufferedBody }
-        : { mode: "stream", req, limit: effectiveBodyLimit };
+        : hasBody
+          ? { mode: "stream", req, limit: effectiveBodyLimit }
+          : { mode: "empty" };
     if (bodySource.mode === "stream" && hasBody) {
       // Point of no return: once we start piping the client's body into this attempt, the
       // stream can never be replayed for a later attempt. Safe here because useBufferedBody

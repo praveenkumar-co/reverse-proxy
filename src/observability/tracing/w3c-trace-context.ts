@@ -24,6 +24,15 @@ export function generateSpanId(): string {
   return crypto.randomBytes(8).toString("hex");
 }
 
+/** Equivalent to generateTraceId() + generateSpanId(), but one crypto.randomBytes() call
+ *  instead of two — for the common case (no incoming trace context at all) where a request
+ *  needs both freshly minted. Splitting one 24-byte CSPRNG read into a 16-byte and an 8-byte
+ *  slice is exactly as random as two independent reads of those sizes. */
+export function generateTraceAndSpanId(): { traceId: string; spanId: string } {
+  const buf = crypto.randomBytes(24);
+  return { traceId: buf.subarray(0, 16).toString("hex"), spanId: buf.subarray(16, 24).toString("hex") };
+}
+
 /** Returns undefined for a missing, malformed, or all-zero (invalid per spec) header. */
 export function parseTraceParent(header: string | undefined): ParsedTraceParent | undefined {
   if (!header) return undefined;

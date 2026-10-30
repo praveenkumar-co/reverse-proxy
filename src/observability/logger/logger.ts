@@ -1,4 +1,4 @@
-import { promises as fs } from "fs";
+import { promises as fs, createWriteStream, type WriteStream } from "fs";
 import path from "path";
 
 export type LogLevel = "INFO" | "WARN" | "ERROR";
@@ -23,6 +23,34 @@ const C: Record<LogLevel | "reset" | "dim", string> = isTTY
 export class Logger {
   private eventLogPath?: string;
   private minLevel: LogLevel = "INFO";
+  // Every access-log/event-log write used to call fs.mkdir(..., {recursive:true}) first —
+  // a real syscall on every single request once access logging is on, even though the
+  // directory only needs creating once per process. Cached here instead: ensure it exists
+  // the first time a given resolved directory is written to, skip the check after that.
+  private ensuredLogDirs = new Set<string>();
+
+  private async ensureLogDir(dir: string): Promise<void> {
+    if (this.ensuredLogDirs.has(dir)) return;
+    await fs.mkdir(dir, { recursive: true });
+    this.ensuredLogDirs.add(dir);
+  }
+
+  // fs.appendFile() opens, writes, and closes the file on every single call — fine for a rare
+  // event-log line, real overhead once access logging (on by default) is writing one line per
+  // request. A write stream opened once and reused keeps one fd open and just writes to it;
+  // O_APPEND still makes each individual write() atomic, so this is exactly as safe for
+  // multiple worker processes appending to the same path concurrently as the old per-call
+  // open/write/close was.
+  private logStreams = new Map<string, WriteStream>();
+  private getLogStream(fullPath: string): WriteStream {
+    let stream = this.logStreams.get(fullPath);
+    if (!stream) {
+      stream = createWriteStream(fullPath, { flags: "a" });
+      stream.on("error", () => {}); // a broken stream just means subsequent writes silently no-op
+      this.logStreams.set(fullPath, stream);
+    }
+    return stream;
+  }
 
   configure(config: LoggerConfig): void {
     if (config.eventLogPath !== undefined){
@@ -62,8 +90,8 @@ export class Logger {
       `${statusCode} ${bytesSent} "-" "${userAgent}" ${latencyMs.toFixed(2)}ms\n`;
     try {
       const fullPath = path.resolve(logPath);
-      await fs.mkdir(path.dirname(fullPath), { recursive: true });
-      await fs.appendFile(fullPath, line, "utf8");
+      await this.ensureLogDir(path.dirname(fullPath));
+      this.getLogStream(fullPath).write(line);
     } catch (err: any){
       this._emit("ERROR", "Logger", `Failed to write access log: ${err.message}`);
     }
@@ -101,8 +129,8 @@ export class Logger {
     if (!this.eventLogPath) return;
     try {
       const fullPath = path.resolve(this.eventLogPath);
-      await fs.mkdir(path.dirname(fullPath), { recursive: true });
-      await fs.appendFile(fullPath, line, "utf8");
+      await this.ensureLogDir(path.dirname(fullPath));
+      this.getLogStream(fullPath).write(line);
     } catch {}
   }
 }
