@@ -16,13 +16,29 @@
 //   5. Abort isolation:           3 client aborts against a healthy upstream
 //                                 must not open the circuit breaker; the next
 //                                 request must return 200, not 503.
+//   6. Retry-buffer streaming:    a 5MB POST on a retry-eligible route (known
+//                                 Content-Length over retryBufferLimitBytes)
+//                                 skips buffering entirely; SHA-256 intact,
+//                                 RSS growth across 20 concurrent requests
+//                                 stays far below what full buffering would cost.
+//   7. Retry-buffer replay:       a 100KB POST (under the limit) is still
+//                                 fully buffered — the upstream's first-attempt
+//                                 failure is retried once, with byte-identical
+//                                 bodies both times, and the client sees 200.
+//   8. Retry-buffer cutover:      a 5MB POST to a failing upstream is streamed
+//                                 (not buffered) and therefore NOT retried —
+//                                 client gets 502, upstream saw exactly 1 call.
+//   9. Chunked overflow:          a chunked (no Content-Length) 3MB POST is
+//                                 read incrementally, crosses retryBufferLimitBytes
+//                                 mid-request, and switches to streaming with
+//                                 no byte lost or duplicated (SHA-256 matches).
 //
 // All mock upstreams are started before the proxy boots (the proxy's initial
 // health check would otherwise mark every upstream down). Exits 1 if any
 // assertion fails.
 // =============================================================================
 
-import { spawn } from "node:child_process";
+import { spawn, execSync } from "node:child_process";
 import http from "node:http";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -40,6 +56,9 @@ const UP_SSE = 4702;
 const UP_POST = 4703;
 const UP_LARGE = 4704;
 const UP_ABORT = 4705;
+const UP_RETRY_BIG = 4706; // shared by the big-body and chunked-overflow cases (two routes, one upstream)
+const UP_RETRY_FLAKY_SMALL = 4707;
+const UP_RETRY_FLAKY_BIG = 4708;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -301,6 +320,232 @@ async function testAbortIsolation() {
 }
 
 // ----------------------------------------------------------------------------
+// Tests 6-9: Step G — retry-safe body buffering switches to streaming once
+// server.retryBufferLimitBytes (default 1 MiB) is exceeded, instead of
+// buffering an arbitrarily large body just to make it replayable on retry.
+// ----------------------------------------------------------------------------
+function getProcessTreeRssKB(rootPid) {
+  function getChildPids(pid) {
+    try {
+      return execSync(`pgrep -P ${pid}`, { stdio: ["ignore", "pipe", "ignore"] })
+        .toString()
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .map(Number);
+    } catch {
+      return [];
+    }
+  }
+  const pids = [rootPid, ...getChildPids(rootPid)];
+  try {
+    const out = execSync(`ps -o rss= -p ${pids.join(",")}`, { stdio: ["ignore", "pipe", "ignore"] }).toString();
+    return out
+      .split("\n")
+      .map((s) => parseInt(s.trim(), 10))
+      .filter((n) => !Number.isNaN(n))
+      .reduce((a, b) => a + b, 0);
+  } catch {
+    return 0;
+  }
+}
+
+function postWithIdempotency(urlPath, body, { headers = {}, agent } = {}) {
+  return request(urlPath, {
+    method: "POST",
+    headers: { "Idempotency-Key": crypto.randomUUID(), "Content-Type": "application/octet-stream", ...headers },
+    body,
+    agent,
+  });
+}
+
+// Sends `body` with no Content-Length header, writing it across multiple req.write()
+// calls — Node's http client can't know the total length up front in that case, so it
+// sends Transfer-Encoding: chunked automatically.
+function postChunked(urlPath, body) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: "127.0.0.1",
+        port: PROXY_PORT,
+        path: urlPath,
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID(), "Content-Type": "application/octet-stream" },
+      },
+      (res) => {
+        const chunks = [];
+        res.on("data", (c) => chunks.push(c));
+        res.on("end", () => resolve({ status: res.statusCode, body: Buffer.concat(chunks) }));
+        res.on("error", reject);
+      },
+    );
+    req.on("error", reject);
+    const CHUNK = 256 * 1024;
+    let offset = 0;
+    function writeMore() {
+      while (offset < body.length) {
+        const slice = body.subarray(offset, Math.min(offset + CHUNK, body.length));
+        offset += slice.length;
+        if (!req.write(slice)) {
+          req.once("drain", writeMore);
+          return;
+        }
+      }
+      req.end();
+    }
+    writeMore();
+  });
+}
+
+// Shared by /retry-big (known-oversized Content-Length, test 6) and /retry-chunked
+// (unknown length that overflows mid-request, test 9) — a route-level distinction, not
+// an upstream one; both just hash whatever bytes they actually receive.
+function retryBigOrChunkedHandler(req, res) {
+  const cleanPath = (req.url || "/").split("?")[0];
+  if (cleanPath !== "/retry-big" && cleanPath !== "/retry-chunked") {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("ok");
+    return;
+  }
+  const hash = crypto.createHash("sha256");
+  let bytes = 0;
+  req.on("data", (c) => {
+    hash.update(c);
+    bytes += c.length;
+  });
+  req.on("end", () => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ sha256: hash.digest("hex"), bytes }));
+  });
+}
+
+let flakySmallCalls = 0;
+const flakySmallHashes = [];
+function flakySmallHandler(req, res) {
+  const cleanPath = (req.url || "/").split("?")[0];
+  if (cleanPath !== "/retry-flaky-small") {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("ok");
+    return;
+  }
+  flakySmallCalls++;
+  const callNum = flakySmallCalls;
+  const hash = crypto.createHash("sha256");
+  req.on("data", (c) => hash.update(c));
+  req.on("end", () => {
+    flakySmallHashes.push(hash.digest("hex"));
+    if (callNum === 1) {
+      res.writeHead(502, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "simulated upstream failure" }));
+    } else {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, call: callNum }));
+    }
+  });
+}
+
+let flakyBigCalls = 0;
+function flakyBigHandler(req, res) {
+  const cleanPath = (req.url || "/").split("?")[0];
+  if (cleanPath !== "/retry-flaky-big") {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("ok");
+    return;
+  }
+  flakyBigCalls++;
+  req.on("data", () => {});
+  req.on("end", () => {
+    res.writeHead(502, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "simulated upstream failure" }));
+  });
+}
+
+async function testRetryBigBodyStreamedWithBoundedRss() {
+  const SIZE = 5 * 1024 * 1024;
+  const CONCURRENCY = 20;
+  const bodies = Array.from({ length: CONCURRENCY }, () => crypto.randomBytes(SIZE));
+  const expectedShas = bodies.map((b) => crypto.createHash("sha256").update(b).digest("hex"));
+
+  await sleep(200);
+  const baselineRssMB = getProcessTreeRssKB(proxyProc.pid) / 1024;
+  let peakRssMB = baselineRssMB;
+  const sampler = setInterval(() => {
+    const rss = getProcessTreeRssKB(proxyProc.pid) / 1024;
+    if (rss > peakRssMB) peakRssMB = rss;
+  }, 25);
+
+  const agent = new http.Agent({ keepAlive: true, maxSockets: CONCURRENCY });
+  const results = await Promise.all(
+    bodies.map((b) => postWithIdempotency("/retry-big", b, { agent }).catch((err) => ({ error: err.message }))),
+  );
+  agent.destroy();
+  clearInterval(sampler);
+
+  const growthMB = peakRssMB - baselineRssMB;
+  const allOk = results.every((r, i) => {
+    if (!r || r.error) return false;
+    try {
+      const parsed = JSON.parse(r.body.toString("utf8"));
+      return r.status === 200 && parsed.sha256 === expectedShas[i] && parsed.bytes === SIZE;
+    } catch {
+      return false;
+    }
+  });
+  const naiveFullBufferMB = (SIZE * CONCURRENCY) / 1024 / 1024;
+  record(
+    "6. 5MB POST x20 concurrent on a retry-eligible route: SHA-256 matches, RSS growth well under naive full-buffering",
+    allOk && growthMB < 50,
+    `all 20 SHA-256 matched=${allOk}, RSS growth=${growthMB.toFixed(1)}MB (naive full-buffer of all 20 bodies would be ~${naiveFullBufferMB}MB)`,
+  );
+}
+
+async function testRetryFlakySmallRetriedOnce() {
+  flakySmallCalls = 0;
+  flakySmallHashes.length = 0;
+  const SIZE = 100 * 1024;
+  const body = crypto.randomBytes(SIZE);
+  const expectedSha = crypto.createHash("sha256").update(body).digest("hex");
+
+  const r = await postWithIdempotency("/retry-flaky-small", body);
+  const bothAttemptsIdentical = flakySmallHashes.length === 2 && flakySmallHashes.every((h) => h === expectedSha);
+  record(
+    "7. 100KB POST retried once after upstream fails first attempt: identical bytes both times, client gets 200",
+    r.status === 200 && flakySmallCalls === 2 && bothAttemptsIdentical,
+    `status=${r.status}, upstream calls=${flakySmallCalls}, both attempts byte-identical=${bothAttemptsIdentical}`,
+  );
+}
+
+async function testRetryBigBodyNotRetried() {
+  flakyBigCalls = 0;
+  const SIZE = 5 * 1024 * 1024;
+  const body = crypto.randomBytes(SIZE);
+
+  const r = await postWithIdempotency("/retry-flaky-big", body);
+  record(
+    "8. 5MB POST to a failing upstream on a retry-eligible route: streamed (not buffered) so NOT retried — client gets 502, upstream saw exactly 1 attempt",
+    r.status === 502 && flakyBigCalls === 1,
+    `status=${r.status}, upstream calls=${flakyBigCalls}`,
+  );
+}
+
+async function testRetryChunkedBodyOverflow() {
+  const SIZE = 3 * 1024 * 1024;
+  const body = crypto.randomBytes(SIZE);
+  const expectedSha = crypto.createHash("sha256").update(body).digest("hex");
+
+  const r = await postChunked("/retry-chunked", body);
+  let parsed;
+  try {
+    parsed = JSON.parse(r.body.toString("utf8"));
+  } catch {}
+  record(
+    "9. Chunked (no Content-Length) 3MB POST crosses retryBufferLimitBytes mid-request: streamed, SHA-256 matches",
+    r.status === 200 && parsed?.sha256 === expectedSha && parsed?.bytes === SIZE,
+    `status=${r.status}, sha-match=${parsed?.sha256 === expectedSha}, bytes=${parsed?.bytes}/${SIZE}`,
+  );
+}
+
+// ----------------------------------------------------------------------------
 // Harness plumbing
 // ----------------------------------------------------------------------------
 const CONFIG_YAML = `
@@ -309,6 +554,9 @@ server:
   workers: 1
   compression: false
   maxResponseBytes: ${30 * 1024 * 1024}
+  # Default is 1 MiB — spelled out explicitly since the retry-buffer tests assert
+  # behavior on both sides of this exact threshold (100KB under it, 3MB/5MB over it).
+  retryBufferLimitBytes: ${1 * 1024 * 1024}
 
 tls:
   enabled: false
@@ -337,6 +585,15 @@ upstreams:
   - id: abort-backend
     url: "http://127.0.0.1:${UP_ABORT}"
     healthPath: "/"
+  - id: retry-big-backend
+    url: "http://127.0.0.1:${UP_RETRY_BIG}"
+    healthPath: "/"
+  - id: retry-flaky-small-backend
+    url: "http://127.0.0.1:${UP_RETRY_FLAKY_SMALL}"
+    healthPath: "/"
+  - id: retry-flaky-big-backend
+    url: "http://127.0.0.1:${UP_RETRY_FLAKY_BIG}"
+    healthPath: "/"
 
 routes:
   - path: "/binary"
@@ -354,14 +611,32 @@ routes:
   - path: "/abort-test"
     upstreams: ["abort-backend"]
     cache: { enabled: false }
+  - path: "/retry-big"
+    upstreams: ["retry-big-backend"]
+    cache: { enabled: false }
+  - path: "/retry-chunked"
+    upstreams: ["retry-big-backend"]
+    cache: { enabled: false }
+  - path: "/retry-flaky-small"
+    upstreams: ["retry-flaky-small-backend"]
+    cache: { enabled: false }
+  - path: "/retry-flaky-big"
+    upstreams: ["retry-flaky-big-backend"]
+    cache: { enabled: false }
 
 loadBalancing:
   strategy: round-robin
+  retry:
+    maxAttempts: 2
+    statusCodes: [502, 503, 504]
 
 resilience:
   retry:
     enabled: true
-    maxAttempts: 0
+    maxAttempts: 2
+    retryOn:
+      localNodeFailure: true
+      systemOverload: true
   circuitBreaker:
     mode: classic
     failureThreshold: 3
@@ -455,6 +730,9 @@ async function main() {
     startMock(UP_POST, postHandler),
     startMock(UP_LARGE, largeHandler),
     startMock(UP_ABORT, abortHandler),
+    startMock(UP_RETRY_BIG, retryBigOrChunkedHandler),
+    startMock(UP_RETRY_FLAKY_SMALL, flakySmallHandler),
+    startMock(UP_RETRY_FLAKY_BIG, flakyBigHandler),
   ]);
   log(`${mockServers.length} mock upstreams ready.`);
 
@@ -483,6 +761,10 @@ async function main() {
   await testNoDuplicatePosts();
   await testLargeResponse();
   await testAbortIsolation();
+  await testRetryBigBodyStreamedWithBoundedRss();
+  await testRetryFlakySmallRetriedOnce();
+  await testRetryBigBodyNotRetried();
+  await testRetryChunkedBodyOverflow();
 
   printSummary();
 

@@ -33,5 +33,6 @@ export interface RouteRule {
   auth?: RouteAuthConfig;
   cors?: RouteCorsConfig;
   maxBodyBytes?: number;
+  retryBufferLimitBytes?: number;
 }
 

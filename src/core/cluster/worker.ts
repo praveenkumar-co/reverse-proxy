@@ -76,6 +76,7 @@ function getEffectiveResilience(config: RootConfigType) {
 }
 
 const MAX_REQUEST_BODY_BYTES_DEFAULT = workerConfig.server.maxRequestBodyBytes ?? 10 * 1024 * 1024;
+const RETRY_BUFFER_LIMIT_BYTES_DEFAULT = workerConfig.server.retryBufferLimitBytes ?? 1 * 1024 * 1024;
 const maxResponseBytes = workerConfig.server.maxResponseBytes ?? 25 * 1024 * 1024;
 
 const routeMatcher = new RouteMatcher(workerConfig.server.paths as RouteRule[]);
@@ -548,8 +549,8 @@ async function tryServeStaleOnError(
 /** A byte-counting passthrough Transform that errors once `maxBytes` is exceeded — used for
  *  both the request-body and response-body caps, enforced while streaming (native
  *  backpressure throughout; nothing is ever buffered whole just to check its size). */
-function createByteLimitGuard(maxBytes: number, onChunk?: (buf: Buffer) => void): Transform {
-  let received = 0;
+function createByteLimitGuard(maxBytes: number, onChunk?: (buf: Buffer) => void, initialBytes = 0): Transform {
+  let received = initialBytes;
   return new Transform({
     transform(chunk: Buffer, _enc, callback) {
       received += chunk.length;
@@ -712,7 +713,7 @@ async function performUpstreamCall(
   bodySource:
     | { mode: "empty" }
     | { mode: "buffered"; buffer: Buffer }
-    | { mode: "stream"; req: http.IncomingMessage; limit: number },
+    | { mode: "stream"; req: http.IncomingMessage; limit: number; prefix?: Buffer | undefined },
   pathRule: RouteRule | undefined,
   routeStage: string | undefined,
   setCanaryCookieVal: string | undefined,
@@ -1106,7 +1107,12 @@ async function performUpstreamCall(
       if (bodySource.buffer.length > 0) proxyReq.write(bodySource.buffer);
       proxyReq.end();
     } else {
-      const guard = createByteLimitGuard(bodySource.limit);
+      // A retry-buffer overflow (see handleProxyDispatch) already consumed `prefix` bytes from
+      // `req` before giving up on buffering — write them first, in order, then pipe the rest of
+      // the live stream. The guard's count starts at prefix.length so the combined prefix+stream
+      // total is still held to the same limit, instead of allowing `limit` bytes on top of it.
+      if (bodySource.prefix && bodySource.prefix.length > 0) proxyReq.write(bodySource.prefix);
+      const guard = createByteLimitGuard(bodySource.limit, undefined, bodySource.prefix?.length ?? 0);
       pipeline(bodySource.req as any, guard as any, proxyReq as any).catch((err: any) => {
         clearTimeout(connectTimeoutTimer);
         if (err?.message === "BYTE_LIMIT_EXCEEDED") {
@@ -1188,39 +1194,76 @@ async function handleProxyDispatch(
 
   const rule: RouteRule = pathRule;
   const effectiveBodyLimit = rule.maxBodyBytes ?? MAX_REQUEST_BODY_BYTES_DEFAULT;
+  const retryBufferLimit = rule.retryBufferLimitBytes ?? RETRY_BUFFER_LIMIT_BYTES_DEFAULT;
   const retryConfig = workerConfig.server.loadBalancing.retry;
   const effectiveResilience = getEffectiveResilience(workerConfig);
   const methodRetrySafe = isMethodRetrySafe(method, req.headers, effectiveResilience?.retry?.retryMutatingMethods ?? false);
-  const contentLength = parseInt(String(req.headers["content-length"] ?? "0"), 10);
+  const contentLengthHeader = req.headers["content-length"];
+  const contentLength = parseInt(String(contentLengthHeader ?? "0"), 10);
   const hasBody = contentLength > 0 || req.headers["transfer-encoding"] === "chunked";
   const canRetry = retryConfig.maxAttempts > 0;
-  const useBufferedBody = hasBody && canRetry && methodRetrySafe;
+  const retryBufferingWanted = hasBody && canRetry && methodRetrySafe;
+  // A known Content-Length over the limit never needs to read a byte before deciding to
+  // stream — only an unknown (chunked) length has to be read incrementally to find out.
+  const contentLengthKnownOversized = retryBufferingWanted && contentLengthHeader !== undefined && contentLength > retryBufferLimit;
+  const useBufferedBody = retryBufferingWanted && !contentLengthKnownOversized;
 
   let bufferedBody: Buffer | undefined;
+  let streamPrefix: Buffer | undefined;
   if (useBufferedBody) {
-    bufferedBody = await new Promise<Buffer | undefined>((resolve) => {
+    const result = await new Promise<{ ok: true; buffer: Buffer } | { ok: true; prefix: Buffer } | { ok: false }>((resolve) => {
       const chunks: Buffer[] = [];
       let received = 0;
-      let rejected = false;
-      req.on("data", (chunk: Buffer) => {
-        if (rejected) return;
+      let settled = false;
+      const onData = (chunk: Buffer) => {
+        if (settled) return;
         received += chunk.length;
         if (received > effectiveBodyLimit) {
-          rejected = true;
+          settled = true;
+          cleanup();
           req.destroy();
           res.writeHead(413, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Payload Too Large" }));
-          resolve(undefined);
+          resolve({ ok: false });
           return;
         }
         chunks.push(chunk);
-      });
-      req.on("end", () => {
-        if (!rejected) resolve(Buffer.concat(chunks));
-      });
-      req.on("error", () => resolve(undefined));
+        if (received > retryBufferLimit) {
+          // Over the retry-buffer limit but still under the hard body-size cap: give up on
+          // buffering (and therefore on retrying this request) rather than hold the rest of
+          // a large body in memory too. Pause the stream — removing our own listeners first —
+          // so performUpstreamCall can later write these already-read bytes, then pipe the
+          // untouched remainder of `req` straight through with no gap or duplication.
+          settled = true;
+          cleanup();
+          req.pause();
+          resolve({ ok: true, prefix: Buffer.concat(chunks) });
+        }
+      };
+      const onEnd = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve({ ok: true, buffer: Buffer.concat(chunks) });
+      };
+      const onError = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve({ ok: false });
+      };
+      function cleanup() {
+        req.off("data", onData);
+        req.off("end", onEnd);
+        req.off("error", onError);
+      }
+      req.on("data", onData);
+      req.on("end", onEnd);
+      req.on("error", onError);
     });
-    if (bufferedBody === undefined) return; // 413 already sent
+    if (!result.ok) return; // 413 already sent, or the client errored with no response to give
+    if ("buffer" in result) bufferedBody = result.buffer;
+    else streamPrefix = result.prefix;
   }
 
   let bodyStreamed = false;
@@ -1298,7 +1341,7 @@ async function handleProxyDispatch(
       useBufferedBody && bufferedBody !== undefined
         ? { mode: "buffered", buffer: bufferedBody }
         : hasBody
-          ? { mode: "stream", req, limit: effectiveBodyLimit }
+          ? { mode: "stream", req, limit: effectiveBodyLimit, prefix: streamPrefix }
           : { mode: "empty" };
     if (bodySource.mode === "stream" && hasBody) {
       // Point of no return: once we start piping the client's body into this attempt, the

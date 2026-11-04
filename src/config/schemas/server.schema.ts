@@ -103,6 +103,8 @@ const routeSchema = z.object({
   // Per-route override of server.maxRequestBodyBytes — e.g. a bulk-upload route that needs
   // a higher ceiling than the rest of the API.
   maxBodyBytes: z.number().optional(),
+  // Per-route override of server.retryBufferLimitBytes.
+  retryBufferLimitBytes: z.number().min(0).optional(),
 });
 
 
@@ -128,6 +130,13 @@ export const serverSchema = z.object({
   // during the stream (not just via the Content-Length header, which a client can omit or
   // understate). A route may raise or lower this via its own maxBodyBytes.
   maxRequestBodyBytes: z.number().default(10 * 1024 * 1024),
+  // A retry-eligible request's body is normally buffered in full so it can be replayed on
+  // retry. Above this limit (checked against Content-Length when known, or against bytes
+  // actually read for a chunked body), buffering is abandoned mid-request and the body is
+  // streamed straight through instead — the request becomes non-retryable, but no longer
+  // holds the whole body in memory. A route may raise or lower this via its own
+  // retryBufferLimitBytes.
+  retryBufferLimitBytes: z.number().min(0).default(1 * 1024 * 1024),
   // TCP listen() backlog — the OS-level queue of pending connections awaiting accept().
   // Node's own default (511) can drop/reset handshakes under a sudden burst of concurrent
   // connects; raise it for high-concurrency deployments.
