@@ -33,6 +33,7 @@
     "lint": "eslint src --ext .ts",
     "test:exploit": "node tests/adversarial-exploit-harness.mjs",
     "test:fire": "node tests/aggressive-fire-test.mjs",
+    "test:simulations": "for f in tests/simulations/*.mjs; do echo \"--- $f ---\"; node \"$f\" || exit 1; done",
     "audit:arch": "node scripts/deep-architecture-audit.mjs"
   },
   "keywords": [
