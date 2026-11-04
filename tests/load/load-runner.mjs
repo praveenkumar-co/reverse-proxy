@@ -18,7 +18,7 @@ import { spawn } from 'node:child_process';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(__dirname, '../..');
-const RESULT_DIR = path.join(ROOT_DIR, 'result', 'load-tests');
+const RESULT_DIR = path.join(ROOT_DIR, 'docs', 'results', 'load-tests');
 const CONFIG_FILE = path.join(__dirname, 'config.load.yaml');
 
 const MOCK_PORTS = [9001, 9002, 9003, 9004];
@@ -472,7 +472,7 @@ async function main() {
     results.push(r10);
 
     // =========================================================================
-    // PERSIST RESULTS IN result/load-tests/ DIRECTORY
+    // PERSIST RESULTS IN docs/results/load-tests/ DIRECTORY
     // =========================================================================
     if (!fs.existsSync(RESULT_DIR)) {
       fs.mkdirSync(RESULT_DIR, { recursive: true });
@@ -540,7 +540,7 @@ ${results.map((r, i) => `| **${i + 1}** | **${r.scenario}** | \`${r.workload}\` 
 `;
     fs.writeFileSync(reportPath, reportContent, 'utf-8');
 
-    // 3. Update result/load-tests/README.md
+    // 3. Update docs/results/load-tests/README.md
     const readmePath = path.join(RESULT_DIR, 'README.md');
     const updatedReadme = `# Load Test Results
 

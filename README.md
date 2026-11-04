@@ -21,40 +21,54 @@ Ninja Reverse Proxy has been rigorously verified against real-world production b
 
 ## 🏛️ Master-Worker Architecture Overview
 
-Ninja Reverse Proxy utilizes a highly performant **Master-Worker Cluster Architecture** that runs on all available CPU cores using Node.js Inter-Process Communication (IPC).
+Ninja Reverse Proxy runs on Node's `cluster` module, but the master is **control plane only**: workers each listen on the shared port (the OS/cluster module balances accepted connections across them — no socket or request/response IPC on the datapath) and run the full pipeline themselves — routing, auth, CORS, tracing, rate limiting, cache, load balancing, circuit breaker, retries, WebSocket tunneling — talking to upstreams directly. The master's job is limited to: forking/respawning workers, running active health checks and broadcasting results + the registry roster to workers, owning the canonical service registry (workers forward register/heartbeat/deregister over IPC), hot-reloading config, and aggregating `/metrics` + leasing in-memory rate-limit tokens across workers.
 
 ```
-                     +----------------------------+
-                     |        Client (WS/HTTPS)   |
-                     +--------------+-------------+
+                      +---------------------------+
+                      |       Client (WS/HTTPS)    |
+                      +-------------+--------------+
                                     |
-                                    ▼
-                     +----------------------------+
-                     |  Master Node (IPC Watchdog)|
-                     +-------+------------+-------+
-                             |            |
-                    (IPC Chans)          (IPC Chans)
-                             |            |
-            +----------------v---+    +---v----------------+
-            | Worker 1           |    | Worker 2           |
-            | - HTTP/WS Pipeline |    | - HTTP/WS Pipeline |
-            | - L1 In-Memory LRU |    | - L1 In-Memory LRU |
-            +-------+------------+    +---+----------------+
-                    |                     |
-             (TCP/WSS Proxy)       (TCP/WSS Proxy)
-                    |                     |
-      +-------------v---------------------v-------------+
-      |  Shared Distributed Tier:                       |
-      |  - L2 Response Cache (Redis)                    |
-      |  - Distributed Rate Limiter State (Redis Lua)   |
-      |  - Telemetry & Dynamic Service Registry         |
-      |  - Debezium CDC Invalidation Stream             |
-      +------+------------------------------------+-----+
-             |                                    |
-             ▼                                    ▼
-      +--------------+                     +--------------+
-      | Upstream A   |                     | Upstream B   |
-      +--------------+                     +--------------+
+                      (shared port — OS/cluster module
+                       balances accepted conns directly
+                       to a worker; no IPC on this path)
+                             |                |
+            +----------------v---+    +-------v-------------+
+            | Worker 1            |    | Worker 2            |
+            | Full HTTP/WS        |    | Full HTTP/WS        |
+            | pipeline, straight  |    | pipeline, straight  |
+            | to upstream         |    | to upstream         |
+            | + L1 In-Memory LRU  |    | + L1 In-Memory LRU  |
+            +-------+-------------+    +--------+------------+
+                    |      ^                    |      ^
+            (TCP/WSS Proxy)|            (TCP/WSS Proxy)|
+                    |      |                    |      |
+                    |      +----- control-plane IPC ----+
+                    |      (health broadcasts, registry    |
+                    |       mutations, config reload,      |
+                    |       metrics, rate-limit leases)     |
+                    |                  |                    |
+                    |          +-------v--------+            |
+                    |          | Master           |<----------+
+                    |          | control plane only:
+                    |          | forks/respawns workers,
+                    |          | owns the service registry,
+                    |          | hot-reloads config,
+                    |          | aggregates /metrics
+                    |          +-----------------+
+                    v
+      +-------------------------------------------+
+      |  Shared Distributed Tier (Redis):          |
+      |  - L2 Response Cache                       |
+      |  - Distributed Rate Limiter State (Lua)    |
+      |  - Dynamic Service Registry snapshot        |
+      |  - Debezium CDC → Redis Pub/Sub, explicit   |
+      |    per-table invalidation mappings          |
+      +------+---------------------------------+---+
+             |                                 |
+             ▼                                 ▼
+      +--------------+                  +--------------+
+      | Upstream A   |                  | Upstream B   |
+      +--------------+                  +--------------+
 ```
 
 ---
@@ -120,32 +134,29 @@ reverse-proxy/
 │   ├── 14-retry-bulkhead.md                   # Bulkhead slot isolation, RetryBudget & 4 jitter backoffs
 │   ├── 15-connection-pool.md                  # Keep-alive agents, maxSockets: 256 & socket reuse
 │   ├── 16-multi-tier-caching.md               # HybridCache: L1 RAM (<0.05ms) + L2 Redis write-through
-│   ├── 17-cdc-cache-invalidation.md           # Debezium CDC streaming invalidation on SQL/Mongo writes
+│   ├── 17-cdc-cache-invalidation.md           # Debezium CDC via Redis Pub/Sub, explicit per-table mappings
 │   ├── 18-tracing.md                          # Distributed Tracer, span lifecycle & X-Trace-Id header
 │   ├── 19-readiness-liveness.md               # ReadinessProbe multi-check gate vs Liveness checks
 │   ├── 20-tenant-log-streamer.md              # Asynchronous batched webhook dispatch per tenant
 │   ├── 21-deployment.md                       # Local run, cert generation & Prometheus/Grafana stack
 │   └── 22-testing-strategy.md                 # 5-tier testing pyramid & strict verification philosophy
 │
-├── logs/                                      # Access logs & log parsing guides
-│   ├── README.md                              # Combined log schema, field breakdown & awk queries
-│   └── access.log                             # Live access logs with microsecond latency metrics
+│   ├── REMEDIATION_PLAN.md                    # Audit-driven punch list behind the Phase A-F hardening work
+│   ├── diagrams/                              # Architecture diagrams (non-code assets)
+│   └── results/                               # Tiered test verification artifacts
+│       ├── README.md                          # Test reporting index & environment guidelines
+│       ├── unit-tests/
+│       │   └── README.md                      # Level 1: In-memory unit & algorithm audit scope
+│       ├── smoke-tests/
+│       │   └── README.md                      # Level 2: Transport & protocol smoke check specifications
+│       ├── integration-tests/
+│       │   └── README.md                      # Level 3: Strict 10-point real-application E2E suite
+│       ├── chaos-tests/
+│       │   └── README.md                      # Level 4: Fault injection, node kill & failover plans
+│       └── load-tests/
+│           └── README.md                      # Level 5: k6 sustained RPS & P99 latency criteria
 │
-├── result/                                    # Tiered test verification artifacts
-│   ├── README.md                              # Test reporting index & environment guidelines
-│   ├── unit-tests/
-│   │   └── README.md                          # Level 1: In-memory unit & algorithm audit scope
-│   ├── smoke-tests/
-│   │   └── README.md                          # Level 2: Transport & protocol smoke check specifications
-│   ├── integration-tests/
-│   │   └── README.md                          # Level 3: Strict 10-point real-application E2E suite
-│   ├── chaos-tests/
-│   │   └── README.md                          # Level 4: Fault injection, node kill & failover plans
-│   ├── load-tests/
-│   │   └── README.md                          # Level 5: k6 sustained RPS & P99 latency criteria
-│   └── request_check_for_graf.t/
-│       ├── image.png                          # Grafana metrics dashboard verification capture
-│       └── request.t                          # Historical curl check logs across features
+├── logs/                                      # Access log output dir, created at runtime; gitignored
 │
 ├── scripts/                                   # Operational & maintenance CLI utilities
 │   ├── README.md                              # Utility catalog & CLI argument reference
@@ -157,23 +168,22 @@ reverse-proxy/
 │
 ├── src/                                       # Core Reverse Proxy Engine
 │   ├── index.ts                               # CLI entrypoint & bootstrap orchestrator
+│   ├── lib.ts                                 # npm library entry point (createServer, reloadServerConfig, public barrels)
 │   │
 │   ├── balancer/                              # Load Balancing Subsystem
 │   │   ├── index.ts                           # Load balancer module exports
-│   │   ├── contracts/                         # Load balancing interfaces & types
+│   │   ├── contracts/                         # Load balancing interfaces
 │   │   │   ├── balancer.interface.ts          # ILoadBalancer contract definition
-│   │   │   ├── context.types.ts               # Routing context & client metadata types
 │   │   │   └── strategy.interface.ts          # IStrategy contract definition
 │   │   ├── core/                              # Core load balancer logic
 │   │   │   ├── load-balancer.ts               # LoadBalancer class with pickFiltered()
 │   │   │   └── strategy-registry.ts           # Registry mapping strategy names to instances
 │   │   ├── factory/                           # Strategy factory layer
-│   │   │   ├── balancer.factory.ts            # Dynamic strategy instantiation from config
-│   │   │   └── explain.t                      # Design notes on strategy factory pattern
+│   │   │   └── balancer.factory.ts            # Dynamic strategy instantiation from config
 │   │   └── strategies/                        # 12 Implemented Strategy Algorithms
 │   │       ├── adaptive-wrr.strategy.ts       # Latency EWMA dynamic weight balancing
 │   │       ├── consistent-hashing.strategy.ts # 150-virtual-node Ketama hash ring
-│   │       ├── ip-hash.strategy.ts            # Deterministic FNV-1a IP modulo hash
+│   │       ├── ip-hash.strategy.ts             # Deterministic FNV-1a IP modulo hash
 │   │       ├── least-connections.strategy.ts  # Minimal active connection routing
 │   │       ├── least-response-time.strategy.ts# EWMA latency-sensitive routing
 │   │       ├── power-of-two.strategy.ts       # O(1) random two-choice selection (P2C)
@@ -192,7 +202,7 @@ reverse-proxy/
 │   │   │   ├── cache-config.interface.ts      # Cache configuration types
 │   │   │   └── invalidator.interface.ts       # IInvalidator contract
 │   │   ├── invalidation/                      # Cache invalidation mechanisms
-│   │   │   ├── debezium.invalidator.ts        # Event-driven CDC SQL/Mongo log parser
+│   │   │   ├── debezium.invalidator.ts        # Redis Pub/Sub Debezium CDC event parser (explicit table→path mappings)
 │   │   │   ├── pattern.invalidator.ts         # Wildcard glob pattern cache purger
 │   │   │   └── tag.invalidator.ts             # Entity metadata tag purger
 │   │   ├── policies/                          # Caching policies & parsers
@@ -207,10 +217,7 @@ reverse-proxy/
 │   │
 │   ├── config/                                # Configuration Engine
 │   │   ├── index.ts                           # Config module exports
-│   │   ├── config.ts                          # Loaded config singleton
-│   │   ├── config.loader.ts                   # YAML reader, environment resolver & SIGHUP reloader
-│   │   ├── config-schema.ts                   # Master Zod schema
-│   │   ├── server-schema.ts                   # Server sub-schema definition
+│   │   ├── config.loader.ts                   # YAML reader, environment resolver, validateConfig() & SIGHUP reloader
 │   │   └── schemas/                           # Zod Modular Schemas
 │   │       ├── admin.schema.ts                # Admin API configuration schema
 │   │       ├── balancer.schema.ts             # Load balancer options schema
@@ -224,10 +231,11 @@ reverse-proxy/
 │   ├── core/                                  # Core Cluster & Pipeline Orchestration
 │   │   ├── admin/
 │   │   │   └── admin.handler.ts               # Internal admin API route handler
-│   │   ├── cluster/                           # Master/Worker IPC Cluster Architecture
-│   │   │   ├── ipc.protocol.ts                # Master-Worker IPC message contracts
-│   │   │   ├── master.ts                      # Cluster master: TLS, LB, WS routing & worker watchdog
-│   │   │   └── worker.ts                      # Cluster worker: pipeline execution & upstream proxying
+│   │   ├── cluster/                           # Master/Worker Cluster
+│   │   │   ├── master.ts                      # Control plane only: forks/respawns workers, owns the
+│   │   │   │                                  # service registry, hot-reloads config, aggregates /metrics
+│   │   │   └── worker.ts                      # Owns the full datapath: listens on the shared port and
+│   │   │                                      # runs the entire pipeline straight through to upstreams
 │   │   ├── pipeline/                          # Middleware Pipeline Execution
 │   │   │   ├── context.ts                     # RequestContext factory (IP, startTime, metadata)
 │   │   │   └── middleware.pipeline.ts         # Onion-model middleware pipeline runner
@@ -236,12 +244,10 @@ reverse-proxy/
 │   │   │   └── websocket.handler.ts           # L4 bidirectional TCP pipe tunnel for WebSockets
 │   │   └── router/                            # Route Matching & Path Rules
 │   │       ├── route.matcher.ts               # First-match router with method guards
-│   │       ├── route.types.ts                 # RouteRule definitions & path options
-│   │       └── router.ts                      # Router class abstraction
+│   │       └── route.types.ts                 # RouteRule definitions & path options
 │   │
 │   ├── discovery/                             # Service Discovery & Health Checking
 │   │   ├── index.ts                           # Discovery module exports
-│   │   ├── target-node.ts                     # Target node representation
 │   │   ├── contracts/
 │   │   │   └── registry.interface.ts          # IServiceRegistry interface
 │   │   ├── health/                            # Health Probe Implementations
@@ -251,14 +257,9 @@ reverse-proxy/
 │   │   └── registry/                          # Service Registries
 │   │       └── dynamic.registry.ts            # Dynamic registry with atomic .tmp disk snapshot
 │   │
-│   ├── middleware/                            # Onion Middleware Pipeline Implementations
+│   ├── middleware/                            # Standalone middleware used by the worker pipeline
 │   │   ├── auth.middleware.ts                 # Bearer token & API key authorization
-│   │   ├── body-limit.middleware.ts           # Payload size ceiling enforcement
-│   │   ├── cache.middleware.ts                # Cache lookup, short-circuit & response buffering
-│   │   ├── circuit.middleware.ts              # Circuit breaker gating & 503 fast-fail
 │   │   ├── cors.middleware.ts                 # CORS preflight & header injection
-│   │   ├── logging.middleware.ts              # Access logging with microsecond timing
-│   │   ├── rate-limit.middleware.ts           # Multi-dimensional rate limit enforcement
 │   │   └── tracing.middleware.ts              # Trace ID extraction & span generation
 │   │
 │   ├── observability/                         # Observability, Telemetry & Tracing
@@ -273,26 +274,21 @@ reverse-proxy/
 │   │   │   ├── prometheus.exporter.ts         # MetricsRegistry formatting OpenMetrics exposition
 │   │   │   └── system.metrics.ts              # CPU load, memory RSS & process uptime collector
 │   │   └── tracing/                           # Distributed Tracing
-│   │       └── tracer.ts                      # In-process Tracer managing span lifecycles
+│   │       ├── tracer.ts                      # In-process Tracer managing span lifecycles
+│   │       └── w3c-trace-context.ts           # W3C traceparent header parsing & propagation
 │   │
 │   ├── ratelimit/                             # Rate Limiting Engine
 │   │   ├── index.ts                           # Rate limit module exports
-│   │   ├── rate-limiter.ts                    # RateLimiter facade
+│   │   ├── rate-limiter.ts                    # RateLimiter facade — memory/redis/hybrid storage via Lua scripts
+│   │   ├── bounded-store.ts                   # Bounded Map store backing the in-memory algorithms
 │   │   ├── algorithms/                        # 5 Rate Limiting Algorithms
 │   │   │   ├── fixed-window.ts                # Discrete time-slice counter
 │   │   │   ├── leaking-bucket.ts              # Constant-rate queue drain
 │   │   │   ├── sliding-window-counter.ts      # Weighted previous/current window interpolation
 │   │   │   ├── sliding-window-log.ts          # Exact microsecond timestamp log
 │   │   │   └── token-bucket.ts                # Continuous refill token bucket with burst capacity
-│   │   ├── contracts/                         # Rate limit contracts
-│   │   │   ├── limiter.interface.ts           # IRateLimiterAlgorithm contract
-│   │   │   └── storage.interface.ts           # IRateLimitStore contract (increment, count, reset)
-│   │   ├── policies/                          # Rate limit policies
-│   │   │   └── soft-limit.policy.ts           # Dynamic burst multiplier below load threshold
-│   │   └── storage/                           # Rate Limit Storage Adapters
-│   │       ├── hybrid.store.ts                # L1 Memory + L2 Redis fallback store
-│   │       ├── memory.store.ts                # Local in-memory Map store
-│   │       └── redis.store.ts                 # Atomic Redis Lua script store
+│   │   └── policies/                          # Rate limit policies
+│   │       └── soft-limit.policy.ts           # Dynamic burst multiplier below load threshold
 │   │
 │   ├── resilience/                            # Fault Tolerance & Resilience Subsystem
 │   │   ├── index.ts                           # Resilience module exports
@@ -302,13 +298,11 @@ reverse-proxy/
 │   │   │   ├── adaptive.circuit-breaker.ts    # Google SRE drop probability breaker
 │   │   │   ├── circuit-breaker.manager.ts     # Singleton manager caching breakers per upstream
 │   │   │   ├── classic.circuit-breaker.ts     # CLOSED → OPEN → HALF_OPEN state machine
-│   │   │   ├── contracts/
-│   │   │   │   └── circuit-breaker.interface.ts # ICircuitBreaker contract
+│   │   │   └── contracts/
+│   │   │       └── circuit-breaker.interface.ts # ICircuitBreaker contract
 │   │   └── retry/                             # Retry Engine
+│   │       ├── idempotency.ts                 # isMethodRetrySafe() — blind-retry safety for mutating methods
 │   │       ├── retry-budget.ts                # Capped retry ratio budget (e.g. max 15%)
-│   │       ├── retry-handler.ts               # Execution wrapper with retry policies
-│   │       ├── contracts/
-│   │       │   └── retry.interface.ts         # IRetryPolicy contract
 │   │       └── backoff/                       # 4 Jitter Backoff Algorithms
 │   │           ├── decorrelated-jitter.backoff.ts # AWS decorrelated sleep growth backoff
 │   │           ├── equal-jitter.backoff.ts        # Base + random jitter backoff
@@ -316,12 +310,7 @@ reverse-proxy/
 │   │           └── full-jitter.backoff.ts         # Uniform randomized 0..cap full jitter backoff
 │   │
 │   └── types/                                 # Global TypeScript Type Definitions
-│       ├── index.ts                           # Type exports
 │       ├── balancer.types.ts                  # Load balancer types & strategy names
-│       ├── common.types.ts                    # Utility types
-│       ├── config.types.ts                    # Proxy configuration interfaces
-│       ├── http.types.ts                      # HTTP header & request representations
-│       ├── resilience.types.ts                # Circuit breaker & retry configuration types
 │       └── upstream.types.ts                  # Upstream definition, health status & metrics types
 │
 └── tests/                                     # 5-Tier Verification Framework
@@ -329,6 +318,38 @@ reverse-proxy/
     ├── full-system-audit.mjs                  # Level 1: 183-test in-memory unit audit script
     ├── live-integration-test.mjs              # Level 2: 6-point protocol smoke test script
     ├── universal-app-test.mjs                 # Level 3: 10-point strict real-app integration test
+    ├── datapath-regression.mjs                # Binary passthrough, SSE TTFB, concurrency & abort regressions
+    ├── production-gates.mjs                   # Slow-client RSS, large upload, master CPU share & cross-worker rate limit
+    ├── production-preflight-check.mjs         # 10-point pre-deploy readiness check
+    ├── chaos-resilience-suite.mjs              # Circuit breaker, abort leaks, WS errors, JSON crash traps, SIGTERM drain
+    ├── executive-showcase-suite.mjs           # End-to-end pass across all 7 pillars (LB, resilience, cache, DoS, observability)
+    ├── aggressive-fire-test.mjs               # High-concurrency, upstream-kill, cache-thrash & abort-storm fire drill (npm run test:fire)
+    ├── ddia-benchmarks-test.mjs                # Backoff/circuit-breaker math checks against real src/ modules
+    ├── ddia-transactions-suite.mjs            # Idempotency, bulkhead & timeout checks against real src/ modules
+    ├── ddia-chapter8-distributed-troubles-suite.mjs # Real socket timeouts, jitter, clock monotonicity & registry eviction
+    ├── rate-limit-redis-verification.mjs      # Redis-backed rate limit shared across workers, talking to Redis directly
+    ├── adversarial-exploit-harness.mjs        # Fuzzing / exploit-shaped request harness
+    ├── canary-gateway-verification.mjs        # Weighted canary routing verification
+    ├── circuit-breaker-recovery-test.mjs      # CLOSED→OPEN→HALF_OPEN→CLOSED recovery timing
+    ├── e2e-comprehensive-verification.mjs     # Baseline/canary routing, headers, cookies, metrics E2E pass
+    ├── e2e-master-verification.mjs            # Full-stack E2E pass with markdown/JSON report output
+    ├── headers-and-cache-suite.mjs            # Proxy header injection & cache header behavior
+    ├── stress-and-load-suite.mjs              # Sustained concurrency stress pass
+    ├── safe-stress-benchmark.mjs              # Bounded-concurrency benchmark (safe for CI)
+    ├── ultimate-beast-benchmark.mjs           # High-concurrency benchmark pass
+    ├── fastapi-advanced-features.mjs          # Polyglot audit: Python/FastAPI backend
+    ├── fastapi-gateway-verification.mjs       # Polyglot audit: Python/FastAPI backend
+    ├── java-qkd-gateway-verification.mjs      # Polyglot audit: Java/Spring Boot backend
+    ├── kotlin-advanced-gateway-audit.mjs      # Polyglot audit: Kotlin/Ktor backend
+    ├── kotlin-ktor-gateway-verification.mjs   # Polyglot audit: Kotlin/Ktor backend
+    ├── verify-current-updates.mjs             # Ad-hoc regression script for in-progress changes
+    ├── simulations/                           # DDIA concept models — NOT proxy tests, do not count toward
+    │   │                                      # pass totals or list as proxy features (see simulations/README.md)
+    │   ├── README.md
+    │   ├── ddia-transactions-conceptual.mjs   # Lost-update (ETag) & SAGA/2PC rollback — classes local to the file
+    │   ├── ddia-fencing-tokens-conceptual.mjs # Zombie-leader fencing — src/ has no real fencing implementation
+    │   ├── ddia-replication-suite.mjs         # DDIA Ch.5 replication concepts (npm run test:replication)
+    │   └── ddia-replication-extreme-chaos.mjs # DDIA Ch.5 replication concepts (npm run test:replication:extreme)
     ├── chaos/                                 # Chaos engineering suites
     │   └── upstream-failure.chaos.ts          # Level 4: Upstream kill & failover chaos test
     ├── integration/                           # Compiled Integration Tests
@@ -337,10 +358,18 @@ reverse-proxy/
     │   ├── http-proxy.test.ts                 # HTTP upstream request & body routing
     │   └── websocket.test.ts                  # WebSocket upgrade tunneling
     ├── load/                                  # Load & stress testing
+    │   ├── config.load.yaml                   # Proxy config used by the k6/load-runner scripts
+    │   ├── load-runner.mjs                     # Node-driven load runner & report writer
+    │   ├── run-k6-benchmark.mjs                # k6 CLI wrapper & result collector
     │   └── k6/                                # Level 5: k6 Load & Stress Benchmark Scripts
     │       ├── smoke.js                       # 1 VU, 30s baseline sanity check
     │       ├── stress.js                      # Ramp 0 to 200 VUs over 9m sustained stress
-    │       └── spike.js                       # Sudden burst surge to 500 VUs
+    │       ├── spike.js                       # Sudden burst surge to 500 VUs
+    │       ├── cache.js                       # Cache hit/miss ratio under load
+    │       ├── rate-limit.js                  # 429 throttling behavior under burst
+    │       ├── sliding.js                     # Sliding window algorithm accuracy under load
+    │       ├── sticky.js                      # Sticky-session affinity under load
+    │       └── live-benchmark.js              # Grafana-fed live benchmark run
     ├── mocks/                                 # Test Mock Factories
     │   └── target-servers.mock.ts             # Ephemeral mock HTTP server test factory
     └── unit/                                  # Compiled Unit Tests
@@ -590,10 +619,10 @@ node tests/load/load-runner.mjs
 - **Current Local Ceiling (~1,500 – 2,000 VUs)**: On a single development machine, the client load generator, the 6 proxy workers, and the 4 backend mock servers all share the same physical CPU and loopback network stack (`127.0.0.1`), competing for OS ephemeral ports and socket buffers.
 - **Distributed Cloud Capacity (10,000 – 50,000+ VUs)**: When deployed in Kubernetes or AWS/GCP with dedicated client nodes and isolated backend pods, the proxy's non-blocking epoll/kqueue event loop can easily handle **tens of thousands of concurrent connections** without local loopback contention.
 
-👉 **[View Official Grafana k6 Binary Live Report (243,642 Reqs @ 1,000 VUs)](./result/load-tests/k6-live-benchmark-report.md)**  
-👉 **[View Full In-Depth Benchmark Report (10 Stages)](./result/load-tests/load-test-report.md)**  
-👉 **[View Subsystem & Algorithm Architecture Trade-Off Guide](./result/load-tests/algorithm-tradeoffs.md)**  
-👉 **[View Raw JSON Telemetry Data](./result/load-tests/load_test_results.json)**
+👉 **[View Official Grafana k6 Binary Live Report (243,642 Reqs @ 1,000 VUs)](./docs/results/load-tests/k6-live-benchmark-report.md)**  
+👉 **[View Full In-Depth Benchmark Report (10 Stages)](./docs/results/load-tests/load-test-report.md)**  
+👉 **[View Subsystem & Algorithm Architecture Trade-Off Guide](./docs/results/load-tests/algorithm-tradeoffs.md)**  
+👉 **[View Raw JSON Telemetry Data](./docs/results/load-tests/load_test_results.json)**
 
 ---
 

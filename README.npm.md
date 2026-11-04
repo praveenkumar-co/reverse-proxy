@@ -12,7 +12,7 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178c6.svg?style=flat-square)](https://www.typescriptlang.org)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square)](https://github.com/praveenkumar-co/reverse-proxy)
 
-[GitHub Repository](https://github.com/praveenkumar-co/reverse-proxy) • [Documentation](https://github.com/praveenkumar-co/reverse-proxy/tree/main/docs) • [Benchmarks](https://github.com/praveenkumar-co/reverse-proxy/tree/main/result/load-tests) • [Issues](https://github.com/praveenkumar-co/reverse-proxy/issues)
+[GitHub Repository](https://github.com/praveenkumar-co/reverse-proxy) • [Documentation](https://github.com/praveenkumar-co/reverse-proxy/tree/main/docs) • [Benchmarks](https://github.com/praveenkumar-co/reverse-proxy/tree/main/docs/results/load-tests) • [Issues](https://github.com/praveenkumar-co/reverse-proxy/issues)
 
 </div>
 
