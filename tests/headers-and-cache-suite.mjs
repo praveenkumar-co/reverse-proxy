@@ -13,6 +13,7 @@ import http from 'node:http';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import fs from 'node:fs';
+import os from 'node:os';
 
 const UPSTREAM_PORT = 4100;
 const PROXY_PORT = 8085;
@@ -54,7 +55,7 @@ await new Promise((r) => upstreamServer.listen(UPSTREAM_PORT, '127.0.0.1', r));
 console.log(`📡 Echo Upstream running on http://127.0.0.1:${UPSTREAM_PORT}`);
 
 // 2. Generate temporary proxy config
-const testConfigPath = path.join(ROOT_DIR, 'scratch', 'test-headers-config.yaml');
+const testConfigPath = path.join(os.tmpdir(), `_headers_cfg_${PROXY_PORT}.yaml`);
 fs.mkdirSync(path.dirname(testConfigPath), { recursive: true });
 
 const testConfigYaml = `

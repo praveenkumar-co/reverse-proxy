@@ -2,6 +2,7 @@ import http from 'node:http';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 
 const BASELINE_PORT = 9101;
 const CANARY_PORT = 9102;
@@ -67,7 +68,7 @@ async function runSuite() {
   console.log(`✓ Canary server listening on http://127.0.0.1:${CANARY_PORT}\n`);
 
   // 2. Generate config.canary-test.yaml
-  const testConfigPath = path.join(ROOT_DIR, 'config.canary-test.yaml');
+  const testConfigPath = path.join(os.tmpdir(), `_canary_cfg_${PROXY_PORT}.yaml`);
   const yamlContent = `
 server:
   host: "127.0.0.1"

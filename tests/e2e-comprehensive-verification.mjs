@@ -2,6 +2,7 @@ import http from "node:http";
 import { fork } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import assert from "node:assert";
 
 console.log("==================================================================");
@@ -39,7 +40,7 @@ const serverB = http.createServer((req, res) => {
 });
 
 // Create temp config
-const tempConfigPath = path.resolve("./temp-e2e-config.yaml");
+const tempConfigPath = path.join(os.tmpdir(), `_e2e_cfg_${PROXY_PORT}.yaml`);
 const configContent = `
 server:
   host: "127.0.0.1"
