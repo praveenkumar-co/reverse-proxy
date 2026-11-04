@@ -12,12 +12,12 @@
 //    Test 7: Bulkhead Microtask Saturation (10,000 Cycles Zero-Drift Invariant)
 // =============================================================================
 
-import { LoadBalancer } from "../dist/balancer/core/load-balancer.js";
-import { RoundRobinStrategy } from "../dist/balancer/strategies/round-robin.strategy.js";
-import { StickySessionsStrategy } from "../dist/balancer/strategies/sticky-sessions.strategy.js";
-import { ConsistentHashingStrategy } from "../dist/balancer/strategies/consistent-hashing.strategy.js";
-import { ClassicCircuitBreaker } from "../dist/resilience/circuit-breaker/classic.circuit-breaker.js";
-import { Bulkhead } from "../dist/resilience/bulkhead/bulkhead.js";
+import { LoadBalancer } from "../../dist/balancer/core/load-balancer.js";
+import { RoundRobinStrategy } from "../../dist/balancer/strategies/round-robin.strategy.js";
+import { StickySessionsStrategy } from "../../dist/balancer/strategies/sticky-sessions.strategy.js";
+import { ConsistentHashingStrategy } from "../../dist/balancer/strategies/consistent-hashing.strategy.js";
+import { ClassicCircuitBreaker } from "../../dist/resilience/circuit-breaker/classic.circuit-breaker.js";
+import { Bulkhead } from "../../dist/resilience/bulkhead/bulkhead.js";
 
 const G = (s) => `\x1b[32m${s}\x1b[0m`;
 const R = (s) => `\x1b[31m${s}\x1b[0m`;

@@ -10,12 +10,12 @@
 //   6. Bulkhead Concurrency Shielding against Lagging Replicas
 // =============================================================================
 
-import { LoadBalancer } from "../dist/balancer/core/load-balancer.js";
-import { RoundRobinStrategy } from "../dist/balancer/strategies/round-robin.strategy.js";
-import { StickySessionsStrategy } from "../dist/balancer/strategies/sticky-sessions.strategy.js";
-import { ConsistentHashingStrategy } from "../dist/balancer/strategies/consistent-hashing.strategy.js";
-import { ClassicCircuitBreaker } from "../dist/resilience/circuit-breaker/classic.circuit-breaker.js";
-import { Bulkhead } from "../dist/resilience/bulkhead/bulkhead.js";
+import { LoadBalancer } from "../../dist/balancer/core/load-balancer.js";
+import { RoundRobinStrategy } from "../../dist/balancer/strategies/round-robin.strategy.js";
+import { StickySessionsStrategy } from "../../dist/balancer/strategies/sticky-sessions.strategy.js";
+import { ConsistentHashingStrategy } from "../../dist/balancer/strategies/consistent-hashing.strategy.js";
+import { ClassicCircuitBreaker } from "../../dist/resilience/circuit-breaker/classic.circuit-breaker.js";
+import { Bulkhead } from "../../dist/resilience/bulkhead/bulkhead.js";
 
 let totalPassed = 0;
 let totalFailed = 0;
