@@ -2,7 +2,7 @@
 // =============================================================================
 //  PRODUCTION GATE SUITE — NINJA REVERSE PROXY
 // =============================================================================
-//  Five hard gates a build must clear before it is allowed to call itself
+//  Six hard gates a build must clear before it is allowed to call itself
 //  production-ready. Each gate starts its own instance of the proxy from
 //  dist/ against local mock upstreams, drives it, and asserts a single
 //  pass/fail condition. The suite exits 1 if any gate fails.
@@ -23,6 +23,12 @@
 //                                       gate4_cpuEfficiency() for why.
 //  Gate 5: Rate limit across workers — a per-IP limit holds even though the
 //                                       proxy runs 4 worker processes.
+//  Gate 6: Connection pool reuse      — a sustained 500-concurrent small-
+//          under bursty concurrency    request burst keeps its error rate
+//                                       under 1%, instead of exhausting
+//                                       ephemeral ports via connect/destroy
+//                                       churn (found via the F1 nginx-
+//                                       comparison benchmark).
 //
 //  Run `node tests/production-gates.mjs --record-baseline` once per machine
 //  this suite runs on (including inside a fresh Docker container) to record
@@ -937,6 +943,89 @@ server:
 }
 
 // -----------------------------------------------------------------------------
+// Gate 6: Upstream Connection Pool Reuse Under Bursty Concurrency
+// -----------------------------------------------------------------------------
+// Found via the F1 nginx-comparison benchmark (docs/results/bench-vs-nginx.md): a sustained
+// burst of ~500 concurrent small/fast requests drove the error rate up to ~35% (502/503),
+// with proxy logs showing `connect EADDRNOTAVAIL` to the upstream — macOS/BSD's signature for
+// ephemeral-port exhaustion from rapid connect/destroy churn. Root cause: connection.pool.ts's
+// httpAgent/httpsAgent capped maxFreeSockets at 32 while maxSockets was 256, so under a burst
+// where many requests finish around the same moment, only 32 of those freed sockets per
+// worker were kept alive for reuse — the rest were destroyed and had to reconnect (a fresh
+// outbound port each time), and 500 concurrent connections across 4 workers sustained that
+// churn fast enough to exhaust local ephemeral ports before they left TIME_WAIT. Fixed by
+// raising maxFreeSockets to match maxSockets (both 256), so every socket up to the
+// concurrency ceiling can stay idle-but-alive instead of being torn down.
+// -----------------------------------------------------------------------------
+async function gate6_connectionPoolReuseUnderBurst() {
+  console.log(`\n${BOLD("─── GATE 6: Upstream Connection Pool Reuse Under Bursty Concurrency ─")}`);
+  const PORT = 9806, UP = 19806;
+  const upstream = http.createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end('{"ok":true}');
+  });
+  await new Promise((r) => upstream.listen(UP, "127.0.0.1", r));
+
+  try {
+    await startProxy(`
+server:
+  port: ${PORT}
+  workers: 4
+  rateLimit:
+    enabled: false
+  upstreams:
+    - id: u1
+      url: http://127.0.0.1:${UP}
+  paths:
+    - path: /
+      upstream: [u1]
+`, PORT);
+  } catch (err) {
+    record("Sustained 500-concurrent small-request burst keeps error rate under 1% (connection pool reuse, not churn)", false, err.message);
+    await new Promise((r) => upstream.close(r));
+    return;
+  }
+
+  const CONCURRENCY = 500;
+  const DURATION_MS = 8000;
+  const agent = new http.Agent({ keepAlive: true, maxSockets: CONCURRENCY });
+  let total = 0, ok = 0, errorish = 0;
+  const deadline = Date.now() + DURATION_MS;
+
+  async function one() {
+    return new Promise((resolve) => {
+      const req = http.get({ host: "127.0.0.1", port: PORT, path: "/burst-check", agent, timeout: 5000 }, (res) => {
+        if (res.statusCode === 200) ok++;
+        else errorish++;
+        res.resume();
+        res.on("end", resolve);
+      });
+      req.on("error", () => { errorish++; resolve(); });
+      req.on("timeout", () => { req.destroy(); errorish++; resolve(); });
+    });
+  }
+  async function workerLoop() {
+    while (Date.now() < deadline) {
+      total++;
+      await one();
+    }
+  }
+  await Promise.all(Array.from({ length: CONCURRENCY }, () => workerLoop()));
+  agent.destroy();
+
+  const errorRate = total > 0 ? errorish / total : 1;
+  record(
+    "Sustained 500-concurrent small-request burst keeps error rate under 1% (connection pool reuse, not churn)",
+    errorRate < 0.01,
+    `${total} requests | ok=${ok} errorish=${errorish} | error rate=${(errorRate * 100).toFixed(2)}%`,
+  );
+
+  stopProxy();
+  await new Promise((r) => upstream.close(r));
+  await sleep(500);
+}
+
+// -----------------------------------------------------------------------------
 // Main Orchestration
 // -----------------------------------------------------------------------------
 async function main() {
@@ -951,6 +1040,7 @@ async function main() {
     ["Gate 3", gate3_masterNotOnDatapath],
     ["Gate 4", gate4_cpuEfficiency],
     ["Gate 5", gate5_rateLimitAcrossWorkers],
+    ["Gate 6", gate6_connectionPoolReuseUnderBurst],
   ];
   for (const [name, fn] of gates) {
     try {
