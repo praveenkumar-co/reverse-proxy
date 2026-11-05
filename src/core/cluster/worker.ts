@@ -4,7 +4,7 @@ import tls from "node:tls";
 import net from "node:net";
 import zlib from "node:zlib";
 import { readFileSync, existsSync } from "node:fs";
-import { Transform } from "node:stream";
+import { Transform, Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { createClient } from "redis";
 import type { RedisClientType } from "redis";
@@ -505,19 +505,20 @@ function parseCookies(cookieHeader: string | undefined): Record<string, string> 
 }
 
 function createNoopResponse(): http.ServerResponse {
-  return {
-    writeHead: () => {},
-    write: () => true,
-    end: () => {},
-    destroy: () => {},
-    writableEnded: false,
-    // handleProxyDispatch registers res.on("close", ...) unconditionally (to detect a real
-    // client disconnecting), and a success response is piped via res.on("finish"/"error", ...)
-    // — both need to be safe no-ops here since nobody is actually listening for this
-    // background stale-while-revalidate response.
-    on: () => {},
-    once: () => {},
-  } as unknown as http.ServerResponse;
+  // A real Writable (not a plain object with matching method names): performUpstreamCall
+  // pipes the upstream response straight into this when success-ish (source.pipe(res)), and
+  // Readable.pipe() calls dest.emit(...) internally — a plain object fails with "dest.emit is
+  // not a function" and takes the whole worker down via uncaughtException. Writable supplies
+  // real EventEmitter behavior (close/finish/error) for free, matching what handleProxyDispatch
+  // expects from res.on(...) here, since nobody is actually listening for this background
+  // stale-while-revalidate response.
+  const w = new Writable({
+    write(_chunk, _enc, callback) {
+      callback();
+    },
+  });
+  (w as unknown as { writeHead: () => void }).writeHead = () => {};
+  return w as unknown as http.ServerResponse;
 }
 
 async function tryServeStaleOnError(

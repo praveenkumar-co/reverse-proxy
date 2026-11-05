@@ -40,6 +40,11 @@
 //  11. Cache tenant isolation:    two different routes (two tenants) requesting
 //                                 the same resource path-suffix and query string
 //                                 must never observe each other's cached body.
+//  12. SWR background refresh:    serving a stale cache entry fires a background
+//                                 revalidation request against the real upstream;
+//                                 that request's own response must not crash the
+//                                 worker process (regression for a noop-response
+//                                 object that wasn't a real EventEmitter/stream).
 //
 // All mock upstreams are started before the proxy boots (the proxy's initial
 // health check would otherwise mark every upstream down). Exits 1 if any
@@ -70,6 +75,7 @@ const UP_RETRY_FLAKY_BIG = 4708;
 const UP_ROUTE_A = 4709;
 const UP_CACHE_TENANT_A = 4710;
 const UP_CACHE_TENANT_B = 4711;
+const UP_SWR = 4712;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -630,6 +636,39 @@ async function testCacheTenantIsolation() {
 }
 
 // ----------------------------------------------------------------------------
+// Test 12: a stale-while-revalidate background refresh must not crash the
+// worker. The background request is dispatched with a noop stand-in response
+// (nobody is listening for it client-side) — that object must behave as a
+// real stream destination once the upstream call tries to pipe its response
+// into it.
+// ----------------------------------------------------------------------------
+let swrUpstreamCalls = 0;
+const swrHandler = withHealthCheck("/swr-crash", (req, res) => {
+  swrUpstreamCalls++;
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ call: swrUpstreamCalls }));
+});
+
+async function testSwrRefreshDoesNotCrashWorker() {
+  swrUpstreamCalls = 0;
+  const r1 = await request("/swr-crash");
+  await sleep(1200); // route ttlSeconds is 1 — this request is now stale
+  const r2 = await request("/swr-crash");
+  await sleep(500); // let the background revalidation request run to completion
+  const r3 = await request("/swr-crash");
+  let logContent = "";
+  try {
+    logContent = fs.readFileSync(proxyLogPath, "utf8");
+  } catch {}
+  const workerCrashed = logContent.includes("exited unexpectedly") || logContent.includes("dest.emit is not a function");
+  record(
+    "12. SWR background refresh: stale-serving triggers a background upstream call that must not crash the worker",
+    r1.status === 200 && r2.status === 200 && r2.headers["x-cache"] === "STALE" && r3.status === 200 && !workerCrashed,
+    `r1=${r1.status}, r2=${r2.status} x-cache=${r2.headers["x-cache"]}, r3=${r3.status}, upstream calls=${swrUpstreamCalls}, worker crashed=${workerCrashed}`,
+  );
+}
+
+// ----------------------------------------------------------------------------
 // Harness plumbing
 // ----------------------------------------------------------------------------
 const CONFIG_YAML = `
@@ -687,6 +726,9 @@ upstreams:
   - id: cache-tenant-b-backend
     url: "http://127.0.0.1:${UP_CACHE_TENANT_B}"
     healthPath: "/"
+  - id: swr-backend
+    url: "http://127.0.0.1:${UP_SWR}"
+    healthPath: "/"
 
 routes:
   - path: "/binary"
@@ -731,6 +773,9 @@ routes:
   - path: "/tenant-b/resource"
     upstreams: ["cache-tenant-b-backend"]
     cache: { enabled: true, ttlSeconds: 300 }
+  - path: "/swr-crash"
+    upstreams: ["swr-backend"]
+    cache: { enabled: true, ttlSeconds: 1 }
 
 loadBalancing:
   strategy: round-robin
@@ -760,6 +805,7 @@ cache:
 `;
 
 const tmpConfigPath = path.join(os.tmpdir(), `ninja-datapath-regression-${process.pid}.yaml`);
+const proxyLogPath = path.join(os.tmpdir(), `ninja-datapath-regression-proxy-${process.pid}.log`);
 let proxyProc;
 let mockServers = [];
 let cleanedUp = false;
@@ -845,6 +891,7 @@ async function main() {
     startMock(UP_ROUTE_A, routeAHandler),
     startMock(UP_CACHE_TENANT_A, tenantCacheHandler("tenant-a")),
     startMock(UP_CACHE_TENANT_B, tenantCacheHandler("tenant-b")),
+    startMock(UP_SWR, swrHandler),
   ]);
   log(`${mockServers.length} mock upstreams ready.`);
 
@@ -852,7 +899,6 @@ async function main() {
   fs.writeFileSync(tmpConfigPath, CONFIG_YAML, "utf8");
 
   log(`Starting proxy (1 worker), listening on ${PROXY_PORT}...`);
-  const proxyLogPath = path.join(os.tmpdir(), `ninja-datapath-regression-proxy-${process.pid}.log`);
   const proxyLogFd = fs.openSync(proxyLogPath, "a");
   proxyProc = spawn(process.execPath, [path.join(REPO_ROOT, "dist/index.js"), "--config", tmpConfigPath], {
     cwd: REPO_ROOT,
@@ -879,6 +925,7 @@ async function main() {
   await testRetryChunkedBodyOverflow();
   await testRouteUpstreamIsolation();
   await testCacheTenantIsolation();
+  await testSwrRefreshDoesNotCrashWorker();
 
   printSummary();
 

@@ -27,13 +27,13 @@ function toLoggerLevel(level: RootConfigType["observability"]["logging"]["level"
 //   1 → bad config at startup              — do NOT restart (fix config first)
 //   2 → unexpected crash                   → Docker RESTARTS the container
 process.on("uncaughtException", (err: Error) => {
-  logger.error("Bootstrap", `Uncaught exception — ${err.message}`);
+  logger.error("Bootstrap", `Uncaught exception — ${err.stack ?? err.message}`);
   process.exit(2);
 });
 
 process.on("unhandledRejection", (reason: unknown) => {
-  const msg = reason instanceof Error ? reason.message : String(reason);
-  logger.error("Bootstrap", `Unhandled rejection — ${msg}`);
+  const detail = reason instanceof Error ? (reason.stack ?? reason.message) : String(reason);
+  logger.error("Bootstrap", `Unhandled rejection — ${detail}`);
   process.exit(2);
 });
 
