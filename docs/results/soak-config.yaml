@@ -1,0 +1,170 @@
+# Soak test configuration (Phase F2) — every production feature enabled at the same time.
+# Driven by scripts/soak.mjs against the real built binary (node dist/index.js --config
+# docs/results/soak-config.yaml), never imported into a test process. Committed so a soak run
+# is reproducible. Ports are in the 20000-21000 range to avoid colliding with dev defaults.
+#
+# Upstreams:
+#   pool-1/2/3        - healthy 3-node pool (load balancing, sticky sessions, cacheable route)
+#   canary-candidate  - canary deployment target (10% weight)
+#   flapping-backend  - cycles up 60s / down 20s (circuit breaker + retries + health checks)
+#   dynamic-upstream  - intentionally NOT listed below; registered/deregistered live via the
+#                       admin API during the soak (minute 10 / minute 15)
+server:
+  host: "0.0.0.0"
+  listen: 20080
+  workers: 4
+  compression: false
+  trustProxy: true
+  # Deliberately an address that never actually connects in this soak (everything runs on
+  # 127.0.0.1) — any X-Forwarded-For a real caller sends is therefore never honored, which is
+  # exactly what the "spoofed X-Forwarded-For must not change the rate-limit key" proof needs:
+  # the real socket address is always what's used for the rate-limit key, regardless of the
+  # header's content.
+  trustedProxies: ["10.0.0.1"]
+  maxRequestBodyBytes: 10485760
+  readTimeoutMs: 20000
+  connectTimeoutMs: 5000
+
+tls:
+  enabled: false
+
+upstreams:
+  - id: pool-1
+    url: "http://127.0.0.1:20101"
+    healthPath: "/health"
+    weight: 1
+  - id: pool-2
+    url: "http://127.0.0.1:20102"
+    healthPath: "/health"
+    weight: 1
+  - id: pool-3
+    url: "http://127.0.0.1:20103"
+    healthPath: "/health"
+    weight: 1
+  - id: canary-candidate
+    url: "http://127.0.0.1:20105"
+    healthPath: "/health"
+  - id: flapping-backend
+    url: "http://127.0.0.1:20104"
+    healthPath: "/health"
+
+routes:
+  - path: "/echo"
+    upstreams: ["pool-1", "pool-2", "pool-3"]
+    cache: { enabled: false }
+  - path: "/sticky"
+    upstreams: ["pool-1", "pool-2", "pool-3"]
+    sticky: true
+    cache: { enabled: false }
+  - path: "/cacheable"
+    upstreams: ["pool-1"]
+    cache: { enabled: true, ttlSeconds: 300 }
+  - path: "/canary"
+    upstreams: ["pool-1"]
+    cache: { enabled: false }
+    canary:
+      enabled: true
+      canaryUpstream: "canary-candidate"
+      baselineUpstream: "pool-1"
+      weight: 10
+      stickyCookieName: "SOAK_CANARY"
+      stage: "soak-canary"
+  - path: "/dynamic"
+    upstreams: ["dynamic-upstream"]
+    cache: { enabled: false }
+  - path: "/flapping"
+    upstreams: ["flapping-backend"]
+    cache: { enabled: false }
+  - path: "/rate-limited"
+    upstreams: ["pool-1"]
+    cache: { enabled: false }
+    rateLimit:
+      maxRequests: 5
+      windowMs: 1000
+      algorithm: token-bucket
+  - path: "/cors"
+    upstreams: ["pool-1"]
+    cache: { enabled: false }
+    cors:
+      origins: ["http://allowed.example.com"]
+      credentials: false
+  - path: "/upload"
+    upstreams: ["pool-1"]
+    cache: { enabled: false }
+  - path: "/upload-limited"
+    upstreams: ["pool-1"]
+    cache: { enabled: false }
+    maxBodyBytes: 1048576
+  - path: "/download"
+    upstreams: ["pool-1"]
+    cache: { enabled: false }
+  - path: "/ws"
+    upstreams: ["pool-1"]
+    cache: { enabled: false }
+  - path: "/sse"
+    upstreams: ["pool-1"]
+    cache: { enabled: false }
+
+loadBalancing:
+  strategy: power-of-two
+  stickyCookieName: "SOAK_ROUTE"
+
+resilience:
+  retry:
+    enabled: true
+    maxAttempts: 2
+    backoff: full-jitter
+    baseDelayMs: 100
+    maxDelayMs: 2000
+    retryOn:
+      localNodeFailure: true
+      systemOverload: true
+  circuitBreaker:
+    mode: classic
+    failureThreshold: 3
+    recoveryTimeMs: 10000
+
+rateLimit:
+  enabled: true
+  storage: redis
+  algorithm: token-bucket
+  maxRequests: 1000000
+  windowMs: 60000
+  redis:
+    host: "127.0.0.1"
+    port: 20379
+    keyPrefix: "soak-rl:"
+
+cache:
+  enabled: true
+  host: "127.0.0.1"
+  port: 20379
+  ttlSeconds: 300
+  debezium:
+    enabled: true
+    channel: "soak-cdc-events"
+    mappings:
+      - table: "orders"
+        pathPattern: "/cacheable*"
+
+discovery:
+  heartbeatTimeoutMs: 30000
+  cleanupIntervalMs: 10000
+  persistencePath: "/tmp/ninja-soak-registry.json"
+  activeProbe:
+    consecutiveFailuresToTrip: 2
+    consecutiveSuccessesToRecover: 2
+
+observability:
+  logging:
+    level: warn
+    accessLog: "/tmp/ninja-soak-access.log"
+  metrics:
+    enabled: true
+    path: "/metrics"
+  tracing:
+    enabled: true
+
+admin:
+  enabled: true
+  token: "soak-admin-secret"
