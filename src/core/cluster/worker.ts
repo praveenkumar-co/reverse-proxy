@@ -793,6 +793,14 @@ async function performUpstreamCall(
     // below — it assigns into this one so onIdleTimeout/clearIdleTimeout (defined before that
     // callback exists) can still reach it via closure, without the parameter shadowing it.
     let activeUpstreamRes: http.IncomingMessage | undefined;
+    // Captured directly at arm time rather than re-read from activeUpstreamRes.socket later:
+    // Node nulls out IncomingMessage.socket once the message is fully consumed (to avoid the
+    // *caller* holding a stale reference), so by the time a success response finishes writing
+    // to the client and clearIdleTimeout() runs, activeUpstreamRes.socket is already null —
+    // removeListener on it silently no-ops, and the 'timeout' listener this armed (plus the
+    // whole closure scope it keeps alive — upstreamRes/proxyReq/res and every sibling closure
+    // here) leaks for the life of the pooled, keep-alive-reused socket.
+    let timeoutSocket: net.Socket | undefined;
     const onIdleTimeout = () => {
       try { proxyReq.destroy(); } catch {}
       try { activeUpstreamRes?.destroy(); } catch {}
@@ -800,8 +808,9 @@ async function performUpstreamCall(
     const clearIdleTimeout = () => {
       if (!idleTimeoutArmed) return;
       idleTimeoutArmed = false;
-      try { activeUpstreamRes?.socket?.setTimeout(0); } catch {}
-      try { activeUpstreamRes?.socket?.removeListener("timeout", onIdleTimeout); } catch {}
+      try { timeoutSocket?.setTimeout(0); } catch {}
+      try { timeoutSocket?.removeListener("timeout", onIdleTimeout); } catch {}
+      timeoutSocket = undefined;
     };
     let settled = false;
     const finishOutcome = (o: AttemptOutcome) => {
@@ -852,7 +861,8 @@ async function performUpstreamCall(
       // path below and the streamed success path further down with one mechanism, and
       // without the per-chunk clearTimeout()+setTimeout() churn a JS-level timer would need.
       if (upstreamRes.socket) {
-        upstreamRes.socket.setTimeout(workerConfig.server.readTimeoutMs, onIdleTimeout);
+        timeoutSocket = upstreamRes.socket;
+        timeoutSocket.setTimeout(workerConfig.server.readTimeoutMs, onIdleTimeout);
         idleTimeoutArmed = true;
       }
       const statusCode = upstreamRes.statusCode ?? 200;

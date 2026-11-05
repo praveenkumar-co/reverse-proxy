@@ -17,6 +17,7 @@
 
 import { spawn, execSync } from "node:child_process";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -287,12 +288,47 @@ cache:
 // -----------------------------------------------------------------------------
 // wrk driver
 // -----------------------------------------------------------------------------
-async function runWrk(url, connections, durationSec, rssPids) {
+// Scrapes the ninja-only /metrics gauges added for the F1b memory-leak finding
+// (ninja_proxy_heap_used_mb/array_buffers_mb/external_mb) — nginx has no such endpoint, so
+// metricsPort is only passed for ninja targets. Lets the report explain *what* RSS is made of
+// (JS heap vs. native Buffers vs. other native memory) instead of treating it as one opaque
+// number.
+function scrapeMemoryMb(port) {
+  return new Promise((resolve) => {
+    const req = http.get({ host: "127.0.0.1", port, path: "/metrics", timeout: 1000 }, (res) => {
+      let body = "";
+      res.on("data", (c) => (body += c));
+      res.on("end", () => {
+        const heap = body.match(/ninja_proxy_heap_used_mb\s+([\d.]+)/);
+        const arrayBuffers = body.match(/ninja_proxy_array_buffers_mb\s+([\d.]+)/);
+        const external = body.match(/ninja_proxy_external_mb\s+([\d.]+)/);
+        resolve({
+          heapUsedMb: heap ? Number(heap[1]) : null,
+          arrayBuffersMb: arrayBuffers ? Number(arrayBuffers[1]) : null,
+          externalMb: external ? Number(external[1]) : null,
+        });
+      });
+    });
+    req.on("error", () => resolve(null));
+    req.on("timeout", () => {
+      req.destroy();
+      resolve(null);
+    });
+  });
+}
+
+async function runWrk(url, connections, durationSec, rssPids, metricsPort) {
   let peakRssKB = rssPids.reduce((s, p) => s + getProcessTreeRssKB(p), 0);
+  const memSamples = [];
   const sampler = setInterval(() => {
     const kb = rssPids.reduce((s, p) => s + getProcessTreeRssKB(p), 0);
     if (kb > peakRssKB) peakRssKB = kb;
-  }, 200);
+    if (metricsPort) {
+      scrapeMemoryMb(metricsPort).then((m) => {
+        if (m) memSamples.push(m);
+      });
+    }
+  }, 1000);
 
   const threads = Math.min(connections, os.cpus().length);
   const output = await new Promise((resolve, reject) => {
@@ -309,6 +345,10 @@ async function runWrk(url, connections, durationSec, rssPids) {
   if (!m) {
     throw new Error(`wrk output not parseable for ${url} @ c=${connections}:\n${output}`);
   }
+  const peakOf = (field) => {
+    const vals = memSamples.map((s) => s[field]).filter((v) => v !== null);
+    return vals.length > 0 ? Math.max(...vals) : null;
+  };
   return {
     rps: Number(m[1]),
     p50Ms: Number(m[2]),
@@ -317,6 +357,9 @@ async function runWrk(url, connections, durationSec, rssPids) {
     errors: Number(m[5]),
     requests: Number(m[6]),
     peakRssMB: peakRssKB / 1024,
+    peakHeapUsedMb: peakOf("heapUsedMb"),
+    peakArrayBuffersMb: peakOf("arrayBuffersMb"),
+    peakExternalMb: peakOf("externalMb"),
   };
 }
 
@@ -331,7 +374,7 @@ async function warmup(url, seconds) {
 // -----------------------------------------------------------------------------
 // Target lifecycle
 // -----------------------------------------------------------------------------
-async function benchTarget(label, { start, port, pids }) {
+async function benchTarget(label, { start, port, pids, metricsPort }) {
   log(`Starting target: ${label}`);
   await start();
   await waitForHttp(port, "/small", 20000);
@@ -344,11 +387,14 @@ async function benchTarget(label, { start, port, pids }) {
     await warmup(url, WARMUP_SEC);
     for (const conns of CONCURRENCIES) {
       log(`  Running ${payload.name} @ ${conns} conns for ${STAGE_SEC}s...`);
-      const result = await runWrk(url, conns, STAGE_SEC, pids());
+      const result = await runWrk(url, conns, STAGE_SEC, pids(), metricsPort);
       rows.push({ label, payload: payload.name, connections: conns, ...result });
       log(
         `    rps=${result.rps.toFixed(0)} p50=${result.p50Ms.toFixed(2)}ms p99=${result.p99Ms.toFixed(2)}ms ` +
-          `p99.9=${result.p999Ms.toFixed(2)}ms errors=${result.errors} peakRSS=${result.peakRssMB.toFixed(1)}MB`,
+          `p99.9=${result.p999Ms.toFixed(2)}ms errors=${result.errors} peakRSS=${result.peakRssMB.toFixed(1)}MB` +
+          (metricsPort
+            ? ` (heap=${result.peakHeapUsedMb ?? "n/a"}MB arrayBuffers=${result.peakArrayBuffersMb ?? "n/a"}MB external=${result.peakExternalMb ?? "n/a"}MB)`
+            : ""),
       );
       await sleep(1000);
     }
@@ -402,13 +448,21 @@ function writeReport(allRows, info) {
   lines.push("");
   lines.push("## Results");
   lines.push("");
-  lines.push("| Target | Payload | Concurrency | RPS | p50 (ms) | p99 (ms) | p99.9 (ms) | Errors | Peak RSS (MB) |");
-  lines.push("| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |");
+  lines.push("| Target | Payload | Concurrency | RPS | p50 (ms) | p99 (ms) | p99.9 (ms) | Errors | Peak RSS (MB) | Peak JS heap (MB) | Peak arrayBuffers (MB) | Peak external (MB) |");
+  lines.push("| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
   for (const r of allRows) {
+    const fmt = (v) => (v === null || v === undefined ? "n/a" : v.toFixed(1));
     lines.push(
-      `| ${r.label} | ${r.payload} | ${r.connections} | ${r.rps.toFixed(0)} | ${r.p50Ms.toFixed(2)} | ${r.p99Ms.toFixed(2)} | ${r.p999Ms.toFixed(2)} | ${r.errors} | ${r.peakRssMB.toFixed(1)} |`,
+      `| ${r.label} | ${r.payload} | ${r.connections} | ${r.rps.toFixed(0)} | ${r.p50Ms.toFixed(2)} | ${r.p99Ms.toFixed(2)} | ${r.p999Ms.toFixed(2)} | ${r.errors} | ${r.peakRssMB.toFixed(1)} | ${fmt(r.peakHeapUsedMb)} | ${fmt(r.peakArrayBuffersMb)} | ${fmt(r.peakExternalMb)} |`,
     );
   }
+  lines.push("");
+  lines.push(
+    "JS heap / arrayBuffers / external (nginx rows: n/a, no such endpoint) break Peak RSS down into V8 heap vs. " +
+      "native Buffers vs. other native memory (sockets, zlib/TLS contexts) — added after the F1b run exposed a " +
+      "'timeout' EventEmitter-listener leak on pooled upstream sockets (fixed; see tests/production-gates.mjs Gate 7) " +
+      "so a future RSS regression shows which bucket grew instead of being assumed.",
+  );
   lines.push("");
   lines.push("Numbers are reported as measured — no tuning applied to only one side beyond matching worker counts.");
   lines.push("");
@@ -489,6 +543,7 @@ async function main() {
       },
       port: NINJA_BASELINE_PORT,
       pids: () => (ninjaBaselineProc ? [ninjaBaselineProc.pid] : []),
+      metricsPort: NINJA_BASELINE_PORT,
     })),
   );
   await killTree(ninjaBaselineProc);
@@ -508,6 +563,7 @@ async function main() {
       },
       port: NINJA_FULL_PORT,
       pids: () => (ninjaFullProc ? [ninjaFullProc.pid] : []),
+      metricsPort: NINJA_FULL_PORT,
     })),
   );
   await killTree(ninjaFullProc);

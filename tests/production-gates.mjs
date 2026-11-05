@@ -2,7 +2,7 @@
 // =============================================================================
 //  PRODUCTION GATE SUITE — NINJA REVERSE PROXY
 // =============================================================================
-//  Six hard gates a build must clear before it is allowed to call itself
+//  Seven hard gates a build must clear before it is allowed to call itself
 //  production-ready. Each gate starts its own instance of the proxy from
 //  dist/ against local mock upstreams, drives it, and asserts a single
 //  pass/fail condition. The suite exits 1 if any gate fails.
@@ -29,6 +29,17 @@
 //                                       ephemeral ports via connect/destroy
 //                                       churn (found via the F1 nginx-
 //                                       comparison benchmark).
+//  Gate 7: No leak under sustained    — 1MB responses @ 500 concurrent for
+//          large-body load             30s must not grow RSS monotonically,
+//                                       must not leak JS heap after load
+//                                       stops, must register zero 'timeout'
+//                                       EventEmitter leaks on the pooled
+//                                       upstream socket, and must stay under
+//                                       a per-worker RSS ceiling (found via
+//                                       the same F1 benchmark: a stale
+//                                       IncomingMessage.socket reference in
+//                                       the idle-timeout cleanup meant the
+//                                       cleanup never actually ran).
 //
 //  Run `node tests/production-gates.mjs --record-baseline` once per machine
 //  this suite runs on (including inside a fresh Docker container) to record
@@ -1026,6 +1037,197 @@ server:
 }
 
 // -----------------------------------------------------------------------------
+// Gate 7: No leak under sustained large-body load. The F1 benchmark's baseline
+// run (plain proxying — no cache, no rate limit, no tracing) showed total RSS
+// climbing from ~250MB to 3-5GB over a ~70s run, with a Node
+// MaxListenersExceededWarning for 'timeout' listeners on the pooled upstream
+// socket: the idle-timeout cleanup read IncomingMessage.socket *after* Node
+// had already nulled it out post-response, so removeListener() always
+// silently no-op'd, leaking that request's whole closure scope forever.
+//
+// Gates on leak *behavior*, not an absolute RSS number (machine-dependent):
+//   1. Plateau  — RSS averaged over [25s,30s) must be within 10% of RSS
+//                  averaged over [10s,15s). A real leak keeps climbing;
+//                  legitimate concurrency-driven buffering plateaus.
+//   2. Recovery — 15s after load stops, JS heapUsed must be within 20MB of
+//                  its pre-load idle value.
+//   3. Listeners — zero MaxListenersExceededWarning lines in the proxy log.
+//   4. Ceiling  — safety net only: process-tree peak RSS stays under 400MB
+//                  for this single-worker config.
+// -----------------------------------------------------------------------------
+function scrapeHeapUsedMb(port) {
+  return new Promise((resolve, reject) => {
+    const req = http.get({ host: "127.0.0.1", port, path: "/metrics", timeout: 3000 }, (res) => {
+      let body = "";
+      res.on("data", (c) => (body += c));
+      res.on("end", () => {
+        const heap = body.match(/ninja_proxy_heap_used_mb\s+([\d.]+)/);
+        const arrayBuffers = body.match(/ninja_proxy_array_buffers_mb\s+([\d.]+)/);
+        const external = body.match(/ninja_proxy_external_mb\s+([\d.]+)/);
+        if (!heap) { reject(new Error("ninja_proxy_heap_used_mb not found in /metrics")); return; }
+        resolve({
+          heapUsedMb: Number(heap[1]),
+          arrayBuffersMb: arrayBuffers ? Number(arrayBuffers[1]) : 0,
+          externalMb: external ? Number(external[1]) : 0,
+        });
+      });
+    });
+    req.on("error", reject);
+    req.on("timeout", () => { req.destroy(); reject(new Error("timeout scraping /metrics")); });
+  });
+}
+
+async function gate7_noLeakUnderSustainedLargeBodyLoad() {
+  console.log(`\n${BOLD("─── GATE 7: No Leak Under Sustained Large-Body Load (1MB @ 500conn, 30s) ─")}`);
+  const PORT = 9807, UP = 19807;
+  const BODY = crypto.randomBytes(1024 * 1024);
+  const upstream = http.createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Length": BODY.length });
+    res.end(BODY);
+  });
+  await new Promise((r) => upstream.listen(UP, "127.0.0.1", r));
+
+  const logPath = path.join(os.tmpdir(), `gate-proxy-${PORT}.log`);
+  try { fs.unlinkSync(logPath); } catch {}
+
+  let rootPid;
+  try {
+    rootPid = await startProxy(`
+server:
+  listen: ${PORT}
+  workers: 1
+  compression: false
+
+tls:
+  enabled: false
+
+observability:
+  logging:
+    level: warn
+    accessLog: false
+  metrics:
+    enabled: true
+  tracing:
+    enabled: false
+
+upstreams:
+  - id: u1
+    url: "http://127.0.0.1:${UP}"
+    healthPath: "/"
+
+routes:
+  - path: "/large"
+    upstreams: ["u1"]
+    cache: { enabled: false }
+
+loadBalancing:
+  strategy: round-robin
+
+rateLimit:
+  enabled: false
+
+cache:
+  enabled: false
+`, PORT);
+  } catch (err) {
+    record("Gate 7: no leak under sustained large-body load", false, `proxy failed to start: ${err.message}`);
+    await new Promise((r) => upstream.close(r));
+    return;
+  }
+
+  await sleep(500); // let the single worker settle before the idle reading
+  let idle, recovery;
+  try {
+    idle = await scrapeHeapUsedMb(PORT);
+  } catch (err) {
+    record("Gate 7: no leak under sustained large-body load", false, `could not read idle heap: ${err.message}`);
+    stopProxy();
+    await new Promise((r) => upstream.close(r));
+    return;
+  }
+
+  const CONCURRENCY = 500;
+  const DURATION_MS = 30000;
+  const SAMPLE_INTERVAL_MS = 1000;
+  const agent = new http.Agent({ keepAlive: true, maxSockets: CONCURRENCY });
+  const rssSamples = []; // { tSec, rssKB }
+  let total = 0, ok = 0, errorish = 0;
+  const startTime = Date.now();
+  const deadline = startTime + DURATION_MS;
+
+  const sampler = setInterval(() => {
+    const tSec = (Date.now() - startTime) / 1000;
+    rssSamples.push({ tSec, rssKB: getProcessTreeRssKB(rootPid) });
+  }, SAMPLE_INTERVAL_MS);
+
+  async function one() {
+    return new Promise((resolve) => {
+      const req = http.get({ host: "127.0.0.1", port: PORT, path: "/large", agent, timeout: 10000 }, (res) => {
+        if (res.statusCode === 200) ok++; else errorish++;
+        res.resume();
+        res.on("end", resolve);
+        res.on("error", resolve);
+      });
+      req.on("error", () => { errorish++; resolve(); });
+      req.on("timeout", () => { req.destroy(); errorish++; resolve(); });
+    });
+  }
+  async function workerLoop() {
+    while (Date.now() < deadline) {
+      total++;
+      await one();
+    }
+  }
+  await Promise.all(Array.from({ length: CONCURRENCY }, () => workerLoop()));
+  clearInterval(sampler);
+  agent.destroy();
+
+  await sleep(15000); // Gate 2 of this test: 15s recovery window after load stops
+  try {
+    recovery = await scrapeHeapUsedMb(PORT);
+  } catch (err) {
+    record("Gate 7: no leak under sustained large-body load", false, `could not read recovery heap: ${err.message}`);
+    stopProxy();
+    await new Promise((r) => upstream.close(r));
+    return;
+  }
+
+  const inWindow = (lo, hi) => rssSamples.filter((s) => s.tSec >= lo && s.tSec < hi);
+  const avg = (arr) => (arr.length === 0 ? 0 : arr.reduce((a, s) => a + s.rssKB, 0) / arr.length / 1024);
+  const earlyWindow = inWindow(10, 15);
+  const lateWindow = inWindow(25, 30);
+  const rssEarlyMb = avg(earlyWindow);
+  const rssLateMb = avg(lateWindow);
+  const peakRssMb = rssSamples.length > 0 ? Math.max(...rssSamples.map((s) => s.rssKB)) / 1024 : 0;
+
+  const plateauOk = earlyWindow.length > 0 && lateWindow.length > 0 && rssLateMb <= rssEarlyMb * 1.1;
+  const recoveryDeltaMb = Math.abs(recovery.heapUsedMb - idle.heapUsedMb);
+  const recoveryOk = recoveryDeltaMb <= 20;
+  let listenerWarnings = 0;
+  try {
+    listenerWarnings = (fs.readFileSync(logPath, "utf8").match(/MaxListenersExceededWarning/g) || []).length;
+  } catch {}
+  const listenersOk = listenerWarnings === 0;
+  const ceilingOk = peakRssMb <= 400;
+
+  const allOk = plateauOk && recoveryOk && listenersOk && ceilingOk;
+  record(
+    "Gate 7: no leak under sustained large-body load (plateau + heap recovery + zero listener leaks + RSS ceiling)",
+    allOk,
+    `${total} requests (ok=${ok} errorish=${errorish}) | ` +
+      `RSS[10-15s]=${rssEarlyMb.toFixed(1)}MB RSS[25-30s]=${rssLateMb.toFixed(1)}MB plateau=${plateauOk ? "OK" : "FAIL"} (<=10% growth) | ` +
+      `heap idle=${idle.heapUsedMb.toFixed(1)}MB recovery(+15s)=${recovery.heapUsedMb.toFixed(1)}MB delta=${recoveryDeltaMb.toFixed(1)}MB recovery=${recoveryOk ? "OK" : "FAIL"} (<=20MB) | ` +
+      `listener leaks=${listenerWarnings} ${listenersOk ? "OK" : "FAIL"} | ` +
+      `peak process-tree RSS=${peakRssMb.toFixed(1)}MB ceiling=${ceilingOk ? "OK" : "FAIL"} (<=400MB) | ` +
+      `arrayBuffers idle=${idle.arrayBuffersMb.toFixed(1)}MB/recovery=${recovery.arrayBuffersMb.toFixed(1)}MB, external idle=${idle.externalMb.toFixed(1)}MB/recovery=${recovery.externalMb.toFixed(1)}MB`,
+  );
+
+  stopProxy();
+  await new Promise((r) => upstream.close(r));
+  await sleep(500);
+}
+
+// -----------------------------------------------------------------------------
 // Main Orchestration
 // -----------------------------------------------------------------------------
 async function main() {
@@ -1041,6 +1243,7 @@ async function main() {
     ["Gate 4", gate4_cpuEfficiency],
     ["Gate 5", gate5_rateLimitAcrossWorkers],
     ["Gate 6", gate6_connectionPoolReuseUnderBurst],
+    ["Gate 7", gate7_noLeakUnderSustainedLargeBodyLoad],
   ];
   for (const [name, fn] of gates) {
     try {
