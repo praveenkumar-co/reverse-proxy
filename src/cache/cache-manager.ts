@@ -172,13 +172,15 @@ export class Cache {
     }
   }
 
-  async invalidate(pattern: string): Promise<void> {
-    if(!this.enabled) return;
+  async invalidate(pattern: string): Promise<number> {
+    if(!this.enabled) return 0;
     try {
-      await this.store.invalidate(pattern);
-      logger.info("Cache", `INVALIDATED pattern`, { pattern });
+      const count = await this.store.invalidate(pattern);
+      logger.info("Cache", `INVALIDATED pattern`, { pattern, count });
+      return count;
     } catch (err: any){
       logger.error("Cache", `INVALIDATE error: ${err.message}`);
+      return 0;
     }
   }
 
@@ -192,8 +194,8 @@ export class Cache {
   }
 
   /** Wildcard/pattern-based purge (e.g. "/api/users/*"). */
-  async purgeByPattern(pattern: string): Promise<void> {
-    await this.patternInvalidator.invalidate(pattern);
+  async purgeByPattern(pattern: string): Promise<number> {
+    return await this.patternInvalidator.invalidate(pattern);
   }
 
   /** Stale-while-revalidate: whether a stale entry should be served + a background refresh kicked off. */
@@ -240,13 +242,13 @@ export class Cache {
     };
   }
 
-  async handleDebeziumEvent(eventJson: string): Promise<void> {
+  async handleDebeziumEvent(eventJson: string): Promise<number> {
     if(!this.invalidator){
       this.invalidator = new DebeziumInvalidator(
         this.config.debezium?.mappings ?? [],
         (pattern) => this.invalidate(pattern),
       );
     }
-    await this.invalidator.handle(eventJson);
+    return await this.invalidator.handle(eventJson);
   }
 }

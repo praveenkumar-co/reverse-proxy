@@ -23,11 +23,16 @@ export class InMemoryLRU {
   del(key: string){
     this.cache.delete(key);
   }
-  invalidatePattern(pattern: string){
+  invalidatePattern(pattern: string): number {
     const regex = new RegExp(pattern.replace(/\*/g, '.*'));
+    let count = 0;
     for(const key of this.cache.keys()){
-      if(regex.test(key)) this.cache.delete(key);
+      if(regex.test(key)){
+        this.cache.delete(key);
+        count++;
+      }
     }
+    return count;
   }
   getStats(){
     return { size: this.cache.size, maxSize: this.maxSize };

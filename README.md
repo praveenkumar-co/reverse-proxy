@@ -61,8 +61,8 @@ Ninja Reverse Proxy runs on Node's `cluster` module, but the master is **control
       |  - L2 Response Cache                       |
       |  - Distributed Rate Limiter State (Lua)    |
       |  - Dynamic Service Registry snapshot        |
-      |  - Debezium CDC → Redis Pub/Sub, explicit   |
-      |    per-table invalidation mappings          |
+      |  - Debezium CDC → POST /__cdc/webhook,      |
+      |    explicit per-table invalidation mappings |
       +------+---------------------------------+---+
              |                                 |
              ▼                                 ▼
@@ -134,7 +134,7 @@ reverse-proxy/
 │   ├── 14-retry-bulkhead.md                   # Bulkhead slot isolation, RetryBudget & 4 jitter backoffs
 │   ├── 15-connection-pool.md                  # Keep-alive agents, maxSockets: 256 & socket reuse
 │   ├── 16-multi-tier-caching.md               # HybridCache: L1 RAM (<0.05ms) + L2 Redis write-through
-│   ├── 17-cdc-cache-invalidation.md           # Debezium CDC via Redis Pub/Sub, explicit per-table mappings
+│   ├── 17-cdc-cache-invalidation.md           # Debezium CDC via POST /__cdc/webhook, explicit per-table mappings
 │   ├── 18-tracing.md                          # Distributed Tracer, span lifecycle & X-Trace-Id header
 │   ├── 19-readiness-liveness.md               # ReadinessProbe multi-check gate vs Liveness checks
 │   ├── 20-tenant-log-streamer.md              # Asynchronous batched webhook dispatch per tenant
@@ -202,7 +202,7 @@ reverse-proxy/
 │   │   │   ├── cache-config.interface.ts      # Cache configuration types
 │   │   │   └── invalidator.interface.ts       # IInvalidator contract
 │   │   ├── invalidation/                      # Cache invalidation mechanisms
-│   │   │   ├── debezium.invalidator.ts        # Redis Pub/Sub Debezium CDC event parser (explicit table→path mappings)
+│   │   │   ├── debezium.invalidator.ts        # Debezium CDC event parser (explicit table→path mappings), fed by POST /__cdc/webhook
 │   │   │   ├── pattern.invalidator.ts         # Wildcard glob pattern cache purger
 │   │   │   └── tag.invalidator.ts             # Entity metadata tag purger
 │   │   ├── policies/                          # Caching policies & parsers
@@ -422,7 +422,7 @@ All load balancing strategies are dynamically validated using Zod schemas and in
 
 ### 2. High-Performance Multi-Tier Caching & Invalidation
 * **L1/L2 Hybrid Caching**: In-memory LRU cache (L1 RAM) backed by Redis (L2 Distributed Store) with automatic L1 warming & background synchronization.
-* **Debezium CDC (Change Data Capture) Invalidation**: Subscribes to Redis Pub/Sub events from Debezium Server. Parses transaction log updates from SQL databases and MongoDB (supporting ObjectId `$oid` conversions) to invalidate cached paths instantly:
+* **Debezium CDC (Change Data Capture) Invalidation**: Receives events via `POST /__cdc/webhook` (an admin-token-gated endpoint — a Debezium HTTP sink or Kafka consumer bridge posts here, not Redis pub/sub, which was removed for silently dropping events during Redis reconnects). Parses transaction log updates from SQL databases and MongoDB (supporting ObjectId `$oid` conversions) to invalidate cached paths instantly, cluster-wide (every worker's own L1 cache is purged, not just the one that received the webhook):
   * *SQL Event Map*: `{"op":"u", "source":{"table":"orders"}, "after":{"id":999}}` $\rightarrow$ Invalidates `/api/orders/999`.
   * *Mongo Event Map*: `{"op":"u", "source":{"collection":"orders"}, "after":{"_id":{"$oid":"60d5ec4b..."}}}` $\rightarrow$ Invalidates matching mapped paths.
 * **Pattern & Tag-Based Invalidation**: Glob pattern matching (`PatternInvalidator`) and metadata grouping (`TagInvalidator`).
@@ -518,10 +518,12 @@ cache:
   staleIfError: true
   debezium:
     enabled: true
-    channel: "debezium-cdc-events"
+    channel: "debezium-cdc-events"  # unused by the webhook path below; kept for a future Kafka/Streams bridge
     mappings:
       - table: "orders"
         pathPattern: "/api/orders/{id}"
+  # Events reach the proxy via POST /__cdc/webhook (admin-token gated), not this channel —
+  # see docs/17-cdc-cache-invalidation.md.
 
 resilience:
   circuitBreaker:

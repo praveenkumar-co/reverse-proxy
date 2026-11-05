@@ -12,14 +12,14 @@ function hasLiteralPrefix(pattern: string): boolean {
 }
 
 export class PatternInvalidator implements IInvalidator {
-  constructor(private cache: { invalidate: (p: string) => Promise<void> }){}
+  constructor(private cache: { invalidate: (p: string) => Promise<number> }){}
 
-  async invalidate(pattern: string): Promise<void> {
+  async invalidate(pattern: string): Promise<number> {
     if (!hasLiteralPrefix(pattern)) {
       throw new Error(
         `Refusing to invalidate pattern "${pattern}": no literal prefix before the first wildcard, which would match keys across every tenant`,
       );
     }
-    await this.cache.invalidate(pattern);
+    return await this.cache.invalidate(pattern);
   }
 }

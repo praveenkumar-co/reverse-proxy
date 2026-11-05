@@ -28,7 +28,7 @@ test("Cache 2: Hybrid Cache (L1 Memory + L2 Store Sync)", async () => {
     async get(key: string) { return this.data.get(key) ?? null; },
     async set(key: string, val: string) { this.data.set(key, val); },
     async del(key: string) { this.data.delete(key); },
-    async invalidate() {},
+    async invalidate() { return 0; },
     buildKey(m: string, p: string) { return `${m}:${p}`; }
   };
 
@@ -61,7 +61,7 @@ test("Cache 5: CacheControl Parser Directives", () => {
 
 test("Cache 6: Pattern & Tag Invalidators", async () => {
   let invalidatedPattern = "";
-  const patternInv = new PatternInvalidator({ invalidate: async (p) => { invalidatedPattern = p; } });
+  const patternInv = new PatternInvalidator({ invalidate: async (p) => { invalidatedPattern = p; return 1; } });
   await patternInv.invalidate("/api/products/*");
   assert.strictEqual(invalidatedPattern, "/api/products/*");
 
@@ -74,7 +74,7 @@ test("Cache 7: Debezium CDC Invalidator (SQL + Mongo ObjectId)", async () => {
   let invalidatedPath = "";
   const debezium = new DebeziumInvalidator(
     [{ table: "users", pathPattern: "/api/users/{id}" }],
-    async (p) => { invalidatedPath = p; }
+    async (p) => { invalidatedPath = p; return 1; }
   );
 
   // SQL

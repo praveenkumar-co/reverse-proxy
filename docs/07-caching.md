@@ -143,16 +143,18 @@ Database UPDATE orders SET status='shipped' WHERE id=999
    ↓
 Debezium captures the change from transaction log
    ↓
-Publishes to Redis Pub/Sub:
+Debezium HTTP sink (or a Kafka consumer bridge) POSTs the event to:
+  POST /__cdc/webhook  (x-admin-token: ...)
   {"op":"u", "source":{"table":"orders"}, "after":{"id":999}}
-   ↓
-Proxy subscribes to Redis Pub/Sub channel
    ↓
 Maps table+id → cache path: "/api/orders/999"
    ↓
-Deletes cache entry for /api/orders/999
+Deletes that key from this worker's L1 + the shared L2/Redis entry,
+then broadcasts to every OTHER worker to purge its own L1 copy too
    ↓
-Next request gets fresh data from backend
+Next request gets fresh data from backend, on every worker
 ```
+
+Not Redis pub/sub: an earlier version subscribed directly to a Redis pub/sub channel, but pub/sub has no replay or acknowledgment, so events published while the cache's Redis client was reconnecting were silently lost. See [17-cdc-cache-invalidation.md](./17-cdc-cache-invalidation.md) for the webhook contract and the cluster-wide fan-out.
 
 ---

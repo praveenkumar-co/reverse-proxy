@@ -259,7 +259,7 @@ async function runComprehensiveVerification() {
     async get(key: string) { return this.cache.get(key) ?? null; },
     async set(key: string, val: string) { this.cache.set(key, val); },
     async del(key: string) { this.cache.delete(key); },
-    async invalidate() {},
+    async invalidate() { return 0; },
     buildKey(m: string, p: string) { return `${m}:${p}`; }
   };
   await mockL2Store.set("key-l2", "value-from-redis");
@@ -295,7 +295,7 @@ async function runComprehensiveVerification() {
   });
 
   // Pattern & Tag Invalidators
-  const patInv = new PatternInvalidator({ invalidate: async (p) => {} });
+  const patInv = new PatternInvalidator({ invalidate: async (p) => 0 });
   const tagInv = new TagInvalidator();
   tagInv.tag("product:123", ["products", "catalog"]);
   const keys = tagManagerKeys(tagInv, "products");
@@ -310,7 +310,7 @@ async function runComprehensiveVerification() {
   let cdcInvalidatedPath = "";
   const debezium = new DebeziumInvalidator(
     [{ table: "orders", pathPattern: "/api/orders/{id}" }],
-    async (pathStr) => { cdcInvalidatedPath = pathStr; }
+    async (pathStr) => { cdcInvalidatedPath = pathStr; return 1; }
   );
   await debezium.handle(JSON.stringify({ op: "u", source: { table: "orders" }, after: { id: "999" } }));
   results.push({

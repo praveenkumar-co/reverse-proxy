@@ -29,7 +29,7 @@ A production-grade Layer 7 reverse proxy and load balancer written in TypeScript
 | 14 | [14-retry-bulkhead.md](./14-retry-bulkhead.md) | Retry — RetryHandler, RetryBudget (15% ratio), 4 jitter backoff algorithms; Bulkhead concurrency slots |
 | 15 | [15-connection-pool.md](./15-connection-pool.md) | Connection pool — httpAgent/httpsAgent singletons, keepAlive=true, maxSockets=256 |
 | 16 | [16-multi-tier-caching.md](./16-multi-tier-caching.md) | Two-tier cache — InMemoryLRU L1 fast-path, HybridCache L2 write-through, TTL eviction |
-| 17 | [17-cdc-cache-invalidation.md](./17-cdc-cache-invalidation.md) | CDC invalidation — Debezium event stream → DebeziumInvalidator → table→path mapping → cache purge |
+| 17 | [17-cdc-cache-invalidation.md](./17-cdc-cache-invalidation.md) | CDC invalidation — POST /__cdc/webhook → DebeziumInvalidator → table→path mapping → cluster-wide cache purge |
 | 18 | [18-tracing.md](./18-tracing.md) | Distributed tracing — Tracer span lifecycle, traceId/spanId, X-Trace-Id header propagation |
 | 19 | [19-readiness-liveness.md](./19-readiness-liveness.md) | Readiness probe — multi-check health gate, ReadinessProbe.isReady() returns {ready, checks} |
 | 20 | [20-tenant-log-streamer.md](./20-tenant-log-streamer.md) | Tenant log streamer — per-tenant webhook delivery, queueLog/flush, destination routing |

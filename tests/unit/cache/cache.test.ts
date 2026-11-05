@@ -49,7 +49,7 @@ test("CacheControlParser - parses directives correctly", () => {
 test("PatternInvalidator - matches glob pattern", async () => {
   const invalidated: string[] = [];
   const invalidator = new PatternInvalidator({
-    invalidate: async (pat) => { invalidated.push(pat); },
+    invalidate: async (pat) => { invalidated.push(pat); return 1; },
   });
   await invalidator.invalidate("/api/users/*");
   assert.strictEqual(invalidated[0], "/api/users/*");
@@ -70,7 +70,7 @@ test("DebeziumInvalidator - parses CDC events for SQL/NoSQL", async () => {
   const invalidated: string[] = [];
   const debezium = new DebeziumInvalidator(
     [{ table: "users", pathPattern: "/api/users/{id}" }],
-    async (path) => { invalidated.push(path); },
+    async (path) => { invalidated.push(path); return 1; },
   );
 
   const eventJson = JSON.stringify({

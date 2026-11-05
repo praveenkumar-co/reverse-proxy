@@ -31,11 +31,13 @@ export class HybridCache implements ICache {
       await this.l2.del(key);
     } catch {}
   }
-  async invalidate(pattern: string): Promise<void> {
-    this.l1.invalidatePattern(pattern);
+  async invalidate(pattern: string): Promise<number> {
+    const l1Count = this.l1.invalidatePattern(pattern);
+    let l2Count = 0;
     try {
-      await this.l2.invalidate(pattern);
+      l2Count = await this.l2.invalidate(pattern);
     } catch {}
+    return l1Count + l2Count;
   }
   buildKey(method: string, path: string): string {
     return this.l2.buildKey(method, path);

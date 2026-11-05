@@ -4,16 +4,16 @@ import { logger } from "../../observability/logger/logger.js";
 export class DebeziumInvalidator {
   constructor(
     private mappings: DebeziumMapping[],
-    private invalidateFn: (pattern: string) => Promise<void>,
+    private invalidateFn: (pattern: string) => Promise<number>,
   ){}
-  async handle(eventJson: string): Promise<void> {
+  async handle(eventJson: string): Promise<number> {
     try {
       const event = JSON.parse(eventJson);
       const op = event.op;
-      if(op && !["c", "u", "d", "r"].includes(op)) return;
+      if(op && !["c", "u", "d", "r"].includes(op)) return 0;
       const tableName =
       event.source?.table ?? event.source?.collection ?? "";
-      if(!tableName) return;
+      if(!tableName) return 0;
       const parseObj = (val: any) => {
         if(typeof val === "string"){
           try {
@@ -46,7 +46,7 @@ export class DebeziumInvalidator {
         getVal(patch, ["id", "_id"]) ??
         getVal(event, ["id", "_id"]);
        if(!recordId){
-         return ; 
+         return 0;
        }
       logger.info(
         "Cache",
@@ -54,19 +54,23 @@ export class DebeziumInvalidator {
       );
       const matched = this.mappings.filter((m) => m.table === tableName);
       if(matched.length > 0){
+        let total = 0;
         for(const m of matched){
           const resolvedPath = m.pathPattern.replace("{id}", recordId);
-          await this.invalidateFn(resolvedPath);
+          total += await this.invalidateFn(resolvedPath);
         }
+        return total;
       }
       else {
         logger.warn(
           "Cache",
           `Debezium CDC change for table=${tableName} has no mapping configured — skipping invalidation`,
         );
+        return 0;
       }
     } catch (err: any){
       logger.error("Cache", `Debezium event parse failed: ${err.message}`);
+      return 0;
     }
   }
 }

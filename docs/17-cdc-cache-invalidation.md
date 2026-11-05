@@ -5,29 +5,43 @@ Standard TTL-based caching creates an unavoidable trade-off:
 - Short TTLs (e.g. 5s) reduce stale data risk but increase database load and cache miss rates.
 - Long TTLs (e.g. 10m) optimize performance but serve stale reads after database writes.
 
-Ninja Reverse Proxy solves this using **Change Data Capture (CDC)**. By streaming real-time transaction log events from the database via **Debezium**, the proxy invalidates cached HTTP routes within milliseconds of a SQL `UPDATE`, `INSERT`, or `DELETE`.
+Ninja Reverse Proxy solves this using **Change Data Capture (CDC)**. By receiving real-time transaction log events from the database via **Debezium**, the proxy invalidates cached HTTP routes within milliseconds of a SQL `UPDATE`, `INSERT`, or `DELETE`.
+
+CDC events reach the proxy through an **admin-gated HTTP webhook** — `POST /__cdc/webhook` — not through Redis pub/sub. An earlier version subscribed to a Redis pub/sub channel directly; that was removed because pub/sub has no replay or acknowledgment, so any event published while the cache's Redis client was mid-reconnect was silently dropped forever. A webhook at least gives the sender (a Debezium HTTP sink, or a small bridge process consuming a Kafka topic and re-POSTing each event) a response it can retry on.
 
 ```
 ┌─────────────────┐       ┌─────────────────┐       ┌──────────────────┐
-│ PostgreSQL /    │       │ Debezium Server │       │ Redis Pub/Sub /  │
-│ MySQL WAL Log   │──────►│ (Kafka Connect) │──────►│ Kafka Topic      │
-└─────────────────┘       └─────────────────┘       └────────┬─────────┘
+│ PostgreSQL /    │       │ Debezium Server │       │ Debezium HTTP    │
+│ MySQL WAL Log   │──────►│ (Kafka Connect) │──────►│ Sink / Kafka     │
+└─────────────────┘       └─────────────────┘       │ consumer bridge  │
+                                                     └────────┬─────────┘
                                                              │
-                                                      CDC JSON Event
+                                               POST /__cdc/webhook
+                                               (x-admin-token, CDC JSON body)
                                                              ▼
                                                     ┌──────────────────┐
-                                                    │ Reverse Proxy    │
-                                                    │ Debezium         │
-                                                    │ Invalidator      │
+                                                    │ Worker that      │
+                                                    │ received the     │
+                                                    │ HTTP request     │
                                                     └────────┬─────────┘
                                                              │
-                                                    Extract PK & Purge
+                                          1. cache.handleDebeziumEvent(body)
+                                             — purges this worker's own L1
+                                               and the shared L2/Redis entry
+                                          2. broadcastCdcInvalidate(body)
+                                             — master fans the same event out
+                                               to every OTHER worker, each of
+                                               which purges its own L1 too
                                                              ▼
                                                     ┌──────────────────┐
-                                                    │ L1 / L2 Cache    │
-                                                    │ DEL /api/users/55│
+                                                    │ 202 Accepted     │
+                                                    │ { invalidated: N }│
                                                     └──────────────────┘
 ```
+
+Every worker process keeps its own in-process L1 cache (`HybridCache`'s `InMemoryLRU`), on top of the shared L2 (Redis). A webhook request lands on exactly one worker — without the broadcast step above, every *other* worker would keep serving its own stale L1 entry forever, invisible to whichever worker actually received the HTTP call. See `src/core/cluster/master.ts`'s `broadcastCdcInvalidate()` and the `CDC_INVALIDATE_L1_REQUEST` / `CDC_INVALIDATE_BROADCAST_REQUEST` IPC messages in `src/core/cluster/worker.ts` for the fan-out mechanism.
+
+The webhook is idempotent: posting the identical event twice in a row invalidates nothing the second time (`{ "invalidated": 0 }`) rather than erroring.
 
 ---
 
@@ -52,48 +66,51 @@ When a database row changes, Debezium emits an envelope containing the before/af
 
 ---
 
-## 2. Invalidator Engine (`src/cache/invalidation/debezium.invalidator.ts`)
+## 2. The Webhook (`POST /__cdc/webhook`)
 
-The `DebeziumInvalidator` registers table-to-path mappings and evaluates incoming events against cache key patterns:
+Gated the same way as every other `/__*` admin endpoint: a `x-admin-token` header (or `Authorization: Bearer <token>`) matching `admin.token` / `ADMIN_SECRET`, enforced by `src/core/admin/admin.handler.ts`. Request body is the raw Debezium event JSON (see §1); response is `202 Accepted` with `{ "invalidated": <count> }`, where `count` is the total number of cache keys removed across every worker's L1 plus the shared L2/Redis entry.
+
+```bash
+curl -X POST http://localhost:8080/__cdc/webhook \
+  -H "x-admin-token: $ADMIN_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"op":"u","source":{"table":"orders"},"before":{"id":55},"after":{"id":55}}'
+# -> 202 {"invalidated":3}
+```
+
+## 3. Invalidator Engine (`src/cache/invalidation/debezium.invalidator.ts`)
+
+`DebeziumInvalidator.handle()` registers table-to-path mappings, evaluates the incoming event against them, and returns the number of keys invalidated (summed if more than one mapping matches the table):
 
 ```typescript
-export interface TableMapping {
-  table: string;
-  pathPattern: string; // e.g. "/api/orders/{id}"
-}
-
 export class DebeziumInvalidator {
   constructor(
-    private readonly mappings: TableMapping[],
-    private readonly onInvalidate: (path: string) => Promise<void>
+    private mappings: DebeziumMapping[],
+    private invalidateFn: (pattern: string) => Promise<number>,
   ) {}
 
-  async handle(rawEvent: string): Promise<void> {
-    const payload = JSON.parse(rawEvent);
-    const table = payload.source?.table;
-    const op = payload.op;
-    if (!['c', 'u', 'd'].includes(op)) return;
+  async handle(eventJson: string): Promise<number> {
+    const event = JSON.parse(eventJson);
+    if (event.op && !["c", "u", "d", "r"].includes(event.op)) return 0;
+    const tableName = event.source?.table ?? event.source?.collection ?? "";
+    if (!tableName) return 0;
 
-    const rowData = payload.after || payload.before;
-    if (!rowData) return;
+    const recordId = /* extracted from before/after/patch — handles {"$oid": "..."} too */;
+    if (!recordId) return 0;
 
-    for (const mapping of this.mappings) {
-      if (mapping.table === table) {
-        // Substitute primary key placeholders: {id} -> 55
-        let targetPath = mapping.pathPattern;
-        for (const [col, val] of Object.entries(rowData)) {
-          targetPath = targetPath.replace(`{${col}}`, String(val));
-        }
-        await this.onInvalidate(targetPath);
-      }
+    const matched = this.mappings.filter((m) => m.table === tableName);
+    let total = 0;
+    for (const m of matched) {
+      total += await this.invalidateFn(m.pathPattern.replace("{id}", recordId));
     }
+    return total;
   }
 }
 ```
 
 ---
 
-## 3. Supported Invalidation Strategies
+## 4. Supported Invalidation Strategies
 
 | Invalidation Type | Class | Behavior |
 |---|---|---|
@@ -103,7 +120,9 @@ export class DebeziumInvalidator {
 
 ---
 
-## 4. Operational Edge Cases & Gotchas
+## 5. Operational Edge Cases & Gotchas
 
 1. **MongoDB ObjectID Parsing**: When streaming CDC events from MongoDB, primary keys are nested within `_id: { "$oid": "64b..." }`. The invalidator normalizes nested ID objects into plain string identifiers before substitution.
 2. **Out-of-Order Events**: High-concurrency database writes can generate out-of-order CDC messages. Because CDC triggers a cache *eviction* (`DEL`) rather than a cache *mutation*, subsequent reads always re-query the primary database, guaranteeing eventual consistency.
+3. **Cluster fan-out has a timeout**: `broadcastCdcInvalidate()` waits up to 2s for every other worker to acknowledge before the webhook responds. A worker that doesn't reply in time (crashed, overloaded) is simply excluded from the reported `invalidated` count — its own L1 entry would then expire on its normal TTL instead of being purged immediately.
+4. **No L2, no convergence**: if Redis is down or not configured, L1 is not shared across workers at all — each worker independently re-fetches from the real upstream on its own first touch after invalidation. That's still correct (no worker serves stale data), but different workers can briefly report different "freshly fetched" values until each has made its own round-trip.

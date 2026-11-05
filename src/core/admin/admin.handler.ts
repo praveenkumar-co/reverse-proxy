@@ -136,6 +136,10 @@ export interface AdminHandlerOptions {
   cache: Cache;
   collectWorkerMetricSnapshots: () => Promise<any[]>;
   registry: RegistryClient;
+  // Invalidates `eventJson` (a Debezium-shaped CDC event) on every OTHER worker's own L1
+  // cache and returns the total count purged there — see POST /__cdc/webhook below, which
+  // has already invalidated its own L1 + the shared L2/Redis entry before calling this.
+  broadcastCdcInvalidate: (eventJson: string) => Promise<number>;
 }
 
 /**
@@ -154,6 +158,7 @@ export async function handleAdminRequest(options: AdminHandlerOptions): Promise<
     cache,
     collectWorkerMetricSnapshots,
     registry,
+    broadcastCdcInvalidate,
   } = options;
 
   const url = req.url ?? "/";
@@ -276,6 +281,47 @@ export async function handleAdminRequest(options: AdminHandlerOptions): Promise<
       } catch {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Invalid JSON body" }));
+      }
+    });
+    return true;
+  }
+
+  // Entry point for CDC-driven cache invalidation: a Debezium HTTP sink (or a small Kafka
+  // Connect / consumer bridge) posts the Debezium-shaped change event here. There is no Redis
+  // pub/sub path for this — that was removed because it silently dropped events published
+  // while the cache's Redis client was reconnecting (pub/sub has no replay or acknowledgment);
+  // an HTTP POST at least gets a response the sender can retry on.
+  //
+  // The request lands on exactly one worker, but every worker keeps its own L1 (in-process)
+  // cache layer, so a table change invisible to this worker's L1 would otherwise still be
+  // served stale by every other worker. handleDebeziumEvent() below purges this worker's own
+  // L1 and the shared L2/Redis entry; broadcastCdcInvalidate() fans the same event out to every
+  // other worker (via the master) so their own L1 copies are purged too, and its count is
+  // added to the total. Calling this twice with the identical event is a no-op the second time
+  // (nothing left to invalidate) rather than an error.
+  if (url === "/__cdc/webhook" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
+    req.on("end", async () => {
+      try {
+        JSON.parse(body);
+      } catch {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Invalid JSON body" }));
+        return;
+      }
+      try {
+        const localCount = await cache.handleDebeziumEvent(body);
+        const otherWorkersCount = await broadcastCdcInvalidate(body);
+        const invalidated = localCount + otherWorkersCount;
+        res.writeHead(202, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ invalidated }));
+      } catch (err: any) {
+        logger.error("Admin", `CDC webhook failed: ${err.message}`);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal error processing CDC event" }));
       }
     });
     return true;

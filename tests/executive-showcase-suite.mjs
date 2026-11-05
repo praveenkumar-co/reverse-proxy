@@ -42,6 +42,7 @@ const PORTS = {
   staleError: 4609,
   staleSwr: 4610,
   echo: 4611,
+  cdc: 4612,
 };
 
 const state = {
@@ -55,6 +56,7 @@ const state = {
   baseline: { calls: 0 },
   fast: { calls: 0, bytesReceived: 0 },
   slow: { calls: 0 },
+  cdc: { calls: 0 },
 };
 
 function sleep(ms) {
@@ -192,6 +194,16 @@ async function startAllMocks() {
     ),
   );
 
+  servers.push(
+    await startMock(
+      PORTS.cdc,
+      pathAware("/cdc-test", (req, res) => {
+        state.cdc.calls++;
+        consumeBody(req, () => jsonBody(res, 200, { calls: state.cdc.calls }));
+      }),
+    ),
+  );
+
   // First call succeeds (warms the cache); every call after that fails — isolates the
   // stale-if-error path from needing SWR to independently also be exercised correctly.
   servers.push(
@@ -273,6 +285,9 @@ upstreams:
   - id: cache-tag-backend
     url: "http://127.0.0.1:${PORTS.cacheTag}"
     healthPath: "/"
+  - id: cdc-backend
+    url: "http://127.0.0.1:${PORTS.cdc}"
+    healthPath: "/"
   - id: stale-error-backend
     url: "http://127.0.0.1:${PORTS.staleError}"
     healthPath: "/"
@@ -330,6 +345,11 @@ routes:
     cache:
       enabled: true
       ttlSeconds: 30
+  - path: "/cdc-test"
+    upstreams: ["cdc-backend"]
+    cache:
+      enabled: true
+      ttlSeconds: 300
   - path: "/stale-error-test"
     upstreams: ["stale-error-backend"]
     cache:
@@ -378,6 +398,11 @@ cache:
   key:
     ignoreQueryParams: ["utm_source"]
     varyHeaders: ["Accept"]
+  debezium:
+    enabled: true
+    mappings:
+      - table: "orders"
+        pathPattern: "/cdc-test*"
 `;
 
 // ----------------------------------------------------------------------------
@@ -675,6 +700,85 @@ async function pillar4() {
     "Stale-While-Revalidate serves stale immediately and refreshes in the background",
     sw1.status === 200 && sw2.headers["x-cache"] === "STALE" && afterRefreshCalls > immediateCalls,
     `swr-header=${sw2.headers["x-cache"]}, backend calls right away=${immediateCalls}, after background refresh=${afterRefreshCalls}`,
+  );
+
+  await pillar4CdcCluster();
+}
+
+// POST /__cdc/webhook must invalidate every worker's own L1 cache, not just the one that
+// happened to receive the HTTP request — each worker keeps a separate in-process LRU, so a
+// purge visible only to one worker would let every other worker keep serving the pre-change
+// body forever. Verified via response *content* (the backend's own call counter), not the
+// X-Cache header: once any worker re-fetches post-invalidation, the shared L2/Redis entry is
+// repopulated, so a buggy worker that kept its stale L1 entry would still show X-Cache: HIT —
+// it would just be serving the wrong (stale) body, which the counter mismatch catches.
+async function pillar4CdcCluster() {
+  const PROBES = 8; // > workers:2, so round-robin almost certainly touches both
+  const parseCalls = (r) => {
+    try {
+      return JSON.parse(r.body).calls;
+    } catch {
+      return undefined;
+    }
+  };
+
+  // agent:false forces a brand-new connection per request — http.globalAgent defaults to
+  // keepAlive:true on this Node version, which would otherwise pin every "fresh" probe to
+  // whichever single worker happened to accept the first persistent connection, defeating the
+  // whole point of probing across workers.
+  //
+  // This suite runs with no real Redis (unlike the soak harness), so L2 never shares state
+  // across workers here — each worker's L1 is a true island. That means warmup and
+  // post-invalidate probes do NOT converge to one shared value; each worker independently
+  // MISSes to the real upstream on its own first touch and then serves its own L1 from then
+  // on, so two workers alternating between two distinct, ever-increasing counter values (e.g.
+  // [1,2,1,2,...] during warmup, [3,4,3,4,...] after invalidation) is exactly what correct
+  // behavior looks like. The invariant that *does* hold regardless of Redis: no probe taken
+  // after invalidation may show a value a probe during warmup already showed — that would
+  // mean some worker kept serving its pre-invalidation L1 entry.
+  const warmup = [];
+  for (let i = 0; i < PROBES; i++) warmup.push(await request("GET", "/cdc-test", { agent: false }));
+  const warmupOk = warmup.every((r) => r.status === 200);
+  const maxWarmValue = Math.max(...warmup.map(parseCalls));
+
+  const cdcEvent = JSON.stringify({ op: "u", source: { table: "orders" }, before: { id: "cdc-1" }, after: { id: "cdc-1" } });
+  const webhook1 = await request("POST", "/__cdc/webhook", {
+    headers: { "x-admin-token": ADMIN_SECRET, "Content-Type": "application/json" },
+    body: cdcEvent,
+  });
+  let webhook1Body;
+  try {
+    webhook1Body = JSON.parse(webhook1.body);
+  } catch {}
+
+  // Idempotent: posting the identical event again immediately (nothing has repopulated the
+  // cache in between) must not error, and must report 0 — there is nothing left to invalidate.
+  const webhook2 = await request("POST", "/__cdc/webhook", {
+    headers: { "x-admin-token": ADMIN_SECRET, "Content-Type": "application/json" },
+    body: cdcEvent,
+  });
+  let webhook2Body;
+  try {
+    webhook2Body = JSON.parse(webhook2.body);
+  } catch {}
+
+  const postInvalidate = [];
+  for (let i = 0; i < PROBES; i++) postInvalidate.push(await request("GET", "/cdc-test", { agent: false }));
+  const minPostInvalidateValue = Math.min(...postInvalidate.map(parseCalls));
+
+  record(
+    "4. Enterprise Caching",
+    "CDC webhook invalidates every worker's own L1 cache cluster-wide (not just the one that received it) and is idempotent",
+    warmupOk &&
+      webhook1.status === 202 &&
+      webhook1Body?.invalidated > 0 &&
+      webhook2.status === 202 &&
+      webhook2Body?.invalidated === 0 &&
+      minPostInvalidateValue > maxWarmValue,
+    `warmup values=[${warmup.map(parseCalls).join(",")}] (max=${maxWarmValue}), ` +
+      `webhook1 status=${webhook1.status} invalidated=${webhook1Body?.invalidated}, ` +
+      `webhook2 (immediate repeat) status=${webhook2.status} invalidated=${webhook2Body?.invalidated} (expected 0, idempotent), ` +
+      `post-invalidate values=[${postInvalidate.map(parseCalls).join(",")}] (min=${minPostInvalidateValue}, must be > ${maxWarmValue})`,
   );
 }
 

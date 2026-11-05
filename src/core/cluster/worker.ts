@@ -375,6 +375,30 @@ async function collectWorkerMetricSnapshots(): Promise<any[]> {
 }
 
 // -----------------------------------------------------------------------------
+// CDC invalidation broadcast: this worker has already run the Debezium event through its own
+// cache.handleDebeziumEvent() (purging its own L1 and the shared L2/Redis entry) before
+// calling this — every OTHER worker's own L1 copy is otherwise invisible from here and never
+// gets purged, since each worker's HybridCache keeps a separate in-process LRU. Master fans
+// the same event out to every other worker and sums their reported counts with ours.
+// -----------------------------------------------------------------------------
+const pendingCdcInvalidateBroadcasts = new Map<string, (count: number) => void>();
+
+function requestCdcInvalidateBroadcast(eventJson: string): Promise<number> {
+  return new Promise((resolve) => {
+    const requestId = `${process.pid}-${Date.now()}-${Math.random()}`;
+    const timer = setTimeout(() => {
+      pendingCdcInvalidateBroadcasts.delete(requestId);
+      resolve(0);
+    }, 3000);
+    pendingCdcInvalidateBroadcasts.set(requestId, (count) => {
+      clearTimeout(timer);
+      resolve(count);
+    });
+    safeProcessSend(JSON.stringify({ type: "CDC_INVALIDATE_BROADCAST_REQUEST", requestId, eventJson }));
+  });
+}
+
+// -----------------------------------------------------------------------------
 // Lifecycle: graceful shutdown drains in-flight requests before this process
 // exits; IPC send backpressure is handled the same way master.ts always has.
 // -----------------------------------------------------------------------------
@@ -449,6 +473,22 @@ process.on("message", (rawMsg: any) => {
       if (resolve) {
         pendingMetricsAggregates.delete(parsed.requestId);
         resolve(parsed.snapshots ?? []);
+      }
+      return;
+    }
+
+    if (parsed.type === "CDC_INVALIDATE_L1_REQUEST") {
+      void cache.handleDebeziumEvent(parsed.eventJson).then((count) => {
+        safeProcessSend(JSON.stringify({ type: "CDC_INVALIDATE_L1_RESPONSE", requestId: parsed.requestId, count }));
+      });
+      return;
+    }
+
+    if (parsed.type === "CDC_INVALIDATE_BROADCAST_RESPONSE") {
+      const resolve = pendingCdcInvalidateBroadcasts.get(parsed.requestId);
+      if (resolve) {
+        pendingCdcInvalidateBroadcasts.delete(parsed.requestId);
+        resolve(parsed.count ?? 0);
       }
       return;
     }
@@ -1509,6 +1549,7 @@ const proxyRequestHandler = async (req: http.IncomingMessage, res: http.ServerRe
     cache,
     collectWorkerMetricSnapshots,
     registry: registryClient,
+    broadcastCdcInvalidate: requestCdcInvalidateBroadcast,
   });
   if (isAdmin) return;
 

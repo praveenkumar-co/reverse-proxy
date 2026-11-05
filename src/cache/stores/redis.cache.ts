@@ -15,7 +15,7 @@ export class RedisCache implements ICache {
   async del(key: string): Promise<void> {
     await this.client.del(key);
   }
-  async invalidate(pattern: string): Promise<void> {
+  async invalidate(pattern: string): Promise<number> {
     const searchPatterns = pattern.includes("*")
       ? [pattern, `*${pattern}*`, `proxy:*:${pattern}`]
       : [`proxy:*:${pattern}`, `*${pattern}*`];
@@ -46,6 +46,7 @@ export class RedisCache implements ICache {
         }
       }
     }
+    return allKeys.size;
   }
 
   buildKey(method: string, path: string): string {

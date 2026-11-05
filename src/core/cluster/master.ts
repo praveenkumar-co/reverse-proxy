@@ -91,6 +91,67 @@ interface MetricQueryRequest {
 }
 const pendingMetricQueries = new Map<string, MetricQueryRequest>();
 
+interface CdcInvalidateQuery {
+  resolve: (count: number) => void;
+  pendingWorkers: Set<number>;
+  total: number;
+  timer: NodeJS.Timeout;
+}
+const pendingCdcInvalidateQueries = new Map<string, CdcInvalidateQuery>();
+
+// A worker that handles POST /__cdc/webhook has already invalidated its own L1 cache and the
+// shared L2/Redis entry (via cache.handleDebeziumEvent locally) before asking for this — every
+// OTHER worker's own L1 copy, invisible from the originating worker, still needs purging too.
+// Each other worker re-runs the same Debezium event through its own cache.handleDebeziumEvent
+// (redundant L2 work — the keys are already gone, so its own L2 pass finds nothing — but it's
+// the simplest way to get that worker's own correct L1-pattern match without a second method).
+function broadcastCdcInvalidate(eventJson: string, excludeWorkerId: number): Promise<number> {
+  return new Promise((resolve) => {
+    const requestId = `${Date.now()}-${Math.random()}`;
+    const activeWorkers = WORKER_POOL.filter(
+      (w) => w.isConnected() && w.id !== excludeWorkerId,
+    );
+    if (activeWorkers.length === 0) {
+      return resolve(0);
+    }
+    const pendingWorkers = new Set(activeWorkers.map((w) => w.id));
+    const cleanup = () => {
+      const query = pendingCdcInvalidateQueries.get(requestId);
+      if (query) {
+        clearTimeout(query.timer);
+        pendingCdcInvalidateQueries.delete(requestId);
+      }
+    };
+    const timer = setTimeout(() => {
+      const query = pendingCdcInvalidateQueries.get(requestId);
+      const total = query?.total ?? 0;
+      cleanup();
+      resolve(total);
+    }, 2000);
+    pendingCdcInvalidateQueries.set(requestId, {
+      resolve: (total) => {
+        cleanup();
+        resolve(total);
+      },
+      pendingWorkers,
+      total: 0,
+      timer,
+    });
+    const payload = JSON.stringify({ type: "CDC_INVALIDATE_L1_REQUEST", requestId, eventJson });
+    for (const w of activeWorkers) {
+      try {
+        w.send(payload);
+      } catch {
+        pendingWorkers.delete(w.id);
+      }
+    }
+    if (pendingWorkers.size === 0) {
+      cleanup();
+      resolve(0);
+    }
+  });
+}
+
 // Fans DUMP_METRICS_REQUEST out to every connected worker (optionally excluding one, so a
 // worker that itself is aggregating for a client's GET /metrics doesn't get asked to report
 // on itself a second time — it already has its own snapshot locally) and resolves once every
@@ -230,6 +291,26 @@ function setupWorkerMessageHandling(worker: Worker) {
       }
       if (parsed.type === "RL_LEASE_REQUEST") {
         void handleRlLeaseRequest(worker, parsed);
+        return;
+      }
+      if (parsed.type === "CDC_INVALIDATE_BROADCAST_REQUEST") {
+        void broadcastCdcInvalidate(parsed.eventJson, worker.id).then((count) => {
+          workerSend(
+            worker,
+            JSON.stringify({ type: "CDC_INVALIDATE_BROADCAST_RESPONSE", requestId: parsed.requestId, count }),
+          );
+        });
+        return;
+      }
+      if (parsed.type === "CDC_INVALIDATE_L1_RESPONSE") {
+        const query = pendingCdcInvalidateQueries.get(parsed.requestId);
+        if (query) {
+          query.total += parsed.count ?? 0;
+          query.pendingWorkers.delete(worker.id);
+          if (query.pendingWorkers.size === 0) {
+            query.resolve(query.total);
+          }
+        }
         return;
       }
     } catch (err: any) {

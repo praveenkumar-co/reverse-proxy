@@ -226,6 +226,7 @@ test("Cache - Debezium Event Parsing (SQL and MongoDB)", async () => {
   const invalidatedPatterns: string[] = [];
   cache.invalidate = async (pattern: string) => {
     invalidatedPatterns.push(pattern);
+    return 1;
   };
 
   // Test Case 1: SQL update event
