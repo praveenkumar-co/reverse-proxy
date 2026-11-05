@@ -32,6 +32,14 @@
 //                                 read incrementally, crosses retryBufferLimitBytes
 //                                 mid-request, and switches to streaming with
 //                                 no byte lost or duplicated (SHA-256 matches).
+//  10. Route upstream isolation:  route B's upstream id is never registered
+//                                 (missing/unhealthy pool). Every request to B
+//                                 must get 503 and route A's healthy upstream
+//                                 must receive none of them — a route must
+//                                 never borrow another route's upstream.
+//  11. Cache tenant isolation:    two different routes (two tenants) requesting
+//                                 the same resource path-suffix and query string
+//                                 must never observe each other's cached body.
 //
 // All mock upstreams are started before the proxy boots (the proxy's initial
 // health check would otherwise mark every upstream down). Exits 1 if any
@@ -59,6 +67,9 @@ const UP_ABORT = 4705;
 const UP_RETRY_BIG = 4706; // shared by the big-body and chunked-overflow cases (two routes, one upstream)
 const UP_RETRY_FLAKY_SMALL = 4707;
 const UP_RETRY_FLAKY_BIG = 4708;
+const UP_ROUTE_A = 4709;
+const UP_CACHE_TENANT_A = 4710;
+const UP_CACHE_TENANT_B = 4711;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -546,6 +557,79 @@ async function testRetryChunkedBodyOverflow() {
 }
 
 // ----------------------------------------------------------------------------
+// Test 10: route upstream isolation — /route-b's upstream id ("ghost-upstream")
+// is never registered in the proxy's upstreams list (just like a tenant's
+// dynamic upstream that hasn't been registered via the admin API yet). Every
+// request to /route-b must get 503, and /route-a's healthy, fully distinct
+// upstream must never see any of that traffic.
+// ----------------------------------------------------------------------------
+let routeAUpstreamCalls = 0;
+const routeAHandler = withHealthCheck("/route-a", (req, res) => {
+  routeAUpstreamCalls++;
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ id: "route-a-backend" }));
+});
+
+async function testRouteUpstreamIsolation() {
+  routeAUpstreamCalls = 0;
+  const TOTAL = 200;
+  const agent = new http.Agent({ keepAlive: true, maxSockets: 20 });
+  const results = await Promise.all(
+    Array.from({ length: TOTAL }, () => request("/route-b", { agent }).catch((err) => ({ error: err.message }))),
+  );
+  agent.destroy();
+  const non503 = results.filter((r) => r.status !== 503);
+  record(
+    "10. Route upstream isolation: route B's unregistered upstream never borrows route A's upstream",
+    non503.length === 0 && routeAUpstreamCalls === 0,
+    `${TOTAL} requests to /route-b: non-503=${non503.length} (expected 0), route-a-backend received=${routeAUpstreamCalls} (expected 0)`,
+  );
+}
+
+// ----------------------------------------------------------------------------
+// Test 11: cache tenant isolation — two different routes (two tenants) request
+// the same resource path-suffix and the same query string. Each tenant's cache
+// entry must reflect only its own upstream's body, never the other tenant's.
+// ----------------------------------------------------------------------------
+function tenantCacheHandler(tenantId) {
+  return withHealthCheck(`/${tenantId}/resource`, (req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "max-age=300" });
+    res.end(JSON.stringify({ tenant: tenantId, url: req.url }));
+  });
+}
+
+async function testCacheTenantIsolation() {
+  const QUERY = "?id=42";
+  // First round populates each tenant's cache entry (MISS); second round must hit it back
+  // with that same tenant's body — never the other tenant's, even though the resource
+  // suffix and query string are identical across both routes.
+  const a1 = await request(`/tenant-a/resource${QUERY}`);
+  const b1 = await request(`/tenant-b/resource${QUERY}`);
+  const a2 = await request(`/tenant-a/resource${QUERY}`);
+  const b2 = await request(`/tenant-b/resource${QUERY}`);
+  const parse = (r) => {
+    try {
+      return JSON.parse(r.body.toString("utf8"));
+    } catch {
+      return null;
+    }
+  };
+  const pa1 = parse(a1);
+  const pa2 = parse(a2);
+  const pb1 = parse(b1);
+  const pb2 = parse(b2);
+  const tenantAIsolated = pa1?.tenant === "tenant-a" && pa2?.tenant === "tenant-a";
+  const tenantBIsolated = pb1?.tenant === "tenant-b" && pb2?.tenant === "tenant-b";
+  const secondCallsCached = a2.headers["x-cache"] === "HIT" && b2.headers["x-cache"] === "HIT";
+  record(
+    "11. Cache tenant isolation: same resource path-suffix and query on two different routes never share a cache entry",
+    tenantAIsolated && tenantBIsolated && secondCallsCached,
+    `tenant-a bodies=[${pa1?.tenant},${pa2?.tenant}], tenant-b bodies=[${pb1?.tenant},${pb2?.tenant}], ` +
+      `a2 x-cache=${a2.headers["x-cache"]}, b2 x-cache=${b2.headers["x-cache"]}`,
+  );
+}
+
+// ----------------------------------------------------------------------------
 // Harness plumbing
 // ----------------------------------------------------------------------------
 const CONFIG_YAML = `
@@ -594,6 +678,15 @@ upstreams:
   - id: retry-flaky-big-backend
     url: "http://127.0.0.1:${UP_RETRY_FLAKY_BIG}"
     healthPath: "/"
+  - id: route-a-backend
+    url: "http://127.0.0.1:${UP_ROUTE_A}"
+    healthPath: "/"
+  - id: cache-tenant-a-backend
+    url: "http://127.0.0.1:${UP_CACHE_TENANT_A}"
+    healthPath: "/"
+  - id: cache-tenant-b-backend
+    url: "http://127.0.0.1:${UP_CACHE_TENANT_B}"
+    healthPath: "/"
 
 routes:
   - path: "/binary"
@@ -623,6 +716,21 @@ routes:
   - path: "/retry-flaky-big"
     upstreams: ["retry-flaky-big-backend"]
     cache: { enabled: false }
+  - path: "/route-a"
+    upstreams: ["route-a-backend"]
+    cache: { enabled: false }
+  - path: "/route-b"
+    # "ghost-upstream" is deliberately absent from the upstreams: list above — same
+    # shape as a tenant's dynamic upstream that hasn't been registered via the admin
+    # API yet. This route must 503, never borrow route-a-backend (F, Step 1 / P0).
+    upstreams: ["ghost-upstream"]
+    cache: { enabled: false }
+  - path: "/tenant-a/resource"
+    upstreams: ["cache-tenant-a-backend"]
+    cache: { enabled: true, ttlSeconds: 300 }
+  - path: "/tenant-b/resource"
+    upstreams: ["cache-tenant-b-backend"]
+    cache: { enabled: true, ttlSeconds: 300 }
 
 loadBalancing:
   strategy: round-robin
@@ -647,7 +755,8 @@ rateLimit:
   enabled: false
 
 cache:
-  enabled: false
+  enabled: true
+  l1Enabled: true
 `;
 
 const tmpConfigPath = path.join(os.tmpdir(), `ninja-datapath-regression-${process.pid}.yaml`);
@@ -733,6 +842,9 @@ async function main() {
     startMock(UP_RETRY_BIG, retryBigOrChunkedHandler),
     startMock(UP_RETRY_FLAKY_SMALL, flakySmallHandler),
     startMock(UP_RETRY_FLAKY_BIG, flakyBigHandler),
+    startMock(UP_ROUTE_A, routeAHandler),
+    startMock(UP_CACHE_TENANT_A, tenantCacheHandler("tenant-a")),
+    startMock(UP_CACHE_TENANT_B, tenantCacheHandler("tenant-b")),
   ]);
   log(`${mockServers.length} mock upstreams ready.`);
 
@@ -765,6 +877,8 @@ async function main() {
   await testRetryFlakySmallRetriedOnce();
   await testRetryBigBodyNotRetried();
   await testRetryChunkedBodyOverflow();
+  await testRouteUpstreamIsolation();
+  await testCacheTenantIsolation();
 
   printSummary();
 

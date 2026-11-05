@@ -31,6 +31,7 @@ const server = http.createServer((req, res) => {
     return;
   }
   requestsServed++;
+  res.setHeader("x-upstream-id", ID);
   const url = (req.url || "/").split("?")[0];
   const method = req.method || "GET";
 

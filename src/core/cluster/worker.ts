@@ -671,7 +671,11 @@ function selectUpstream(
     }
   }
   if (!upstreamId) {
-    const candidateSet = routeHealthyUpstreams.size > 0 ? routeHealthyUpstreams : HEALTHY_UPSTREAMS;
+    // A route with an explicit upstream list (every real route has one) must never borrow
+    // another route's upstream just because its own list is currently empty/unhealthy — that
+    // would let one tenant's request be answered by a different tenant's backend. Only a route
+    // with NO upstream restriction at all (allowedUpstreams itself empty) uses the global pool.
+    const candidateSet = allowedUpstreams.length > 0 ? routeHealthyUpstreams : HEALTHY_UPSTREAMS;
     upstreamId = lb.pickFiltered(candidateSet, clientIp, attemptedUpstreams, headers.cookie);
     if (!upstreamId && attemptedUpstreams.size > 0) {
       upstreamId = lb.pickFiltered(candidateSet, clientIp, new Set(), headers.cookie);
