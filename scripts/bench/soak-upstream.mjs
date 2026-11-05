@@ -22,6 +22,10 @@ const downloadBody = crypto.randomBytes(2 * 1024 * 1024);
 let cacheableVersion = 0;
 let requestsServed = 0;
 let isDown = false;
+// Tracks every POST's client-supplied x-request-id so the soak orchestrator can prove "no
+// non-idempotent request was retried" — a retried POST (no Idempotency-Key) would show up
+// here as a duplicate delivery to this upstream, since a retry sends the same id again.
+const postRequestIdCounts = new Map();
 
 const server = http.createServer((req, res) => {
   if (isDown) {
@@ -34,6 +38,10 @@ const server = http.createServer((req, res) => {
   res.setHeader("x-upstream-id", ID);
   const url = (req.url || "/").split("?")[0];
   const method = req.method || "GET";
+  if (method === "POST") {
+    const reqId = req.headers["x-request-id"];
+    if (reqId) postRequestIdCounts.set(reqId, (postRequestIdCounts.get(reqId) || 0) + 1);
+  }
 
   if (url === "/health") {
     res.writeHead(200, { "Content-Type": "text/plain" });
@@ -42,8 +50,9 @@ const server = http.createServer((req, res) => {
   }
 
   if (url === "/stats") {
+    const duplicatePostRequestIds = [...postRequestIdCounts.entries()].filter(([, n]) => n > 1);
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ id: ID, requestsServed, cacheableVersion }));
+    res.end(JSON.stringify({ id: ID, requestsServed, cacheableVersion, duplicatePostRequestIds, uniquePostRequestIds: postRequestIdCounts.size }));
     return;
   }
 

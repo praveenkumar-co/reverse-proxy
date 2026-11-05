@@ -1143,6 +1143,13 @@ async function performUpstreamCall(
     proxyReq.on("error", (err: any) => {
       clearTimeout(connectTimeoutTimer);
       clearIdleTimeout();
+      // proxyReq.destroy() (e.g. the request-body byte-limit guard tearing down an oversized
+      // upload) fires this 'error' event asynchronously, after the outcome it caused has
+      // already been finishOutcome()'d with its own, correct status. finishOutcome() itself
+      // no-ops on a second call, but logger.error/recordAndLog below are not otherwise
+      // guarded — without this check, every request this handler fires for ends up double-
+      // logged: once with its real status, then again moments later as a spurious 502 here.
+      if (settled) return;
       if (abortHandle.aborted) {
         finishOutcome({ kind: "aborted" });
         return;
@@ -1174,6 +1181,8 @@ async function performUpstreamCall(
           try {
             proxyReq.destroy();
           } catch {}
+          clearIdleTimeout();
+          recordAndLog(413, 0, performance.now() - startTime, method, cleanPath, upstreamId, headers, clientIp);
           finishOutcome({ kind: "terminal-error", statusCode: 413, errorMessage: "Payload Too Large" });
         } else {
           // proxyReq's own 'error' handler above already resolves the outcome for a
