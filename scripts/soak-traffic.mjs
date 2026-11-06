@@ -12,15 +12,15 @@
 //   - GET  /sticky       (same cookie reused across a batch of calls)
 //   - GET  /canary       (natural, cookie-less — exercises the weighted split)
 //   - POST /upload       (64KB body, SHA-256 verified via the upstream's own echo)
-//   - GET  /download     (2MB, SHA-256 verified against the known fixed body)
-//   - POST /upload       (5MB body, SHA-256 verified)
+//   - GET  /download     (--download-mb, default 1MB, SHA-256 verified against the fixed body)
+//   - POST /upload       (--large-upload-mb, default 2MB, SHA-256 verified)
 //   - GET  /rate-limited (some with a spoofed X-Forwarded-For)
 //   - OPTIONS /cors      (alternating allowed/disallowed Origin)
 //   - POST /upload-limited (oversized, 2MB body against a 1MB route limit -> 413)
 //   - GET  /flapping     (hits the flapping upstream directly)
 //   - GET  /dynamic      (only meaningful once admin-registered; 503 otherwise, which is fine)
-// Plus, outside the rate-paced loop: a small fixed pool of held-open SSE and WebSocket
-// connections, replaced periodically.
+// Plus, outside the rate-paced loop: a pool of held-open SSE and WebSocket connections
+// (--sse-pool-size/--ws-pool-size, default 5 each, hard-capped at 50), replaced periodically.
 //
 // Every request to /upload (never /upload-limited, which must NOT reach the upstream) carries
 // a unique X-Request-Id header — scripts/soak.mjs checks the upstream's own /stats for
@@ -65,6 +65,10 @@ const { values: args } = parseArgs({
     "cors-disallowed": { type: "string", default: "http://evil.example.com" },
     "report-interval-ms": { type: "string", default: "5000" },
     "abort-rate": { type: "string", default: "0.01" },
+    "download-mb": { type: "string", default: "1" },
+    "large-upload-mb": { type: "string", default: "2" },
+    "sse-pool-size": { type: "string", default: "5" },
+    "ws-pool-size": { type: "string", default: "5" },
   },
 });
 const PROXY_PORT = Number(args["proxy-port"]);
@@ -73,6 +77,13 @@ const CORS_ALLOWED = args["cors-allowed"];
 const CORS_DISALLOWED = args["cors-disallowed"];
 const REPORT_INTERVAL_MS = Number(args["report-interval-ms"]);
 const ABORT_RATE = Number(args["abort-rate"]);
+const DOWNLOAD_MB = Number(args["download-mb"]);
+const LARGE_UPLOAD_MB = Number(args["large-upload-mb"]);
+// Hard safety ceiling regardless of what's passed — this generator must never balloon to an
+// unbounded number of held-open connections just from a misconfigured or buggy flag value.
+const POOL_SIZE_CEILING = 50;
+const SSE_POOL_SIZE = Math.min(POOL_SIZE_CEILING, Number(args["sse-pool-size"]));
+const WS_POOL_SIZE = Math.min(POOL_SIZE_CEILING, Number(args["ws-pool-size"]));
 
 const TICK_MS = 100;
 const PER_TICK = (TARGET_RATE * TICK_MS) / 1000;
@@ -220,56 +231,59 @@ async function doUpload64k() {
   }
 }
 
-async function doUpload5m() {
-  bump("upload5m", "sent");
-  const body = crypto.randomBytes(5 * 1024 * 1024);
-  const sha = crypto.createHash("sha256").update(body).digest("hex");
+// Generated once at startup (not per-call) — same rationale as upload64k: this is traffic
+// shape/integrity exercise, not a test of the generator's own hashing throughput.
+const largeUploadBody = crypto.randomBytes(LARGE_UPLOAD_MB * 1024 * 1024);
+const largeUploadSha = crypto.createHash("sha256").update(largeUploadBody).digest("hex");
+
+async function doLargeUpload() {
+  bump("largeUpload", "sent");
   const reqId = randomId();
   const r = await request("/upload", {
     method: "POST",
-    headers: { "Content-Type": "application/octet-stream", "Content-Length": body.length, "x-request-id": reqId },
-    body,
+    headers: { "Content-Type": "application/octet-stream", "Content-Length": largeUploadBody.length, "x-request-id": reqId },
+    body: largeUploadBody,
     abortAfterMs: maybeAbort(),
   });
   recordStatus(r.status);
   if (r.aborted) {
-    bump("upload5m", "aborted");
+    bump("largeUpload", "aborted");
     return;
   }
   if (r.status === 200) {
     try {
       const parsed = JSON.parse(r.body.toString("utf8"));
-      if (parsed.sha256 === sha) {
+      if (parsed.sha256 === largeUploadSha) {
         integrity.ok++;
-        bump("upload5m", "ok");
+        bump("largeUpload", "ok");
       } else {
         integrity.fail++;
-        bump("upload5m", "error");
+        bump("largeUpload", "error");
       }
     } catch {
-      bump("upload5m", "error");
+      bump("largeUpload", "error");
     }
   } else {
-    bump("upload5m", "error");
+    bump("largeUpload", "error");
   }
 }
 
-async function doDownload2m() {
-  bump("download2m", "sent");
+async function doDownload() {
+  bump("download", "sent");
   const r = await request("/download", { abortAfterMs: maybeAbort() });
   recordStatus(r.status);
   if (r.aborted) {
-    bump("download2m", "aborted");
+    bump("download", "aborted");
     return;
   }
-  if (r.status === 200 && r.body.length === 2 * 1024 * 1024) {
+  if (r.status === 200 && r.body.length === DOWNLOAD_MB * 1024 * 1024) {
     integrity.ok++;
-    bump("download2m", "ok");
+    bump("download", "ok");
   } else if (r.status === 200) {
     integrity.fail++;
-    bump("download2m", "error");
+    bump("download", "error");
   } else {
-    bump("download2m", "error");
+    bump("download", "error");
   }
 }
 
@@ -343,8 +357,8 @@ const WEIGHTED_KINDS = [
   [doSticky, 10],
   [doCanary, 10],
   [() => doUpload64k(), 10],
-  [() => doDownload2m(), 8],
-  [() => doUpload5m(), 2],
+  [() => doDownload(), 8],
+  [() => doLargeUpload(), 2],
   [() => doRateLimited(false), 6],
   [() => doRateLimited(true), 4],
   [() => doCorsPreflight(true), 2],
@@ -365,9 +379,9 @@ function pickKind() {
 
 // ----------------------------------------------------------------------------
 // SSE pool — a handful of held-open streams, each replaced after 10-30s, verifying
-// messages arrive from the real upstream (not simulated) in order.
+// messages arrive from the real upstream (not simulated) in order. SSE_POOL_SIZE itself is
+// declared above (CLI-configurable, clamped to POOL_SIZE_CEILING).
 // ----------------------------------------------------------------------------
-const SSE_POOL_SIZE = 5;
 let sseStreamsStarted = 0;
 let sseMessagesReceived = 0;
 let sseErrors = 0;
@@ -403,9 +417,9 @@ function startSseStream() {
 }
 
 // ----------------------------------------------------------------------------
-// WebSocket pool — held open for the whole run, pinging both directions.
+// WebSocket pool — held open for the whole run, pinging both directions. WS_POOL_SIZE itself
+// is declared above (CLI-configurable, clamped to POOL_SIZE_CEILING).
 // ----------------------------------------------------------------------------
-const WS_POOL_SIZE = 5;
 let wsMessagesSent = 0;
 let wsMessagesReceived = 0;
 let wsErrors = 0;

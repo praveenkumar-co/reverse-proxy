@@ -5,7 +5,7 @@
 // one its role. Also serves the cacheable/CDC-mapped resource, a WebSocket echo, and an SSE
 // stream, so the soak's traffic generator has one backend shape to talk to everywhere.
 //
-// Usage: node soak-upstream.mjs <port> <id> [--flap]
+// Usage: node soak-upstream.mjs <port> <id> [--flap] [--download-mb N]
 import http from "node:http";
 import crypto from "node:crypto";
 import { acceptKeyFor, encodeFrame, createFrameParser } from "./ws-lite.mjs";
@@ -13,12 +13,14 @@ import { acceptKeyFor, encodeFrame, createFrameParser } from "./ws-lite.mjs";
 const PORT = Number(process.argv[2]);
 const ID = process.argv[3] || `upstream-${PORT}`;
 const FLAP = process.argv.includes("--flap");
+const downloadMbArgIdx = process.argv.indexOf("--download-mb");
+const DOWNLOAD_MB = downloadMbArgIdx >= 0 ? Number(process.argv[downloadMbArgIdx + 1]) : 2;
 if (!PORT) {
   console.error("soak-upstream.mjs: missing port (argv[2])");
   process.exit(1);
 }
 
-const downloadBody = crypto.randomBytes(2 * 1024 * 1024);
+const downloadBody = crypto.randomBytes(DOWNLOAD_MB * 1024 * 1024);
 let cacheableVersion = 0;
 let requestsServed = 0;
 let isDown = false;

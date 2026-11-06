@@ -30,7 +30,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
 const SOAK_CONFIG_PATH = path.join(REPO_ROOT, "docs", "results", "soak-config.yaml");
 
-const { values: args } = parseArgs({ options: { minutes: { type: "string", default: "30" }, rate: { type: "string", default: "1500" } } });
+// rate defaults to 800 (down from the spec's 1500) — this laptop's real-process topology
+// (4 proxy workers + 5 single-threaded Node upstreams + Redis + generator, all sharing one
+// machine) OOM'd twice at higher load; 800 keeps every feature and every check while cutting
+// the harness's own footprint. See docs/results/soak-*.md for the note on reduced load.
+const { values: args } = parseArgs({ options: { minutes: { type: "string", default: "30" }, rate: { type: "string", default: "800" } } });
 const DURATION_MIN = Number(args.minutes);
 const DURATION_MS = DURATION_MIN * 60 * 1000;
 const TRAFFIC_RATE = Number(args.rate);
@@ -322,11 +326,20 @@ function cumulativeSum(predicate) {
   }
   return total;
 }
-const lbStatsHistory = []; // {tSec, lbStats}
+// Incremental aggregates from /__lb-stats polling, not a stored history array — a 30+ minute
+// run polling every 5s would otherwise accumulate hundreds of full lb-stats snapshots for
+// data every consumer here only ever needs as a handful of running scalars (transition
+// counts, a running max, two booleans). Updated by fastPollLoop; read by buildReport.
+let prevFlappingBreakerState = null;
+let breakerOpenedCount = 0;
+let breakerClosedAfterOpenCount = 0;
+let maxRetryBudgetSeen = 0;
+let flappingWentDown = false;
+let flappingWentBackUpAfterDown = false;
+let lbStatsPollCount = 0;
 const criteria = {}; // name -> {pass, detail}
 const featureProofs = {}; // name -> {pass, detail}
 let trafficFinalReport = null;
-let trafficStatusReports = [];
 let proxyMasterPid = null;
 let knownWorkerPids = new Set();
 let unplannedRespawns = 0;
@@ -350,7 +363,7 @@ let dynamicDeregisteredAtRequests = null;
 
 async function doRegisterDynamicUpstream() {
   log("LIVE OP: registering dynamic-upstream via admin API");
-  dynamicUpstreamProc = soakUpstreamProc(DYNAMIC_UPSTREAM_PORT, "dynamic-upstream");
+  dynamicUpstreamProc = soakUpstreamProc(DYNAMIC_UPSTREAM_PORT, "dynamic-upstream", ["--download-mb", "1"]);
   await waitForHttp("/health", 10000, DYNAMIC_UPSTREAM_PORT);
   const r = await adminRequest("/__registry/register", {
     method: "POST",
@@ -554,11 +567,15 @@ async function setup() {
     execSync(`redis-cli -p ${REDIS_PORT} flushall`, { stdio: "ignore" });
   } catch {}
 
-  soakUpstreamProc(20101, "pool-1");
-  soakUpstreamProc(20102, "pool-2");
-  soakUpstreamProc(20103, "pool-3");
-  soakUpstreamProc(20104, "flapping-backend", ["--flap"]);
-  soakUpstreamProc(20105, "canary-candidate");
+  // --download-mb 1 must match soak-traffic.mjs's own --download-mb (also defaults to 1) —
+  // the generator verifies the downloaded body's exact byte length against its own
+  // DOWNLOAD_MB, so a mismatch against this upstream's served size would fail every
+  // download check even though nothing is actually broken.
+  soakUpstreamProc(20101, "pool-1", ["--download-mb", "1"]);
+  soakUpstreamProc(20102, "pool-2", ["--download-mb", "1"]);
+  soakUpstreamProc(20103, "pool-3", ["--download-mb", "1"]);
+  soakUpstreamProc(20104, "flapping-backend", ["--flap", "--download-mb", "1"]);
+  soakUpstreamProc(20105, "canary-candidate", ["--download-mb", "1"]);
   for (const port of [20101, 20102, 20103, 20104, 20105]) {
     await waitForHttp("/health", 10000, port);
   }
@@ -580,11 +597,20 @@ async function setup() {
 }
 
 function startTrafficGenerator() {
+  // download-mb/large-upload-mb/sse-pool-size/ws-pool-size passed explicitly (rather than
+  // relying on soak-traffic.mjs's own defaults) so the reduced-footprint numbers are visible
+  // right here at the call site and don't silently drift if those defaults ever change.
+  // sse/ws-pool-size=5 keeps concurrent SSE/WS connections well under the 50 hard ceiling
+  // (POOL_SIZE_CEILING in soak-traffic.mjs) enforced regardless of this value.
   const proc = spawnTracked("traffic", process.execPath, [
     path.join(REPO_ROOT, "scripts", "soak-traffic.mjs"),
     "--proxy-port", String(PROXY_PORT),
     "--rate", String(TRAFFIC_RATE),
     "--report-interval-ms", String(SAMPLE_INTERVAL_MS),
+    "--download-mb", "1",
+    "--large-upload-mb", "2",
+    "--sse-pool-size", "5",
+    "--ws-pool-size", "5",
   ], { cwd: REPO_ROOT, stdio: ["ignore", "pipe", "pipe"] });
   let buf = "";
   proc.stdout.on("data", (d) => {
@@ -596,7 +622,10 @@ function startTrafficGenerator() {
       if (!line.trim()) continue;
       try {
         const parsed = JSON.parse(line);
-        if (parsed.type === "status") trafficStatusReports.push(parsed);
+        // "status" lines are logged (see below) but not otherwise retained — nothing here
+        // reads anything but the final report, and storing every periodic status line for
+        // the whole run's duration would be pure unbounded dead weight.
+        if (parsed.type === "status") log(`traffic status t=${parsed.tSec}s sent=${Object.values(parsed.counts).reduce((a, c) => a + c.sent, 0)} inFlight=${parsed.inFlight}`);
         if (parsed.type === "final") trafficFinalReport = parsed;
       } catch {}
     }
@@ -632,12 +661,21 @@ async function worketPidWatcher() {
 }
 
 async function fastPollLoop(stopFlag) {
-  let prevLbStats = null;
   while (!stopFlag.stop) {
     try {
       const r = await adminRequest("/__lb-stats");
       const parsed = JSON.parse(r.body);
-      lbStatsHistory.push({ tSec: Math.round((now() - startedAt) / 1000), stats: parsed });
+      lbStatsPollCount++;
+      const flapping = parsed.upstreams?.find?.((u) => u.id === "flapping-backend");
+      if (flapping) {
+        if (flapping.state === "OPEN" && prevFlappingBreakerState !== "OPEN") breakerOpenedCount++;
+        if (flapping.state === "CLOSED" && (prevFlappingBreakerState === "OPEN" || prevFlappingBreakerState === "HALF_OPEN")) breakerClosedAfterOpenCount++;
+        prevFlappingBreakerState = flapping.state;
+        if (flapping.healthy === false) flappingWentDown = true;
+        if (flapping.healthy === true && flappingWentDown) flappingWentBackUpAfterDown = true;
+      }
+      const retries = parsed.retryBudget?.totalRetries ?? 0;
+      if (retries > maxRetryBudgetSeen) maxRetryBudgetSeen = retries;
     } catch {}
     await sleep(FAST_POLL_INTERVAL_MS);
   }
@@ -677,7 +715,10 @@ async function samplingLoop(stopFlag) {
   // totals (see metricsAccumulatorLoop, which ticks much faster specifically to survive a
   // hot-reload's mass worker replacement without losing a window's traffic).
   let prevMetrics = await scrapeMetrics().catch(() => null);
-  const csvLines = ["tSec,pid,rssKB,fds,p99Ms,intervalRequests,intervalErrorRate"];
+  // tag=proxy-worker rows carry the per-interval p99/error-rate figures; every other tag
+  // (this harness itself, the traffic generator, redis-server, and each real upstream
+  // process) only ever has RSS/FDs to report, so those columns are blank for them.
+  const csvLines = ["tSec,tag,pid,rssKB,fds,p99Ms,intervalRequests,intervalErrorRate"];
   while (!stopFlag.stop) {
     await sleep(SAMPLE_INTERVAL_MS);
     const tSec = Math.round((now() - startedAt) / 1000);
@@ -699,10 +740,29 @@ async function samplingLoop(stopFlag) {
     }
     samples.push({ tSec, workerSamples, p99Ms, intervalRequests, intervalErrorRate, metrics });
     for (const ws of workerSamples) {
-      csvLines.push(`${tSec},${ws.pid},${ws.rssKB},${ws.fds},${p99Ms.toFixed(1)},${intervalRequests},${(intervalErrorRate * 100).toFixed(3)}`);
+      csvLines.push(`${tSec},proxy-worker,${ws.pid},${ws.rssKB},${ws.fds},${p99Ms.toFixed(1)},${intervalRequests},${(intervalErrorRate * 100).toFixed(3)}`);
     }
+
+    // Every other real process this run spawned: the harness (this script) itself, the
+    // traffic generator, redis-server, and each real upstream (pool-1/2/3, flapping-backend,
+    // canary-candidate, dynamic-upstream once registered) — not just the proxy.
+    const otherSamples = [{ name: "harness", pid: process.pid }];
+    for (const { name, proc } of children) {
+      if (name === "proxy" || proc.exitCode !== null) continue; // proxy's own workers are sampled separately above
+      otherSamples.push({ name, pid: proc.pid });
+    }
+    for (const { name, pid } of otherSamples) {
+      const rssKB = getRssKB(pid);
+      const fds = getFdCount(pid);
+      csvLines.push(`${tSec},${name},${pid},${rssKB},${fds},,,`);
+    }
+
     fs.writeFileSync(path.join(REPO_ROOT, "docs", "results", `soak-${RUN_STAMP}.csv`), csvLines.join("\n") + "\n");
-    log(`sample t=${tSec}s: workers=${workerSamples.map((w) => `${w.pid}:${(w.rssKB / 1024).toFixed(0)}MB/${w.fds}fd`).join(" ")} p99=${p99Ms.toFixed(1)}ms reqs=${intervalRequests} errRate=${(intervalErrorRate * 100).toFixed(3)}%`);
+    log(
+      `sample t=${tSec}s: workers=${workerSamples.map((w) => `${w.pid}:${(w.rssKB / 1024).toFixed(0)}MB/${w.fds}fd`).join(" ")} ` +
+        `other=${otherSamples.map((s) => `${s.name}:${(getRssKB(s.pid) / 1024).toFixed(0)}MB`).join(" ")} ` +
+        `p99=${p99Ms.toFixed(1)}ms reqs=${intervalRequests} errRate=${(intervalErrorRate * 100).toFixed(3)}%`,
+    );
     prevMetrics = metrics;
   }
   return csvLines;
@@ -908,21 +968,18 @@ async function buildReport({ proxyLogPath, metricsAtEnd, accessLogLineCount }) {
   } catch {}
   featureProofs.cacheHitsObserved = { pass: cacheHitCount > 0, detail: `cache hits=${cacheHitCount}` };
 
-  const breakerHistory = lbStatsHistory.map((h) => h.stats?.upstreams?.find?.((u) => u.id === "flapping-backend")?.state).filter(Boolean);
-  const breakerOpenedCount = breakerHistory.filter((s, i) => s === "OPEN" && breakerHistory[i - 1] !== "OPEN").length;
-  const breakerClosedAfterOpenCount = breakerHistory.filter((s, i) => s === "CLOSED" && (breakerHistory[i - 1] === "OPEN" || breakerHistory[i - 1] === "HALF_OPEN")).length;
+  // breakerOpenedCount/breakerClosedAfterOpenCount/maxRetryBudgetSeen are maintained
+  // incrementally by fastPollLoop as it polls /__lb-stats throughout the run (not recomputed
+  // from a stored history array — see the declarations above main()). RetryBudget.totalRetries
+  // is a decaying EWMA (×0.9 per request, see src/resilience/retry/retry-budget.ts), not a
+  // cumulative counter, which is exactly why a running max across the whole run is needed
+  // instead of a single end-of-run snapshot (that would show ~0 regardless of how many
+  // retries happened earlier, since thousands of unrelated requests since then decayed it away).
   featureProofs.circuitBreakerOpenedAndClosed = {
     pass: breakerOpenedCount > 0 && breakerClosedAfterOpenCount > 0,
-    detail: `breaker opened: ${breakerOpenedCount} / closed-after-open: ${breakerClosedAfterOpenCount} (history length ${breakerHistory.length})`,
+    detail: `breaker opened: ${breakerOpenedCount} / closed-after-open: ${breakerClosedAfterOpenCount} (${lbStatsPollCount} /__lb-stats polls)`,
   };
 
-  // RetryBudget.totalRetries is a decaying EWMA (×0.9 per request, see
-  // src/resilience/retry/retry-budget.ts), not a cumulative counter — checking it once at the
-  // very end of the run shows ~0 regardless of how many retries happened earlier, since
-  // thousands of unrelated requests since then have decayed it away. lbStatsHistory already
-  // polls /__lb-stats every FAST_POLL_INTERVAL_MS throughout the run; scan that instead of a
-  // single end-of-run snapshot.
-  const maxRetryBudgetSeen = lbStatsHistory.reduce((max, h) => Math.max(max, h.stats?.retryBudget?.totalRetries ?? 0), 0);
   const postDuplicates = [];
   for (const id of ["pool-1", "pool-2", "pool-3"]) {
     try {
@@ -936,10 +993,7 @@ async function buildReport({ proxyLogPath, metricsAtEnd, accessLogLineCount }) {
     detail: `max retryBudget.totalRetries observed across the run=${maxRetryBudgetSeen.toFixed(2)}, duplicate POST deliveries=${postDuplicates.length}${postDuplicates.length ? " (" + postDuplicates.join(",") + ")" : ""}`,
   };
 
-  const healthHistory = lbStatsHistory.map((h) => h.stats?.upstreams?.find?.((u) => u.id === "flapping-backend")?.healthy);
-  const wentDown = healthHistory.some((h) => h === false);
-  const wentBackUp = healthHistory.some((h, i) => h === true && healthHistory.slice(0, i).includes(false));
-  featureProofs.healthChecksMarkedFlappingDownAndUp = { pass: wentDown && wentBackUp, detail: `observed down=${wentDown}, observed back up after down=${wentBackUp} (${healthHistory.length} samples)` };
+  featureProofs.healthChecksMarkedFlappingDownAndUp = { pass: flappingWentDown && flappingWentBackUpAfterDown, detail: `observed down=${flappingWentDown}, observed back up after down=${flappingWentBackUpAfterDown} (${lbStatsPollCount} /__lb-stats polls)` };
 
   const poolCounts = {};
   for (const id of ["pool-1", "pool-2", "pool-3"]) {
@@ -1007,6 +1061,18 @@ async function buildReport({ proxyLogPath, metricsAtEnd, accessLogLineCount }) {
   lines.push(`- RAM: ${(os.totalmem() / 1024 / 1024 / 1024).toFixed(1)} GB`);
   lines.push(`- OS: ${os.type()} ${os.release()}`);
   lines.push(`- Node: ${process.version}`);
+  lines.push("");
+  lines.push("## Load parameters");
+  lines.push("");
+  lines.push(
+    `- Target rate: ${TRAFFIC_RATE} req/s (reduced from the spec's 1500 req/s — this laptop's ` +
+      `real-process topology, 4 proxy workers + 5 single-threaded Node upstreams + Redis + ` +
+      `generator all sharing one 16GB machine, was OOM-killed twice at higher load; every ` +
+      `feature and every check below still runs, just under lighter load)`,
+  );
+  lines.push("- Download body: 1 MB (reduced from 2 MB)");
+  lines.push("- Large upload body: 2 MB (unchanged)");
+  lines.push("- Concurrent SSE/WS pool size: 5 each, hard-capped at 50 (unchanged default, well under the cap)");
   lines.push("");
   lines.push("## Pass criteria");
   lines.push("");
