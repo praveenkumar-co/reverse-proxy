@@ -411,53 +411,63 @@ async function doHotReload() {
   log("LIVE OP: hot-reloading config (raising /rate-limited maxRequests)");
   liveOpInProgress = true;
   const before = fs.readFileSync(SOAK_CONFIG_PATH, "utf8");
-  const probeBefore = await httpRequest("/rate-limited");
-  const modified = before.replace(/maxRequests: 5\n(\s+)windowMs: 1000/, "maxRequests: 500\n$1windowMs: 1000");
-  if (modified === before) {
-    featureProofs.hotReloadTookEffect = { pass: false, detail: "could not find the /rate-limited maxRequests: 5 line to modify" };
-    return;
-  }
-  const metricsBefore = await scrapeMetrics();
-  fs.writeFileSync(SOAK_CONFIG_PATH, modified);
-  if (proxyMasterPid) {
-    try {
-      process.kill(proxyMasterPid, "SIGHUP");
-    } catch {}
-  }
-  await sleep(2000); // reload debounce + propagation to workers
-  // Fire a quick burst well above the old limit (5/s) but under the new one (500/s) — if the
-  // reload took effect, these should mostly succeed; if not, most would 429.
-  const results = await Promise.all(Array.from({ length: 50 }, () => httpRequest("/rate-limited").catch(() => ({ status: 0 }))));
-  const okCount = results.filter((r) => r.status === 200).length;
-  const metricsAfter = await scrapeMetrics();
-  const { errorDelta, totalDelta } = sumRequestsAndErrors(metricsBefore.requestsTotal, metricsAfter.requestsTotal);
-  featureProofs.hotReloadTookEffect = {
-    pass: okCount > 40, // old limit (5/s window) would cap this burst far below 40/50
-    detail: `probe-before-status=${probeBefore.status}, burst 200s=${okCount}/50 (old limit was 5/1s), reload-window errors(5xx)=${errorDelta}/${totalDelta}`,
-  };
-  criteria.hotReloadZeroCausedErrors = { pass: errorDelta === 0, detail: `${errorDelta} 5xx responses in the reload window (${totalDelta} total requests)` };
-
-  // Let the new worker set settle before this live op is considered "over" — a worker
-  // disappearing/respawning here is this reload's own doing, not an unplanned crash.
+  let modifiedOnDisk = false;
   // reloadServerConfig gives old workers a GRACEFUL_SHUTDOWN message, then up to 15s before a
   // forceful SIGTERM — both old and new workers coexist until that grace period elapses, so
-  // this has to wait past it, not just past the new workers appearing.
+  // both the modify-reload and the restore-reload below have to wait past it.
   const RELOAD_GRACE_MS = 17000;
-  await sleep(RELOAD_GRACE_MS);
-  knownWorkerPids = new Set(getWorkerPids());
+  try {
+    const probeBefore = await httpRequest("/rate-limited");
+    const modified = before.replace(/maxRequests: 5\n(\s+)windowMs: 1000/, "maxRequests: 500\n$1windowMs: 1000");
+    if (modified === before) {
+      featureProofs.hotReloadTookEffect = { pass: false, detail: "could not find the /rate-limited maxRequests: 5 line to modify" };
+      return;
+    }
+    const metricsBefore = await scrapeMetrics();
+    fs.writeFileSync(SOAK_CONFIG_PATH, modified);
+    modifiedOnDisk = true;
+    if (proxyMasterPid) {
+      try {
+        process.kill(proxyMasterPid, "SIGHUP");
+      } catch {}
+    }
+    await sleep(2000); // reload debounce + propagation to workers
+    // Fire a quick burst well above the old limit (5/s) but under the new one (500/s) — if the
+    // reload took effect, these should mostly succeed; if not, most would 429.
+    const results = await Promise.all(Array.from({ length: 50 }, () => httpRequest("/rate-limited").catch(() => ({ status: 0 }))));
+    const okCount = results.filter((r) => r.status === 200).length;
+    const metricsAfter = await scrapeMetrics();
+    const { errorDelta, totalDelta } = sumRequestsAndErrors(metricsBefore.requestsTotal, metricsAfter.requestsTotal);
+    featureProofs.hotReloadTookEffect = {
+      pass: okCount > 40, // old limit (5/s window) would cap this burst far below 40/50
+      detail: `probe-before-status=${probeBefore.status}, burst 200s=${okCount}/50 (old limit was 5/1s), reload-window errors(5xx)=${errorDelta}/${totalDelta}`,
+    };
+    criteria.hotReloadZeroCausedErrors = { pass: errorDelta === 0, detail: `${errorDelta} 5xx responses in the reload window (${totalDelta} total requests)` };
 
-  // Restore the committed config file exactly as it was, so the soak run doesn't leave the
-  // repo's tracked soak-config.yaml modified. This triggers a second reload (another full
-  // worker replacement) — wait that out too before handing worker-crash detection back.
-  fs.writeFileSync(SOAK_CONFIG_PATH, before);
-  if (proxyMasterPid) {
-    try {
-      process.kill(proxyMasterPid, "SIGHUP");
-    } catch {}
+    // Let the new worker set settle before this live op is considered "over" — a worker
+    // disappearing/respawning here is this reload's own doing, not an unplanned crash.
+    await sleep(RELOAD_GRACE_MS);
+    knownWorkerPids = new Set(getWorkerPids());
+  } finally {
+    // This writes the committed config file (docs/results/soak-config.yaml is git-tracked) —
+    // any throw between the write above and here used to leave it permanently stuck on
+    // maxRequests: 500 for every future run until someone noticed and ran `git checkout`.
+    // Confirmed directly: an earlier run crashed mid-reload (an unrelated unhandled rejection,
+    // now fixed separately) and left exactly this corruption, which silently broke the next
+    // three feature proofs (hotReloadTookEffect, rateLimiting429sAndRedisKeys, and skewed the
+    // Prometheus/access-log totals) on every run after it until this file was restored.
+    if (modifiedOnDisk) {
+      fs.writeFileSync(SOAK_CONFIG_PATH, before);
+      if (proxyMasterPid) {
+        try {
+          process.kill(proxyMasterPid, "SIGHUP");
+        } catch {}
+      }
+      await sleep(RELOAD_GRACE_MS);
+      knownWorkerPids = new Set(getWorkerPids());
+    }
+    liveOpInProgress = false;
   }
-  await sleep(RELOAD_GRACE_MS);
-  knownWorkerPids = new Set(getWorkerPids());
-  liveOpInProgress = false;
 }
 
 async function doKillWorker() {
@@ -494,18 +504,28 @@ async function doKillWorker() {
 }
 
 async function doCdcInvalidation(seq) {
-  const event = JSON.stringify({ op: "u", source: { table: "orders" }, before: { id: `soak-${seq}` }, after: { id: `soak-${seq}` } });
-  // Prove the round-trip ourselves too: warm /cacheable, fire the webhook, confirm the very
-  // next /cacheable response is a MISS (the one and only metric this repeats is "did this
-  // specific invalidation cause a miss", which can't come from anywhere but a direct probe).
-  await httpRequest("/cacheable"); // ensure there's something cached to invalidate
-  const r = await adminRequest("/__cdc/webhook", { method: "POST", headers: { "Content-Type": "application/json" }, body: event });
-  const after = await httpRequest("/cacheable");
-  const caused_miss = after.headers["x-cache"] === "MISS";
-  if (!featureProofs.cdcInvalidationCausedMiss || !featureProofs.cdcInvalidationCausedMiss.pass) {
-    featureProofs.cdcInvalidationCausedMiss = { pass: r.status === 202 && caused_miss, detail: `webhook status=${r.status} body=${r.body}, next /cacheable X-Cache=${after.headers["x-cache"]}` };
+  // This fires on its own 60s interval, independent of the scheduled live ops -- it WILL
+  // occasionally land in the same few hundred ms as a hot-reload's mass worker replacement,
+  // when the proxy can briefly refuse new connections. Unguarded, that ECONNREFUSED became an
+  // unhandled rejection that crashed the entire harness (confirmed: killed a run right at
+  // t=1200s, exactly the hot-reload mark). A transient miss here is not a real CDC failure --
+  // only treat an actual completed round-trip as evidence, one way or the other.
+  try {
+    const event = JSON.stringify({ op: "u", source: { table: "orders" }, before: { id: `soak-${seq}` }, after: { id: `soak-${seq}` } });
+    // Prove the round-trip ourselves too: warm /cacheable, fire the webhook, confirm the very
+    // next /cacheable response is a MISS (the one and only metric this repeats is "did this
+    // specific invalidation cause a miss", which can't come from anywhere but a direct probe).
+    await httpRequest("/cacheable"); // ensure there's something cached to invalidate
+    const r = await adminRequest("/__cdc/webhook", { method: "POST", headers: { "Content-Type": "application/json" }, body: event });
+    const after = await httpRequest("/cacheable");
+    const caused_miss = after.headers["x-cache"] === "MISS";
+    if (!featureProofs.cdcInvalidationCausedMiss || !featureProofs.cdcInvalidationCausedMiss.pass) {
+      featureProofs.cdcInvalidationCausedMiss = { pass: r.status === 202 && caused_miss, detail: `webhook status=${r.status} body=${r.body}, next /cacheable X-Cache=${after.headers["x-cache"]}` };
+    }
+    log(`CDC webhook #${seq}: status=${r.status} invalidated=${r.body}, next-cache=${after.headers["x-cache"]}`);
+  } catch (err) {
+    log(`CDC webhook #${seq} failed (likely raced a live op): ${err.message}`);
   }
-  log(`CDC webhook #${seq}: status=${r.status} invalidated=${r.body}, next-cache=${after.headers["x-cache"]}`);
 }
 
 // -----------------------------------------------------------------------------
