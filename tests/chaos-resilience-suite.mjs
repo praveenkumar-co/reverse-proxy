@@ -15,6 +15,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { killProcessTree } from "./helpers/kill-process-tree.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
@@ -376,12 +377,16 @@ cache:
     ]);
   }
 
+  // Safety-net only -- the 15s race above already gave the graceful SIGTERM drain this test
+  // is specifically measuring every chance to finish on its own. If it still didn't, a plain
+  // kill() of just this top-level pid would leave any forked worker orphaned (confirmed
+  // elsewhere in this phase: killing only the master never reaches a worker it already told
+  // to drain), so fall back to the shared tree-kill helper instead of a single kill() here.
+  // Must happen BEFORE mock.close() -- if the proxy is still alive (the race above timed
+  // out), its own pooled connection to mock is what would otherwise keep mock.close() from
+  // ever resolving (confirmed directly in datapath-regression.mjs's cleanup()).
+  await killProcessTree(proxy, { signal: "SIGKILL", graceMs: 0 });
   await mock.close();
-  if (proxy.exitCode === null && !proxy.killed) {
-    try {
-      proxy.kill("SIGKILL");
-    } catch {}
-  }
   try {
     fs.unlinkSync(tmpConfig);
   } catch {}
@@ -525,18 +530,7 @@ cache:
     await testWebSocketErrorHandling(proxyPort, proxy);
     await testJsonParseCrashTraps(proxyPort, proxy);
   } finally {
-    if (proxy.exitCode === null && !proxy.killed) {
-      proxy.kill("SIGTERM");
-      await Promise.race([
-        new Promise((resolve) => proxy.once("exit", resolve)),
-        sleep(3000),
-      ]);
-      if (proxy.exitCode === null && !proxy.killed) {
-        try {
-          proxy.kill("SIGKILL");
-        } catch {}
-      }
-    }
+    await killProcessTree(proxy);
     await Promise.all([
       new Promise((resolve) => abortBackend.close(resolve)),
       new Promise((resolve) => fastBackend.close(resolve)),
@@ -566,7 +560,32 @@ cache:
   process.exitCode = totalPassed === results.length ? 0 : 1;
 }
 
-main().catch((err) => {
-  console.error("[chaos-suite] FATAL:", err.stack || err.message);
-  process.exitCode = 1;
-});
+// Guards against an external signal, an uncaught exception, or a hang skipping every
+// section's own per-section cleanup. Each section's spawned proxy is local to that section
+// (no shared module-level reference), but every one of their tmp config paths is tagged with
+// this exact process's own pid (ninja-chaos*-${process.pid}.yaml), so a pkill matched on that
+// pid-tagged pattern is a safe, specific way to reach them without touching any other
+// process on the machine.
+const CHAOS_PROXY_PATTERN = `dist/index\\.js.*ninja-chaos.*-${process.pid}\\.yaml`;
+const HARD_TIMEOUT_MS = 5 * 60 * 1000;
+let hardTimeoutTimer = setTimeout(() => {
+  console.error(`[chaos-suite] FATAL: hard timeout exceeded (${HARD_TIMEOUT_MS}ms) — forcing cleanup and exit`);
+  forceCleanupAndExit(1);
+}, HARD_TIMEOUT_MS);
+function forceCleanupAndExit(code) {
+  clearTimeout(hardTimeoutTimer);
+  try { execSync(`pkill -9 -f "${CHAOS_PROXY_PATTERN}"`, { stdio: "ignore" }); } catch {}
+  process.exit(code);
+}
+process.on("SIGINT", () => { console.error("[chaos-suite] FATAL: received SIGINT"); forceCleanupAndExit(130); });
+process.on("SIGTERM", () => { console.error("[chaos-suite] FATAL: received SIGTERM"); forceCleanupAndExit(143); });
+process.on("uncaughtException", (err) => { console.error(`[chaos-suite] FATAL: uncaughtException: ${err?.stack || err}`); forceCleanupAndExit(1); });
+process.on("unhandledRejection", (reason) => { console.error(`[chaos-suite] FATAL: unhandledRejection: ${reason?.stack || reason}`); forceCleanupAndExit(1); });
+
+main()
+  .then(() => clearTimeout(hardTimeoutTimer))
+  .catch((err) => {
+    console.error("[chaos-suite] FATAL:", err.stack || err.message);
+    process.exitCode = 1;
+    clearTimeout(hardTimeoutTimer);
+  });

@@ -30,6 +30,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { killProcessTree } from "./helpers/kill-process-tree.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
@@ -411,18 +412,11 @@ async function cleanup() {
   log("Tearing down (SIGTERM)...");
 
   async function terminate(child, label) {
-    if (!child || child.exitCode !== null || child.killed) return;
-    child.kill("SIGTERM");
-    const exited = await Promise.race([
-      new Promise((resolve) => child.once("exit", () => resolve(true))),
-      sleep(3000).then(() => false),
-    ]);
-    if (!exited) {
-      log(`${label} did not exit after SIGTERM within 3s — sending SIGKILL`);
-      try {
-        child.kill("SIGKILL");
-      } catch {}
-    }
+    // killProcessTree waits long enough for the proxy's own documented graceful-drain budget
+    // (see tests/helpers/kill-process-tree.mjs) before escalating, and -- if it still has to
+    // escalate -- kills the whole process tree, not just this one pid, so a worker the master
+    // already told to drain can never survive as an orphan.
+    await killProcessTree(child);
   }
 
   await terminate(proxyProc, "proxy");

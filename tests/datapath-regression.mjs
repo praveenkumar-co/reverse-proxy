@@ -93,6 +93,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { performance } from "node:perf_hooks";
 import { acceptKeyFor, encodeFrame, createFrameParser } from "../scripts/bench/ws-lite.mjs";
+import { killProcessTree } from "./helpers/kill-process-tree.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
@@ -1279,22 +1280,19 @@ async function cleanup() {
   if (cleanedUp) return;
   cleanedUp = true;
   log("Tearing down...");
+  // Proxy first, THEN mock servers -- confirmed directly: closing the mock servers first
+  // deadlocks. http.Server.close()'s callback only fires once every connection it's tracking
+  // has ended, but the proxy's own keep-alive pool to these mock upstreams has no reason to
+  // close its end while the proxy itself is still running, so .close() just hangs waiting on
+  // sockets nothing is ever going to finish (observed directly: CLOSE_WAIT on every mock
+  // upstream the proxy had a pooled connection to, server.close() never resolving). Killing
+  // the proxy first means those connections are already gone by the time we get here.
+  await killProcessTree(proxyProc);
   for (const s of mockServers) {
     try {
-      await new Promise((r) => s.close(r));
+      s.closeAllConnections?.(); // belt-and-suspenders: force-end anything still lingering
+      await Promise.race([new Promise((r) => s.close(r)), sleep(3000)]);
     } catch {}
-  }
-  if (proxyProc && proxyProc.exitCode === null && !proxyProc.killed) {
-    proxyProc.kill("SIGTERM");
-    const exited = await Promise.race([
-      new Promise((resolve) => proxyProc.once("exit", () => resolve(true))),
-      sleep(3000).then(() => false),
-    ]);
-    if (!exited) {
-      try {
-        proxyProc.kill("SIGKILL");
-      } catch {}
-    }
   }
   try {
     fs.unlinkSync(tmpConfigPath);
@@ -1317,23 +1315,39 @@ function printSummary() {
 
 async function main() {
   log("Starting mock upstreams...");
-  mockServers = await Promise.all([
-    startMock(UP_BINARY, binaryHandler),
-    startMock(UP_SSE, sseHandler),
-    startMock(UP_POST, postHandler),
-    startMock(UP_LARGE, largeHandler),
-    startMock(UP_ABORT, abortHandler),
-    startMock(UP_RETRY_BIG, retryBigOrChunkedHandler),
-    startMock(UP_RETRY_FLAKY_SMALL, flakySmallHandler),
-    startMock(UP_RETRY_FLAKY_BIG, flakyBigHandler),
-    startMock(UP_ROUTE_A, routeAHandler),
-    startMock(UP_CACHE_TENANT_A, tenantCacheHandler("tenant-a")),
-    startMock(UP_CACHE_TENANT_B, tenantCacheHandler("tenant-b")),
-    startMock(UP_SWR, swrHandler),
-    startMock(UP_RESET, resetHandler),
-    startMock(UP_MIXED_A, mixedBackendHandler, mixedUpgradeHandler),
-    startMock(UP_MIXED_B, mixedBackendHandler, mixedUpgradeHandler),
-  ]);
+  // Promise.all([...]) rejects on the first failure WITHOUT ever assigning its result --
+  // every OTHER mock server that had already finished listening by then is lost (mockServers
+  // stays []), so cleanup() has nothing to close and they're orphaned, holding their ports for
+  // the next run. allSettled + pushing each fulfilled result as it resolves means cleanup()
+  // always has every server that's actually listening, partial failure or not.
+  const mockServerSpecs = [
+    [UP_BINARY, binaryHandler],
+    [UP_SSE, sseHandler],
+    [UP_POST, postHandler],
+    [UP_LARGE, largeHandler],
+    [UP_ABORT, abortHandler],
+    [UP_RETRY_BIG, retryBigOrChunkedHandler],
+    [UP_RETRY_FLAKY_SMALL, flakySmallHandler],
+    [UP_RETRY_FLAKY_BIG, flakyBigHandler],
+    [UP_ROUTE_A, routeAHandler],
+    [UP_CACHE_TENANT_A, tenantCacheHandler("tenant-a")],
+    [UP_CACHE_TENANT_B, tenantCacheHandler("tenant-b")],
+    [UP_SWR, swrHandler],
+    [UP_RESET, resetHandler],
+    [UP_MIXED_A, mixedBackendHandler, mixedUpgradeHandler],
+    [UP_MIXED_B, mixedBackendHandler, mixedUpgradeHandler],
+  ];
+  const startResults = await Promise.allSettled(mockServerSpecs.map((args) => startMock(...args)));
+  mockServers = startResults.filter((r) => r.status === "fulfilled").map((r) => r.value);
+  const failures = startResults
+    .map((r, i) => ({ r, port: mockServerSpecs[i][0] }))
+    .filter(({ r }) => r.status === "rejected");
+  if (failures.length > 0) {
+    throw new Error(
+      `${failures.length} mock upstream(s) failed to start: ` +
+        failures.map(({ r, port }) => `port ${port}: ${r.reason?.message || r.reason}`).join("; "),
+    );
+  }
   log(`${mockServers.length} mock upstreams ready.`);
 
   log("Writing regression config...");
@@ -1380,10 +1394,30 @@ async function main() {
   process.exitCode = allPassed ? 0 : 1;
 }
 
-process.on("SIGINT", async () => {
+// Hardening against orphaned processes/ports surviving this script (confirmed directly: a
+// partial mock-upstream startup failure used to lose the reference to every ALREADY-listening
+// server, since Promise.all([...]) rejects without ever assigning its result -- those servers
+// kept running, orphaned, blocking the next run's ports). Covers every exit path: normal
+// completion, a thrown error, SIGINT/SIGTERM, an uncaught exception/rejection, and a hard
+// ceiling in case something hangs despite all of the above.
+const HARD_TIMEOUT_MS = 5 * 60 * 1000;
+let hardTimeoutTimer;
+
+async function forceExit(reason, code) {
+  console.error(`[datapath-regression] FATAL: ${reason} — forcing cleanup and exit`);
+  clearTimeout(hardTimeoutTimer);
   await cleanup();
-  process.exit(130);
-});
+  process.exit(code);
+}
+
+hardTimeoutTimer = setTimeout(() => {
+  void forceExit(`hard timeout exceeded (${HARD_TIMEOUT_MS}ms)`, 1);
+}, HARD_TIMEOUT_MS);
+
+process.on("SIGINT", () => void forceExit("received SIGINT", 130));
+process.on("SIGTERM", () => void forceExit("received SIGTERM", 143));
+process.on("uncaughtException", (err) => void forceExit(`uncaughtException: ${err?.stack || err}`, 1));
+process.on("unhandledRejection", (reason) => void forceExit(`unhandledRejection: ${reason?.stack || reason}`, 1));
 
 try {
   await main();
@@ -1391,5 +1425,6 @@ try {
   console.error(`[datapath-regression] FATAL: ${err.stack || err.message}`);
   process.exitCode = 1;
 } finally {
+  clearTimeout(hardTimeoutTimer);
   await cleanup();
 }

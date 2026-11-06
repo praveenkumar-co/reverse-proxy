@@ -19,6 +19,7 @@ import fs from "node:fs";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { performance } from "node:perf_hooks";
+import { killProcessTree } from "./helpers/kill-process-tree.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
@@ -124,11 +125,10 @@ async function startProxy(cfgYaml, port) {
   throw new Error(`Proxy port ${port} never became ready.`);
 }
 
-function stopProxy() {
-  if (proxyProc && proxyProc.exitCode === null) {
-    try { proxyProc.kill("SIGTERM"); } catch {}
-  }
+async function stopProxy() {
+  const toKill = proxyProc;
   proxyProc = null;
+  await killProcessTree(toKill);
 }
 
 // -----------------------------------------------------------------------------
@@ -221,7 +221,7 @@ server:
     `RPS: ${rps.toFixed(0)} req/s | p50: ${p50}ms | p99: ${p99}ms | Time: ${totalTimeSec.toFixed(2)}s | Errors: ${errors}`
   );
 
-  stopProxy();
+  await stopProxy();
   await new Promise((r) => upstream.close(r));
   await sleep(800);
 }
@@ -313,7 +313,7 @@ server:
     `Surviving Backend-3 handled ${hits[2]} requests | Success: ${success} | Handled Drops: ${failed}`
   );
 
-  stopProxy();
+  await stopProxy();
   await new Promise((r) => upstreams[2].close(r));
   await sleep(800);
 }
@@ -447,7 +447,7 @@ server:
     `Proxy RSS growth: ${growthMB.toFixed(1)} MB (Safe limit: <120 MB) | Total Keys Stored: ${KEYS}`
   );
 
-  stopProxy();
+  await stopProxy();
   await new Promise((r) => upstream.close(r));
   try { redisProc.kill("SIGTERM"); } catch {}
   try { fs.rmSync(redisDataDir, { recursive: true, force: true }); } catch {}
@@ -528,7 +528,7 @@ server:
     `Status: ${status || "Connection Reset"} | Upstream Received: ${(bytesReceived / (1024 * 1024)).toFixed(1)} MB of 15 MB attempted`
   );
 
-  stopProxy();
+  await stopProxy();
   await new Promise((r) => upstream.close(r));
   await sleep(800);
 }
@@ -594,7 +594,7 @@ server:
     `Lingering active upstream sockets: ${activeUpstreamSockets} | Aborted upstream handlers fired: ${abortedCleanly}`
   );
 
-  stopProxy();
+  await stopProxy();
   await new Promise((r) => upstream.close(r));
 }
 
@@ -626,7 +626,7 @@ async function main() {
     } catch (err) {
       console.error(R(`\n${name} threw: ${err.stack || err.message}`));
       record(name, `${name} crashed instead of completing`, false, err.message);
-      stopProxy();
+      await stopProxy();
     }
   }
   try {
@@ -654,5 +654,27 @@ async function main() {
 
   process.exit(passed === results.length ? 0 : 1);
 }
+
+// Guards against an external signal, an uncaught exception, or a hang taking down this
+// process without running any phase's own cleanup. Phase 3's redis-server (port 16379, fixed
+// above) is local to that phase rather than module-scoped, so this is a best-effort sweep by
+// fixed port/pattern rather than a tracked-reference kill -- documented as such; the shared
+// proxyProc is reached directly via stopProxy().
+const REDIS_FIRE_TEST_PORT = 16379;
+const HARD_TIMEOUT_MS = 5 * 60 * 1000;
+let hardTimeoutTimer = setTimeout(() => {
+  console.error(R(`\nFATAL: hard timeout exceeded (${HARD_TIMEOUT_MS}ms) — forcing cleanup and exit`));
+  forceCleanupAndExit(1);
+}, HARD_TIMEOUT_MS);
+async function forceCleanupAndExit(code) {
+  clearTimeout(hardTimeoutTimer);
+  await stopProxy();
+  try { execSync(`pkill -9 -f "redis-server --port ${REDIS_FIRE_TEST_PORT}"`, { stdio: "ignore" }); } catch {}
+  process.exit(code);
+}
+process.on("SIGINT", () => { console.error(R("\nFATAL: received SIGINT")); forceCleanupAndExit(130); });
+process.on("SIGTERM", () => { console.error(R("\nFATAL: received SIGTERM")); forceCleanupAndExit(143); });
+process.on("uncaughtException", (err) => { console.error(R(`\nFATAL: uncaughtException: ${err?.stack || err}`)); forceCleanupAndExit(1); });
+process.on("unhandledRejection", (reason) => { console.error(R(`\nFATAL: unhandledRejection: ${reason?.stack || reason}`)); forceCleanupAndExit(1); });
 
 main();

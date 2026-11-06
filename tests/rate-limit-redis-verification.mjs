@@ -17,6 +17,7 @@ import path from "node:path";
 import fs from "node:fs";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
+import { killProcessTree } from "./helpers/kill-process-tree.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
@@ -28,6 +29,12 @@ const BOLD = (s) => `\x1b[1m${s}\x1b[0m`;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 let proxyProc = null;
+// Promoted to module scope (assigned, not declared, inside main()) so the SIGTERM/SIGINT/
+// uncaughtException guard below can reach them -- otherwise an external signal mid-run skips
+// main()'s own finally block entirely (Node's default signal behavior is immediate exit) and
+// orphans whichever of these are currently running.
+let redisProc = null;
+let upstreamServer = null;
 async function startProxy(cfgYaml, port) {
   const registrySnapshotPath = path.join(REPO_ROOT, "proxy_registry_backup.json");
   try { fs.unlinkSync(registrySnapshotPath); } catch {}
@@ -60,11 +67,10 @@ async function startProxy(cfgYaml, port) {
   }
   throw new Error(`Proxy port ${port} never became ready.`);
 }
-function stopProxy() {
-  if (proxyProc && proxyProc.exitCode === null) {
-    try { proxyProc.kill("SIGTERM"); } catch {}
-  }
+async function stopProxy() {
+  const toKill = proxyProc;
   proxyProc = null;
+  await killProcessTree(toKill);
 }
 
 async function main() {
@@ -85,7 +91,7 @@ async function main() {
 
   const REDIS_PORT = 16380;
   const redisDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "rl-redis-"));
-  const redisProc = spawn(
+  redisProc = spawn(
     "redis-server",
     ["--port", String(REDIS_PORT), "--save", "", "--appendonly", "no", "--dir", redisDataDir, "--daemonize", "no"],
     { stdio: ["ignore", "ignore", "ignore"] },
@@ -106,10 +112,10 @@ async function main() {
   }
 
   const PORT = 9820, UP = 19820;
-  const upstream = http.createServer((req, res) => {
+  const upstream = (upstreamServer = http.createServer((req, res) => {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end('{"ok":true}');
-  });
+  }));
   await new Promise((r) => upstream.listen(UP, "127.0.0.1", r));
 
   let passed = false;
@@ -170,7 +176,7 @@ server:
   } catch (err) {
     detail = err.message;
   } finally {
-    stopProxy();
+    await stopProxy();
     await new Promise((r) => upstream.close(r));
     try { redisProc.kill("SIGTERM"); } catch {}
     try { fs.rmSync(redisDataDir, { recursive: true, force: true }); } catch {}
@@ -185,5 +191,24 @@ server:
   console.log(BOLD("═".repeat(70)) + "\n");
   process.exit(passed ? 0 : 1);
 }
+
+// Guards against an external signal, an uncaught exception, or a hang skipping main()'s own
+// finally block and orphaning the proxy/redis/upstream it started.
+const HARD_TIMEOUT_MS = 5 * 60 * 1000;
+let hardTimeoutTimer = setTimeout(() => {
+  console.error(R(`\nFATAL: hard timeout exceeded (${HARD_TIMEOUT_MS}ms) — forcing cleanup and exit`));
+  forceCleanupAndExit(1);
+}, HARD_TIMEOUT_MS);
+async function forceCleanupAndExit(code) {
+  clearTimeout(hardTimeoutTimer);
+  await stopProxy();
+  try { redisProc?.kill("SIGTERM"); } catch {}
+  try { upstreamServer?.close(); } catch {}
+  process.exit(code);
+}
+process.on("SIGINT", () => { console.error(R("\nFATAL: received SIGINT")); forceCleanupAndExit(130); });
+process.on("SIGTERM", () => { console.error(R("\nFATAL: received SIGTERM")); forceCleanupAndExit(143); });
+process.on("uncaughtException", (err) => { console.error(R(`\nFATAL: uncaughtException: ${err?.stack || err}`)); forceCleanupAndExit(1); });
+process.on("unhandledRejection", (reason) => { console.error(R(`\nFATAL: unhandledRejection: ${reason?.stack || reason}`)); forceCleanupAndExit(1); });
 
 main();

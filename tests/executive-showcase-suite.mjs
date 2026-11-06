@@ -18,6 +18,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { killProcessTree } from "./helpers/kill-process-tree.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
@@ -102,7 +103,13 @@ function pathAware(testPath, handler) {
 }
 
 async function startAllMocks() {
-  const servers = [];
+  // Pushes directly into the shared, module-level mockServers array rather than a local one
+  // returned at the end -- if any startMock() call here throws (e.g. EADDRINUSE), a local
+  // array would be lost entirely (this function never reaches its `return`), orphaning every
+  // mock server already successfully listening. mockServers is already declared above and is
+  // exactly what cleanup() iterates, so pushing into it directly means a partial failure still
+  // leaves everything that's actually running reachable for cleanup.
+  const servers = mockServers;
 
   servers.push(
     await startMock(PORTS.fast, (req, res) => {
@@ -488,22 +495,15 @@ async function cleanup() {
   if (cleanedUp) return;
   cleanedUp = true;
   log("Tearing down...");
+  // Proxy first, THEN mock servers -- see tests/datapath-regression.mjs's cleanup() for the
+  // confirmed deadlock this avoids (closing the mock servers while the proxy is still alive
+  // means its pooled keep-alive connections to them never close, and .close() never resolves).
+  await killProcessTree(proxyProc);
   for (const s of mockServers) {
     try {
-      await new Promise((r) => s.close(r));
+      s.closeAllConnections?.();
+      await Promise.race([new Promise((r) => s.close(r)), sleep(3000)]);
     } catch {}
-  }
-  if (proxyProc && proxyProc.exitCode === null && !proxyProc.killed) {
-    proxyProc.kill("SIGTERM");
-    const exited = await Promise.race([
-      new Promise((resolve) => proxyProc.once("exit", () => resolve(true))),
-      sleep(3000).then(() => false),
-    ]);
-    if (!exited) {
-      try {
-        proxyProc.kill("SIGKILL");
-      } catch {}
-    }
   }
   try {
     fs.unlinkSync(tmpConfigPath);
@@ -990,10 +990,23 @@ async function main() {
   process.exitCode = allPassed ? 0 : 1;
 }
 
-process.on("SIGINT", async () => {
+// Same hardening as tests/datapath-regression.mjs: cover every exit path, not just SIGINT,
+// and a hard ceiling in case something hangs despite that.
+const HARD_TIMEOUT_MS = 5 * 60 * 1000;
+let hardTimeoutTimer;
+async function forceExit(reason, code) {
+  console.error(`[showcase] FATAL: ${reason} — forcing cleanup and exit`);
+  clearTimeout(hardTimeoutTimer);
   await cleanup();
-  process.exit(130);
-});
+  process.exit(code);
+}
+hardTimeoutTimer = setTimeout(() => {
+  void forceExit(`hard timeout exceeded (${HARD_TIMEOUT_MS}ms)`, 1);
+}, HARD_TIMEOUT_MS);
+process.on("SIGINT", () => void forceExit("received SIGINT", 130));
+process.on("SIGTERM", () => void forceExit("received SIGTERM", 143));
+process.on("uncaughtException", (err) => void forceExit(`uncaughtException: ${err?.stack || err}`, 1));
+process.on("unhandledRejection", (reason) => void forceExit(`unhandledRejection: ${reason?.stack || reason}`, 1));
 
 try {
   await main();
@@ -1001,5 +1014,6 @@ try {
   console.error(`[showcase] FATAL: ${err.stack || err.message}`);
   process.exitCode = 1;
 } finally {
+  clearTimeout(hardTimeoutTimer);
   await cleanup();
 }

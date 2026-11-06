@@ -31,6 +31,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { killProcessTree } from "./helpers/kill-process-tree.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -359,19 +360,11 @@ admin:
     cleanedUp = true;
     log("Tearing down (SIGTERM)...");
 
-    async function terminate(child, label) {
-      if (!child || child.exitCode !== null || child.killed) return;
-      child.kill("SIGTERM");
-      const exited = await Promise.race([
-        new Promise((resolve) => child.once("exit", () => resolve(true))),
-        sleep(3000).then(() => false),
-      ]);
-      if (!exited) {
-        log(`${label} did not exit after SIGTERM within 3s — sending SIGKILL`);
-        try {
-          child.kill("SIGKILL");
-        } catch {}
-      }
+    async function terminate(child, _label) {
+      // killProcessTree waits long enough for the proxy's own documented graceful-drain
+      // budget before escalating, and escalates to the whole process tree (not just this
+      // one pid) if it still has to -- see tests/helpers/kill-process-tree.mjs.
+      await killProcessTree(child);
     }
 
     await terminate(proxyProc, "proxy");

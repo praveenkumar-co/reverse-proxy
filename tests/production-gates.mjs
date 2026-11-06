@@ -58,6 +58,7 @@ import fs from "node:fs";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { performance } from "node:perf_hooks";
+import { killProcessTree } from "./helpers/kill-process-tree.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
@@ -274,11 +275,10 @@ async function startProxy(cfgYaml, port, { readyTimeoutMs = 15000, repoRoot = RE
   throw new Error(`Proxy port ${port} never became ready.`);
 }
 
-function stopProxy() {
-  if (proxyProc && proxyProc.exitCode === null) {
-    try { proxyProc.kill("SIGTERM"); } catch {}
-  }
+async function stopProxy() {
+  const toKill = proxyProc;
   proxyProc = null;
+  await killProcessTree(toKill);
 }
 
 // -----------------------------------------------------------------------------
@@ -423,7 +423,7 @@ server:
     `Baseline: ${baselineRssMB.toFixed(1)}MB | Peak: ${peakRssMB.toFixed(1)}MB | Growth: ${growthMB.toFixed(1)}MB | Client received: ${(received / 1024 / 1024).toFixed(1)}MB of 200MB`
   );
 
-  stopProxy();
+  await stopProxy();
   await new Promise((r) => upstream.close(r));
   await sleep(500);
 }
@@ -558,7 +558,7 @@ server:
     `Upstream SHA-256: ${upstreamDigest ? upstreamDigest.slice(0, 12) + "…" : "none"} | Upstream received: ${(upstreamBytesReceived / 1024 / 1024).toFixed(1)}MB of ${(SIZE / 1024 / 1024).toFixed(0)}MB | RSS growth: ${growthMB.toFixed(1)}MB`,
   );
 
-  stopProxy();
+  await stopProxy();
   await new Promise((r) => upstream.close(r));
   await sleep(500);
 }
@@ -639,7 +639,7 @@ server:
     `Completed: ${usage.completed}/5000 (errors: ${usage.errors}) | Master CPU: ${usage.masterDeltaSec.toFixed(2)}s | Workers CPU: ${usage.workersDeltaSec.toFixed(2)}s | Master share: ${(masterShare * 100).toFixed(1)}%`,
   );
 
-  stopProxy();
+  await stopProxy();
   await new Promise((r) => upstream.close(r));
   await sleep(500);
 }
@@ -682,7 +682,7 @@ async function measureBaselineRPS() {
   await new Promise((r) => upstream.listen(UP, "127.0.0.1", r));
   await startProxy(baselineProxyConfig(PORT, UP), PORT);
   const result = await fireFixedCount(PORT, 10000, 100, "/fire1");
-  stopProxy();
+  await stopProxy();
   await new Promise((r) => upstream.close(r));
   await sleep(500);
   return result;
@@ -728,7 +728,7 @@ async function measureCpuMsPerThousand(repoRoot, port, upstreamPort, totalReques
       totalRequests,
     };
   } finally {
-    stopProxy();
+    await stopProxy();
     await new Promise((r) => upstream.close(r));
     await sleep(500);
   }
@@ -948,7 +948,7 @@ server:
     `Allowed: ${allowed}/${TOTAL} | Blocked (429): ${blocked} | Other: ${other}`,
   );
 
-  stopProxy();
+  await stopProxy();
   await new Promise((r) => upstream.close(r));
   await sleep(500);
 }
@@ -1031,7 +1031,7 @@ server:
     `${total} requests | ok=${ok} errorish=${errorish} | error rate=${(errorRate * 100).toFixed(2)}%`,
   );
 
-  stopProxy();
+  await stopProxy();
   await new Promise((r) => upstream.close(r));
   await sleep(500);
 }
@@ -1141,7 +1141,7 @@ cache:
     idle = await scrapeHeapUsedMb(PORT);
   } catch (err) {
     record("Gate 7: no leak under sustained large-body load", false, `could not read idle heap: ${err.message}`);
-    stopProxy();
+    await stopProxy();
     await new Promise((r) => upstream.close(r));
     return;
   }
@@ -1187,7 +1187,7 @@ cache:
     recovery = await scrapeHeapUsedMb(PORT);
   } catch (err) {
     record("Gate 7: no leak under sustained large-body load", false, `could not read recovery heap: ${err.message}`);
-    stopProxy();
+    await stopProxy();
     await new Promise((r) => upstream.close(r));
     return;
   }
@@ -1222,7 +1222,7 @@ cache:
       `arrayBuffers idle=${idle.arrayBuffersMb.toFixed(1)}MB/recovery=${recovery.arrayBuffersMb.toFixed(1)}MB, external idle=${idle.externalMb.toFixed(1)}MB/recovery=${recovery.externalMb.toFixed(1)}MB`,
   );
 
-  stopProxy();
+  await stopProxy();
   await new Promise((r) => upstream.close(r));
   await sleep(500);
 }
@@ -1251,7 +1251,7 @@ async function main() {
     } catch (err) {
       console.error(R(`\n${name} threw: ${err.stack || err.message}`));
       record(`${name} crashed instead of completing`, false, err.message);
-      stopProxy();
+      await stopProxy();
     }
   }
   try {
@@ -1280,12 +1280,32 @@ async function main() {
   process.exit(passed === results.length ? 0 : 1);
 }
 
+// Hardening against an orphaned proxy process surviving this script on an external signal,
+// an uncaught exception, or a hang — each gate already stops its own proxy on normal
+// completion or a thrown error, but nothing previously covered SIGTERM/SIGINT delivered
+// while a gate's proxy is still running, or a hang with no gate ever returning.
+const HARD_TIMEOUT_MS = 5 * 60 * 1000;
+let hardTimeoutTimer = setTimeout(() => {
+  console.error(R(`\nFATAL: hard timeout exceeded (${HARD_TIMEOUT_MS}ms) — forcing cleanup and exit`));
+  void forceExit(`hard timeout exceeded (${HARD_TIMEOUT_MS}ms)`, 1);
+}, HARD_TIMEOUT_MS);
+async function forceExit(reason, code) {
+  console.error(R(`\nFATAL: ${reason} — forcing cleanup and exit`));
+  clearTimeout(hardTimeoutTimer);
+  await stopProxy();
+  process.exit(code);
+}
+process.on("SIGINT", () => void forceExit("received SIGINT", 130));
+process.on("SIGTERM", () => void forceExit("received SIGTERM", 143));
+process.on("uncaughtException", (err) => void forceExit(`uncaughtException: ${err?.stack || err}`, 1));
+process.on("unhandledRejection", (reason) => void forceExit(`unhandledRejection: ${reason?.stack || reason}`, 1));
+
 if (process.argv.includes("--record-baseline")) {
   recordBaseline()
     .then(() => process.exit(0))
-    .catch((err) => {
+    .catch(async (err) => {
       console.error(R(`Baseline recording failed: ${err.stack || err.message}`));
-      stopProxy();
+      await stopProxy();
       process.exit(1);
     });
 } else {
