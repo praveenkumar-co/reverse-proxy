@@ -72,6 +72,12 @@
 //                                 selection) must still appear in the access
 //                                 log -- the single largest contributor to the
 //                                 Phase F2 soak's access-log gap.
+//  18. Active-connections gauge never leaks under mixed traffic: 60 seconds of
+//                                 normal GETs, client aborts, 413s, 429s, CORS
+//                                 preflights, a WebSocket, an SSE stream, sticky
+//                                 sessions, and canary routing, all concurrently
+//                                 -- the ninja_active_connections gauge must
+//                                 reach exactly 0 within 10s of traffic stopping.
 //
 // All mock upstreams are started before the proxy boots (the proxy's initial
 // health check would otherwise mark every upstream down). Exits 1 if any
@@ -86,6 +92,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { performance } from "node:perf_hooks";
+import { acceptKeyFor, encodeFrame, createFrameParser } from "../scripts/bench/ws-lite.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
@@ -104,6 +111,8 @@ const UP_CACHE_TENANT_A = 4710;
 const UP_CACHE_TENANT_B = 4711;
 const UP_SWR = 4712;
 const UP_RESET = 4713;
+const UP_MIXED_A = 4714;
+const UP_MIXED_B = 4715;
 const ACCESS_LOG_PATH = path.join(os.tmpdir(), `ninja-datapath-regression-access-${process.pid}.log`);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -115,9 +124,10 @@ function record(name, passed, detail = "") {
   console.log(`  ${icon}  ${name}${detail ? ` — ${detail}` : ""}`);
 }
 
-function startMock(port, handler) {
+function startMock(port, handler, upgradeHandler) {
   return new Promise((resolve, reject) => {
     const server = http.createServer(handler);
+    if (upgradeHandler) server.on("upgrade", upgradeHandler);
     server.on("error", reject);
     server.listen(port, "127.0.0.1", () => resolve(server));
   });
@@ -817,6 +827,155 @@ async function testUpstreamResetThenRetrySucceeds() {
   );
 }
 
+// -----------------------------------------------------------------------------
+// Mixed-traffic gauge-leak regression: the real reproduction the user asked for after the
+// structural fix (markUpstreamActive/markUpstreamInactive + activateUpstream/
+// releaseCurrentUpstream in worker.ts) -- sustained, concurrent, varied traffic for 60s
+// against one real proxy instance, every kind the Phase F2 soak run's own traffic generator
+// produces, then the gauge must settle to exactly 0.
+// -----------------------------------------------------------------------------
+function mixedBackendHandler(req, res) {
+  const cleanPath = (req.url || "/").split("?")[0];
+  if (cleanPath === "/mixed-sse") {
+    res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
+    const interval = setInterval(() => {
+      if (res.writableEnded) {
+        clearInterval(interval);
+        return;
+      }
+      res.write(`data: ${JSON.stringify({ t: Date.now() })}\n\n`);
+    }, 150);
+    req.on("close", () => clearInterval(interval));
+    return;
+  }
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ path: cleanPath }));
+}
+function mixedUpgradeHandler(req, socket, head) {
+  const key = req.headers["sec-websocket-key"];
+  if (!key) {
+    socket.destroy();
+    return;
+  }
+  socket.write(
+    "HTTP/1.1 101 Switching Protocols\r\n" + "Upgrade: websocket\r\n" + "Connection: Upgrade\r\n" + `Sec-WebSocket-Accept: ${acceptKeyFor(key)}\r\n\r\n`,
+  );
+  const parse = createFrameParser();
+  if (head && head.length > 0) {
+    for (const frame of parse(head)) handleMixedWsFrame(socket, frame);
+  }
+  socket.on("data", (chunk) => {
+    for (const frame of parse(chunk)) handleMixedWsFrame(socket, frame);
+  });
+  socket.on("error", () => {});
+}
+function handleMixedWsFrame(socket, frame) {
+  if (frame.opcode === 0x1) {
+    socket.write(encodeFrame(`echo:${frame.payload.toString()}`, { opcode: 0x1, masked: false }));
+  } else if (frame.opcode === 0x8) {
+    try {
+      socket.end();
+    } catch {}
+  }
+}
+
+async function scrapeActiveConnectionsTotal(upstreamIds) {
+  const text = (await request("/metrics")).body.toString("utf8");
+  let total = 0;
+  for (const id of upstreamIds) {
+    const m = text.match(new RegExp(`ninja_active_connections\\{upstream_id="${id}"\\}\\s+(-?\\d+)`));
+    total += m ? Number(m[1]) : 0;
+  }
+  return total;
+}
+
+async function testActiveConnectionsNeverLeakUnderMixedTraffic() {
+  const DURATION_MS = 60000;
+  const upstreamIds = ["mixed-a", "mixed-b"];
+  const deadline = Date.now() + DURATION_MS;
+  let inFlight = 0;
+  const maxConcurrent = 40;
+
+  const wsSockets = [];
+  function openMixedWs() {
+    const req = http.request({ host: "127.0.0.1", port: PROXY_PORT, path: "/mixed-ws", method: "GET", headers: { Connection: "Upgrade", Upgrade: "websocket", "Sec-WebSocket-Key": crypto.randomBytes(16).toString("base64"), "Sec-WebSocket-Version": "13" } });
+    req.on("upgrade", (res, socket) => {
+      wsSockets.push(socket);
+      socket.on("error", () => {});
+    });
+    req.on("error", () => {});
+    req.end();
+  }
+  for (let i = 0; i < 3; i++) openMixedWs();
+
+  const sseReqs = [];
+  function openMixedSse() {
+    const r = http.request({ host: "127.0.0.1", port: PROXY_PORT, path: "/mixed-sse", method: "GET" }, (res) => {
+      res.on("data", () => {});
+      res.on("error", () => {});
+    });
+    r.on("error", () => {});
+    r.end();
+    sseReqs.push(r);
+  }
+  for (let i = 0; i < 2; i++) openMixedSse();
+
+  const kinds = [
+    () => request("/mixed-normal"),
+    () => request("/mixed-429"),
+    () => request("/mixed-cors-mixed", { method: "OPTIONS", headers: { Origin: "http://allowed.example.com" } }),
+    () => request("/mixed-413", { method: "POST", body: Buffer.alloc(8192) }),
+    () => request("/mixed-sticky", { headers: { Cookie: `sticky-mixed=${Math.random() < 0.5 ? "a" : "b"}` } }),
+    () => request("/mixed-canary", { headers: Math.random() < 0.3 ? { "x-canary": "beta" } : {} }),
+    () =>
+      new Promise((resolve) => {
+        // A deliberate client abort: destroy the connection partway through.
+        const req = http.request({ host: "127.0.0.1", port: PROXY_PORT, path: "/mixed-normal", method: "GET" }, () => {});
+        req.on("error", () => {});
+        setTimeout(() => {
+          req.destroy();
+          resolve({ status: 0 });
+        }, 2 + Math.random() * 15);
+      }),
+  ];
+
+  async function workerLoop() {
+    while (Date.now() < deadline) {
+      if (inFlight >= maxConcurrent) {
+        await sleep(5);
+        continue;
+      }
+      inFlight++;
+      const fn = kinds[Math.floor(Math.random() * kinds.length)];
+      fn()
+        .catch(() => {})
+        .finally(() => {
+          inFlight--;
+        });
+      await sleep(3 + Math.random() * 7);
+    }
+  }
+  await Promise.all(Array.from({ length: 8 }, () => workerLoop()));
+  while (inFlight > 0) await sleep(20);
+
+  for (const s of wsSockets) s.destroy();
+  for (const r of sseReqs) r.destroy();
+  await sleep(300);
+
+  const settleDeadline = Date.now() + 10000;
+  let finalTotal = -1;
+  while (Date.now() < settleDeadline) {
+    finalTotal = await scrapeActiveConnectionsTotal(upstreamIds).catch(() => -1);
+    if (finalTotal === 0) break;
+    await sleep(500);
+  }
+  record(
+    "18. Active-connections gauge never leaks under mixed traffic (60s: normal, abort, 413, 429, CORS preflight, WS, SSE, sticky, canary)",
+    finalTotal === 0,
+    `ninja_active_connections summed across mixed-a/mixed-b after settling (within 10s) = ${finalTotal} (expected 0)`,
+  );
+}
+
 async function testAccessLogCoversRejections() {
   let accessLogBefore = "";
   try {
@@ -944,6 +1103,12 @@ upstreams:
   - id: reset-then-recover-backend
     url: "http://127.0.0.1:${UP_RESET}"
     healthPath: "/"
+  - id: mixed-a
+    url: "http://127.0.0.1:${UP_MIXED_A}"
+    healthPath: "/"
+  - id: mixed-b
+    url: "http://127.0.0.1:${UP_MIXED_B}"
+    healthPath: "/"
 
 routes:
   - path: "/binary"
@@ -1012,6 +1177,43 @@ routes:
   - path: "/reset-then-recover"
     upstreams: ["reset-then-recover-backend"]
     cache: { enabled: false }
+  - path: "/mixed-normal"
+    upstreams: ["mixed-a"]
+    cache: { enabled: false }
+  - path: "/mixed-sse"
+    upstreams: ["mixed-a"]
+    cache: { enabled: false }
+  - path: "/mixed-ws"
+    upstreams: ["mixed-a"]
+    cache: { enabled: false }
+  - path: "/mixed-429"
+    upstreams: ["mixed-a"]
+    cache: { enabled: false }
+    rateLimit:
+      windowMs: 60000
+      maxRequests: 5
+      algorithm: fixed-window
+  - path: "/mixed-cors-mixed"
+    upstreams: ["mixed-a"]
+    cache: { enabled: false }
+    cors:
+      origins: ["http://allowed.example.com"]
+  - path: "/mixed-413"
+    upstreams: ["mixed-a"]
+    cache: { enabled: false }
+    maxBodyBytes: 1024
+  - path: "/mixed-sticky"
+    upstreams: ["mixed-a", "mixed-b"]
+    sticky: true
+    cache: { enabled: false }
+  - path: "/mixed-canary"
+    upstreams: ["mixed-a"]
+    cache: { enabled: false }
+    canary:
+      enabled: true
+      canaryUpstream: "mixed-b"
+      baselineUpstream: "mixed-a"
+      weight: 10
 
 loadBalancing:
   strategy: round-robin
@@ -1129,6 +1331,8 @@ async function main() {
     startMock(UP_CACHE_TENANT_B, tenantCacheHandler("tenant-b")),
     startMock(UP_SWR, swrHandler),
     startMock(UP_RESET, resetHandler),
+    startMock(UP_MIXED_A, mixedBackendHandler, mixedUpgradeHandler),
+    startMock(UP_MIXED_B, mixedBackendHandler, mixedUpgradeHandler),
   ]);
   log(`${mockServers.length} mock upstreams ready.`);
 
@@ -1165,6 +1369,7 @@ async function main() {
   await testSwrRefreshDoesNotCrashWorker();
   await testAccessLogCoversRejections();
   await testAccessLogCoversCorsPreflight();
+  await testActiveConnectionsNeverLeakUnderMixedTraffic();
   await testUpstreamResetMidBody();
   await testUpstreamResetBeforeHeaders();
   await testUpstreamResetThenRetrySucceeds();
