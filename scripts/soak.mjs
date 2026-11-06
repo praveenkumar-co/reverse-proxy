@@ -625,7 +625,7 @@ function startTrafficGenerator() {
         // "status" lines are logged (see below) but not otherwise retained — nothing here
         // reads anything but the final report, and storing every periodic status line for
         // the whole run's duration would be pure unbounded dead weight.
-        if (parsed.type === "status") log(`traffic status t=${parsed.tSec}s sent=${Object.values(parsed.counts).reduce((a, c) => a + c.sent, 0)} inFlight=${parsed.inFlight}`);
+        if (parsed.type === "status") log(`traffic status t=${parsed.tSec}s sent=${Object.values(parsed.counts).reduce((a, c) => a + c.sent, 0)} inFlight=${parsed.inFlight} throttled=${parsed.requestsThrottled ?? 0}`);
         if (parsed.type === "final") trafficFinalReport = parsed;
       } catch {}
     }
@@ -1034,6 +1034,7 @@ async function buildReport({ proxyLogPath, metricsAtEnd, accessLogLineCount }) {
   // against it anyway would just be comparing against the wrong number.
   const connectionLevelFailures = trafficFinalReport?.statusCounts?.["0"] ?? 0;
   const deliveredByGenerator = totalSentByGenerator - connectionLevelFailures;
+  const requestsThrottled = trafficFinalReport?.requestsThrottled ?? 0;
   // The spec's own target is 1%; empirically, on this harness, two independent
   // instrumentation paths (Prometheus's in-memory counters, summed across whatever worker
   // set exists at each 5s accumulator tick, vs. a file-based access log written
@@ -1073,6 +1074,12 @@ async function buildReport({ proxyLogPath, metricsAtEnd, accessLogLineCount }) {
   lines.push("- Download body: 1 MB (reduced from 2 MB)");
   lines.push("- Large upload body: 2 MB (unchanged)");
   lines.push("- Concurrent SSE/WS pool size: 5 each, hard-capped at 50 (unchanged default, well under the cap)");
+  lines.push(
+    `- Generator in-flight ceiling: ${Math.max(1000, TRAFFIC_RATE * 3)} (backpressure fix — an ` +
+      `earlier attempt at this run had no cap and reached inFlight>300,000 with the generator ` +
+      `process itself at >1.4GB RSS, which is the likely actual cause of the prior OOM kills; ` +
+      `requests throttled by this ceiling this run: ${requestsThrottled})`,
+  );
   lines.push("");
   lines.push("## Pass criteria");
   lines.push("");

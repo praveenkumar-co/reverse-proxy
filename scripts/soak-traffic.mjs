@@ -480,11 +480,26 @@ function startWsConnection(idx) {
 let running = true;
 let accumulator = 0;
 let inFlight = 0;
+// Backpressure: without this, a downstream slowdown (hot-reload, circuit-open retries, this
+// laptop under memory pressure) lets tick() keep issuing new requests every 100ms on top of
+// ones that haven't resolved yet, so inFlight grows unbounded and so does this process's RSS
+// (observed inFlight>300,000 and RSS>1.4GB in an uncapped run — larger than all 4 proxy
+// workers combined, and a likely cause of this soak's OOM kills). Once inFlight crosses this
+// ceiling, skip issuing more until it drains — the generator sheds load the way a real client
+// with a bounded connection pool would, instead of queueing infinitely.
+const MAX_IN_FLIGHT = Math.max(1000, TARGET_RATE * 3);
+let requestsThrottled = 0;
+let throttledTicks = 0;
 
 async function tick() {
   accumulator += PER_TICK;
   const toIssue = Math.floor(accumulator);
   accumulator -= toIssue;
+  if (inFlight >= MAX_IN_FLIGHT) {
+    throttledTicks++;
+    requestsThrottled += toIssue;
+    return;
+  }
   for (let i = 0; i < toIssue; i++) {
     inFlight++;
     const fn = pickKind();
@@ -509,6 +524,8 @@ function printReport(final = false) {
     sse: { streamsStarted: sseStreamsStarted, messagesReceived: sseMessagesReceived, errors: sseErrors },
     ws: { messagesSent: wsMessagesSent, messagesReceived: wsMessagesReceived, errors: wsErrors, connected: wsSockets.filter(Boolean).length },
     inFlight,
+    requestsThrottled,
+    throttledTicks,
     uncaughtSocketErrors,
   };
   console.log(JSON.stringify(report));
