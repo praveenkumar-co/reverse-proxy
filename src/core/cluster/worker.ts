@@ -1111,7 +1111,13 @@ async function performUpstreamCall(
           return;
         }
         logger.error("Worker", `Upstream response stream aborted: ${err.message}`, { upstreamId });
-        finishOutcome({ kind: "terminal-error", statusCode: 502, errorMessage: err.message });
+        // res.writeHead(statusCode, ...) already ran before this stream existed (see above) --
+        // the client already received that status line, so logging the synthetic 502 this used
+        // to pass here would be a lie, and skipping recordAndLog entirely (as this did until
+        // now) silently dropped every mid-stream upstream failure from both Prometheus and the
+        // access log, unlike every other terminal outcome in this function.
+        recordAndLog(statusCode, 0, performance.now() - startTime, method, cleanPath, upstreamId, headers, clientIp);
+        finishOutcome({ kind: "terminal-error", statusCode, errorMessage: err.message });
       };
       res.on("finish", onStreamDone);
       res.on("error", onStreamError);
@@ -1484,6 +1490,16 @@ async function handleProxyDispatch(
       }
     }
 
+    // A mid-stream failure (onStreamError above) reaches here too, and by then res.writeHead()
+    // already ran once for the upstream's original status line -- headers can never be sent
+    // twice. Both tryServeStaleOnError and the plain error response below call res.writeHead()
+    // unconditionally; without this guard, every such failure threw ERR_HTTP_HEADERS_SENT as
+    // an uncaught exception and took the whole worker down (confirmed directly: a real
+    // upstream reset after sending headers + a partial body crashed a worker every time).
+    if (res.headersSent) {
+      if (!res.writableEnded) res.end();
+      return;
+    }
     const servedStale = await tryServeStaleOnError({ requestType: method, url, headers: req.headers }, pathRule, errorStatus, res);
     if (!servedStale) {
       res.writeHead(errorStatus, { "Content-Type": "application/json" });

@@ -51,6 +51,22 @@
 //                                 log, not just successful ones (regression for
 //                                 two call sites that recorded the Prometheus
 //                                 metric but never wrote the access-log line).
+//  14. Upstream reset mid-body:   a real TCP RST from the upstream after headers
+//                                 + a partial body were already forwarded to the
+//                                 client must not crash the worker (regression
+//                                 for a second res.writeHead() on an
+//                                 already-headers-sent response -- confirmed to
+//                                 throw ERR_HTTP_HEADERS_SENT and take the whole
+//                                 worker down), must still reach 0 active
+//                                 connections, and must still be counted in both
+//                                 the access log and Prometheus.
+//  15. Upstream reset pre-headers: the same kind of reset before any response
+//                                 exists yet must produce a clean 502, not a
+//                                 hang or a crash.
+//  16. Upstream reset then retry: a pre-headers reset on a GET is retry-
+//                                 eligible; the client must see the second
+//                                 attempt's success, not the first attempt's
+//                                 failure.
 //
 // All mock upstreams are started before the proxy boots (the proxy's initial
 // health check would otherwise mark every upstream down). Exits 1 if any
@@ -82,6 +98,7 @@ const UP_ROUTE_A = 4709;
 const UP_CACHE_TENANT_A = 4710;
 const UP_CACHE_TENANT_B = 4711;
 const UP_SWR = 4712;
+const UP_RESET = 4713;
 const ACCESS_LOG_PATH = path.join(os.tmpdir(), `ninja-datapath-regression-access-${process.pid}.log`);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -675,6 +692,126 @@ async function testSwrRefreshDoesNotCrashWorker() {
   );
 }
 
+// -----------------------------------------------------------------------------
+// Upstream resets: this real socket-level RST class of failure is what the Phase F soak run
+// actually hit in production traffic (ECONNRESET "socket hang up" on the proxy<->upstream
+// link) and is distinct from a clean HTTP error response (flaky*Handler above) -- the upstream
+// doesn't send a status code at all, it just kills the TCP connection.
+// -----------------------------------------------------------------------------
+let resetThenRecoverCalls = 0;
+function resetHandler(req, res) {
+  const cleanPath = (req.url || "/").split("?")[0];
+  if (cleanPath === "/reset-before-headers") {
+    res.socket.destroy();
+    return;
+  }
+  if (cleanPath === "/reset-mid-body") {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.write("partial-body-then-reset");
+    setTimeout(() => res.socket.destroy(), 30);
+    return;
+  }
+  if (cleanPath === "/reset-then-recover") {
+    resetThenRecoverCalls++;
+    if (resetThenRecoverCalls === 1) {
+      res.socket.destroy();
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ call: resetThenRecoverCalls }));
+    return;
+  }
+  res.writeHead(200, { "Content-Type": "text/plain" });
+  res.end("ok");
+}
+
+async function scrapeMetricsText() {
+  const r = await request("/metrics");
+  return r.body.toString("utf8");
+}
+
+function parseActiveConnections(metricsText, upstreamId) {
+  const re = new RegExp(`ninja_active_connections\\{upstream_id="${upstreamId}"\\}\\s+(-?\\d+(?:\\.\\d+)?)`);
+  const m = metricsText.match(re);
+  return m ? Number(m[1]) : 0;
+}
+
+function hasRequestsTotalLine(metricsText, { path: p, status, upstreamId }) {
+  const re = new RegExp(`ninja_http_requests_total\\{[^}]*path="${p}"[^}]*status="${status}"[^}]*upstream_id="${upstreamId}"[^}]*\\}\\s+(\\d+)`);
+  return re.test(metricsText);
+}
+
+async function testUpstreamResetMidBody() {
+  const before = await scrapeMetricsText();
+  let accessLogBefore = "";
+  try {
+    accessLogBefore = fs.readFileSync(ACCESS_LOG_PATH, "utf8");
+  } catch {}
+  const linesBefore = accessLogBefore.split("\n").filter(Boolean).length;
+
+  const r = await request("/reset-mid-body").catch((err) => ({ status: 0, error: err.message }));
+
+  await sleep(500); // worker crash (if any) and writeAccessLog both need a moment to land
+  let logContent = "";
+  try {
+    logContent = fs.readFileSync(proxyLogPath, "utf8");
+  } catch {}
+  const workerCrashed = logContent.includes("exited unexpectedly") || logContent.includes("ERR_HTTP_HEADERS_SENT");
+
+  let accessLogAfter = "";
+  try {
+    accessLogAfter = fs.readFileSync(ACCESS_LOG_PATH, "utf8");
+  } catch {}
+  const newLines = accessLogAfter.split("\n").filter(Boolean).slice(linesBefore);
+  const loggedIt = newLines.some((l) => l.includes('"GET /reset-mid-body HTTP/1.1" 200'));
+
+  const after = await scrapeMetricsText();
+  const activeConnBefore = parseActiveConnections(before, "reset-mid-body-backend");
+  const activeConnAfter = parseActiveConnections(after, "reset-mid-body-backend");
+  const countedInPrometheus = hasRequestsTotalLine(after, { path: "/reset-mid-body", status: "200", upstreamId: "reset-mid-body-backend" });
+
+  // Confirm the proxy is still actually serving -- a crashed-then-respawned worker could still
+  // look "not crashed" by the log-string check above if the message text ever changes.
+  const stillAlive = await request("/binary").catch(() => ({ status: 0 }));
+
+  record(
+    "14. Upstream socket reset mid-response (after headers + partial body): client connection closes cleanly, worker doesn't crash, active connections return to 0, counted in both the access log and Prometheus",
+    !workerCrashed && activeConnAfter === 0 && loggedIt && countedInPrometheus && stillAlive.status === 200,
+    `client status=${r.status}${r.error ? ` (${r.error})` : ""}, worker crashed=${workerCrashed}, activeConnections before=${activeConnBefore} after=${activeConnAfter} (expected 0), access-log has 200 line=${loggedIt}, prometheus has it=${countedInPrometheus}, proxy still serving after=${stillAlive.status}`,
+  );
+}
+
+async function testUpstreamResetBeforeHeaders() {
+  const r = await request("/reset-before-headers").catch((err) => ({ status: 0, error: err.message }));
+  await sleep(300);
+  const after = await scrapeMetricsText();
+  const activeConnAfter = parseActiveConnections(after, "reset-before-headers-backend");
+  let logContent = "";
+  try {
+    logContent = fs.readFileSync(proxyLogPath, "utf8");
+  } catch {}
+  const workerCrashed = logContent.includes("exited unexpectedly") || logContent.includes("ERR_HTTP_HEADERS_SENT");
+  record(
+    "15. Upstream socket reset before any headers: client gets a clean 502 (not a hang or crash), active connections return to 0",
+    !workerCrashed && r.status === 502 && activeConnAfter === 0,
+    `client status=${r.status} (expected 502), worker crashed=${workerCrashed}, activeConnections after=${activeConnAfter} (expected 0)`,
+  );
+}
+
+async function testUpstreamResetThenRetrySucceeds() {
+  resetThenRecoverCalls = 0;
+  const r = await request("/reset-then-recover").catch((err) => ({ status: 0, error: err.message }));
+  let body = null;
+  try {
+    body = JSON.parse(r.body.toString("utf8"));
+  } catch {}
+  record(
+    "16. Upstream socket reset before headers on a GET is retried: client gets 200 from the second attempt, upstream saw exactly 2 calls",
+    r.status === 200 && body?.call === 2 && resetThenRecoverCalls === 2,
+    `status=${r.status} (expected 200), upstream calls=${resetThenRecoverCalls} (expected 2), served-by-call=${body?.call}`,
+  );
+}
+
 async function testAccessLogCoversRejections() {
   let accessLogBefore = "";
   try {
@@ -762,6 +899,18 @@ upstreams:
   - id: swr-backend
     url: "http://127.0.0.1:${UP_SWR}"
     healthPath: "/"
+  # Three separate upstream ids pointing at the same physical mock server -- the circuit
+  # breaker and active-connections gauge are keyed per upstream id, and these three tests'
+  # repeated failures must not trip each other's breaker or pollute each other's gauge.
+  - id: reset-mid-body-backend
+    url: "http://127.0.0.1:${UP_RESET}"
+    healthPath: "/"
+  - id: reset-before-headers-backend
+    url: "http://127.0.0.1:${UP_RESET}"
+    healthPath: "/"
+  - id: reset-then-recover-backend
+    url: "http://127.0.0.1:${UP_RESET}"
+    healthPath: "/"
 
 routes:
   - path: "/binary"
@@ -816,6 +965,15 @@ routes:
       windowMs: 60000
       maxRequests: 1
       algorithm: fixed-window
+  - path: "/reset-before-headers"
+    upstreams: ["reset-before-headers-backend"]
+    cache: { enabled: false }
+  - path: "/reset-mid-body"
+    upstreams: ["reset-mid-body-backend"]
+    cache: { enabled: false }
+  - path: "/reset-then-recover"
+    upstreams: ["reset-then-recover-backend"]
+    cache: { enabled: false }
 
 loadBalancing:
   strategy: round-robin
@@ -932,6 +1090,7 @@ async function main() {
     startMock(UP_CACHE_TENANT_A, tenantCacheHandler("tenant-a")),
     startMock(UP_CACHE_TENANT_B, tenantCacheHandler("tenant-b")),
     startMock(UP_SWR, swrHandler),
+    startMock(UP_RESET, resetHandler),
   ]);
   log(`${mockServers.length} mock upstreams ready.`);
 
@@ -967,6 +1126,9 @@ async function main() {
   await testCacheTenantIsolation();
   await testSwrRefreshDoesNotCrashWorker();
   await testAccessLogCoversRejections();
+  await testUpstreamResetMidBody();
+  await testUpstreamResetBeforeHeaders();
+  await testUpstreamResetThenRetrySucceeds();
 
   printSummary();
 
