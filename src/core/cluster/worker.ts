@@ -410,7 +410,7 @@ let httpsServer: https.Server | undefined;
 function maybeExitWhenDrained() {
   if (draining && activeRequestCount === 0) {
     logger.info(`Worker:${process.pid}`, "Drain complete — exiting");
-    process.exit(0);
+    void logger.flushAll().finally(() => process.exit(0));
   }
 }
 
@@ -1358,7 +1358,7 @@ async function handleProxyDispatch(
         res.writeHead(503, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "No healthy upstreams available" }));
       }
-      metricsRegistry.recordRequest(method, rule.path, servedStale ? 200 : 503, "none", performance.now() - startTime);
+      recordAndLog(servedStale ? 200 : 503, 0, performance.now() - startTime, method, rule.path, "none", req.headers, clientIp);
       return;
     }
     const { upstreamId, routeStage, setCanaryCookieVal } = selected;
@@ -1381,7 +1381,7 @@ async function handleProxyDispatch(
         }
         res.writeHead(503, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Service unavailable — upstream concurrency limit reached" }));
-        metricsRegistry.recordRequest(method, rule.path, 503, upstreamId, performance.now() - startTime);
+        recordAndLog(503, 0, performance.now() - startTime, method, rule.path, upstreamId, req.headers, clientIp);
         return;
       }
     }
@@ -1603,8 +1603,7 @@ const proxyRequestHandler = async (req: http.IncomingMessage, res: http.ServerRe
         "X-RateLimit-Reset": String(globalCheck.resetAt),
         "X-RateLimit-Algorithm": globalCheck.algorithm,
       });
-      const tenantId = (c.req.headers["x-tenant-id"] as string) ?? "none";
-      metricsRegistry.recordRequest(c.req.method ?? "GET", pathRule?.path ?? "unmatched", 429, "rate-limiter", 0, tenantId);
+      recordAndLog(429, 0, 0, c.req.method ?? "GET", pathRule?.path ?? "unmatched", "rate-limiter", c.req.headers, clientIP);
       c.res.end(
         JSON.stringify({ error: "Too Many Requests", scope: "global", algorithm: globalCheck.algorithm, state: globalCheck.algoState, retryAfter: `${Math.max(0, retryAfter)}s` }),
       );
@@ -1623,8 +1622,7 @@ const proxyRequestHandler = async (req: http.IncomingMessage, res: http.ServerRe
           "X-RateLimit-Reset": String(routeCheck.resetAt),
           "X-RateLimit-Algorithm": routeCheck.algorithm,
         });
-        const tenantId = (c.req.headers["x-tenant-id"] as string) ?? "none";
-        metricsRegistry.recordRequest(c.req.method ?? "GET", pathRule?.path ?? "unmatched", 429, "rate-limiter", 0, tenantId);
+        recordAndLog(429, 0, 0, c.req.method ?? "GET", pathRule?.path ?? "unmatched", "rate-limiter", c.req.headers, clientIP);
         c.res.end(JSON.stringify({ error: "Too Many Requests", scope: "route", retryAfter: `${Math.max(0, retryAfter)}s`, algorithm: routeCheck.algorithm }));
         return;
       }

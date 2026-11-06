@@ -52,6 +52,25 @@ export class Logger {
     return stream;
   }
 
+  // process.exit() terminates immediately — any access-log/event-log line written in the same
+  // tick as a graceful-drain exit may still be sitting in the WriteStream's internal buffer,
+  // never having reached the fd's write() syscall, and is lost outright (confirmed directly:
+  // write() + synchronous process.exit() with no event-loop turn in between can drop every
+  // buffered line, not just a tail). Call this and await it before exiting a worker on purpose.
+  async flushAll(): Promise<void> {
+    const streams = [...this.logStreams.values()];
+    this.logStreams.clear();
+    await Promise.all(
+      streams.map(
+        (stream) =>
+          new Promise<void>((resolve) => {
+            stream.end(() => resolve());
+            stream.once("error", () => resolve());
+          }),
+      ),
+    );
+  }
+
   configure(config: LoggerConfig): void {
     if (config.eventLogPath !== undefined){
       this.eventLogPath = config.eventLogPath;

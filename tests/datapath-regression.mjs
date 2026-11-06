@@ -45,6 +45,12 @@
 //                                 that request's own response must not crash the
 //                                 worker process (regression for a noop-response
 //                                 object that wasn't a real EventEmitter/stream).
+//  13. Access log covers rejections: a 429 (route rate limit) and a 503 (no
+//                                 healthy upstream) response are both client-
+//                                 facing outcomes that must appear in the access
+//                                 log, not just successful ones (regression for
+//                                 two call sites that recorded the Prometheus
+//                                 metric but never wrote the access-log line).
 //
 // All mock upstreams are started before the proxy boots (the proxy's initial
 // health check would otherwise mark every upstream down). Exits 1 if any
@@ -76,6 +82,7 @@ const UP_ROUTE_A = 4709;
 const UP_CACHE_TENANT_A = 4710;
 const UP_CACHE_TENANT_B = 4711;
 const UP_SWR = 4712;
+const ACCESS_LOG_PATH = path.join(os.tmpdir(), `ninja-datapath-regression-access-${process.pid}.log`);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -668,6 +675,32 @@ async function testSwrRefreshDoesNotCrashWorker() {
   );
 }
 
+async function testAccessLogCoversRejections() {
+  let accessLogBefore = "";
+  try {
+    accessLogBefore = fs.readFileSync(ACCESS_LOG_PATH, "utf8");
+  } catch {}
+  const linesBefore = accessLogBefore.split("\n").filter(Boolean).length;
+
+  const first = await request("/rate-limited-test"); // within the route's maxRequests=1
+  const limited = await request("/rate-limited-test"); // must be 429
+  const noUpstream = await request("/route-b"); // must be 503, "ghost-upstream" is never registered
+
+  await sleep(200); // writeAccessLog is fire-and-forget; give it a moment to land
+  let accessLogAfter = "";
+  try {
+    accessLogAfter = fs.readFileSync(ACCESS_LOG_PATH, "utf8");
+  } catch {}
+  const newLines = accessLogAfter.split("\n").filter(Boolean).slice(linesBefore);
+  const has429 = newLines.some((l) => l.includes('"GET /rate-limited-test HTTP/1.1" 429'));
+  const has503 = newLines.some((l) => l.includes('"GET /route-b HTTP/1.1" 503'));
+  record(
+    "13. Access log covers rejections: 429 (route rate limit) and 503 (no healthy upstream) both appear, not just 2xx",
+    first.status === 200 && limited.status === 429 && noUpstream.status === 503 && has429 && has503,
+    `first=${first.status}, limited=${limited.status} (expected 429), noUpstream=${noUpstream.status} (expected 503), access-log has 429 line=${has429}, has 503 line=${has503}`,
+  );
+}
+
 // ----------------------------------------------------------------------------
 // Harness plumbing
 // ----------------------------------------------------------------------------
@@ -687,7 +720,7 @@ tls:
 observability:
   logging:
     level: warn
-    accessLog: false
+    accessLog: "${ACCESS_LOG_PATH}"
 
 admin:
   enabled: false
@@ -776,6 +809,13 @@ routes:
   - path: "/swr-crash"
     upstreams: ["swr-backend"]
     cache: { enabled: true, ttlSeconds: 1 }
+  - path: "/rate-limited-test"
+    upstreams: ["binary-backend"]
+    cache: { enabled: false }
+    rateLimit:
+      windowMs: 60000
+      maxRequests: 1
+      algorithm: fixed-window
 
 loadBalancing:
   strategy: round-robin
@@ -926,6 +966,7 @@ async function main() {
   await testRouteUpstreamIsolation();
   await testCacheTenantIsolation();
   await testSwrRefreshDoesNotCrashWorker();
+  await testAccessLogCoversRejections();
 
   printSummary();
 
