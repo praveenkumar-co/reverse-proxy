@@ -67,6 +67,11 @@
 //                                 eligible; the client must see the second
 //                                 attempt's success, not the first attempt's
 //                                 failure.
+//  17. Access log covers CORS preflight: an OPTIONS request handled entirely
+//                                 inside corsMiddleware (never reaches upstream
+//                                 selection) must still appear in the access
+//                                 log -- the single largest contributor to the
+//                                 Phase F2 soak's access-log gap.
 //
 // All mock upstreams are started before the proxy boots (the proxy's initial
 // health check would otherwise mark every upstream down). Exits 1 if any
@@ -838,6 +843,34 @@ async function testAccessLogCoversRejections() {
   );
 }
 
+async function testAccessLogCoversCorsPreflight() {
+  // A CORS preflight (OPTIONS) short-circuits inside corsMiddleware before the request ever
+  // reaches upstream selection or dispatch -- it was invisible to both Prometheus and the
+  // access log, same class of gap as the 429/503 paths above, and the soak run's own CORS
+  // traffic (tens of thousands of OPTIONS requests) was the single largest contributor to a
+  // 25%+ access-log-vs-Prometheus gap.
+  let accessLogBefore = "";
+  try {
+    accessLogBefore = fs.readFileSync(ACCESS_LOG_PATH, "utf8");
+  } catch {}
+  const linesBefore = accessLogBefore.split("\n").filter(Boolean).length;
+
+  const preflight = await request("/cors-preflight-test", { method: "OPTIONS", headers: { Origin: "http://allowed.example.com" } });
+
+  await sleep(200);
+  let accessLogAfter = "";
+  try {
+    accessLogAfter = fs.readFileSync(ACCESS_LOG_PATH, "utf8");
+  } catch {}
+  const newLines = accessLogAfter.split("\n").filter(Boolean).slice(linesBefore);
+  const has204 = newLines.some((l) => l.includes('"OPTIONS /cors-preflight-test HTTP/1.1" 204'));
+  record(
+    "17. Access log covers CORS preflight: an OPTIONS request answered entirely inside corsMiddleware (never reaches upstream selection) still appears in the access log",
+    preflight.status === 204 && has204,
+    `preflight status=${preflight.status} (expected 204), access-log has 204 line=${has204}`,
+  );
+}
+
 // ----------------------------------------------------------------------------
 // Harness plumbing
 // ----------------------------------------------------------------------------
@@ -965,6 +998,11 @@ routes:
       windowMs: 60000
       maxRequests: 1
       algorithm: fixed-window
+  - path: "/cors-preflight-test"
+    upstreams: ["binary-backend"]
+    cache: { enabled: false }
+    cors:
+      origins: ["http://allowed.example.com"]
   - path: "/reset-before-headers"
     upstreams: ["reset-before-headers-backend"]
     cache: { enabled: false }
@@ -1126,6 +1164,7 @@ async function main() {
   await testCacheTenantIsolation();
   await testSwrRefreshDoesNotCrashWorker();
   await testAccessLogCoversRejections();
+  await testAccessLogCoversCorsPreflight();
   await testUpstreamResetMidBody();
   await testUpstreamResetBeforeHeaders();
   await testUpstreamResetThenRetrySucceeds();

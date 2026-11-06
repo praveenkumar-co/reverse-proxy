@@ -1259,6 +1259,7 @@ async function handleProxyDispatch(
   if (!pathRule) {
     res.writeHead(404, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "Route not found" }));
+    recordAndLog(404, 0, performance.now() - startTime, method, url.split("?")[0] ?? url, "none", req.headers, clientIp);
     return;
   }
 
@@ -1404,6 +1405,7 @@ async function handleProxyDispatch(
       lb.cancelProbe(upstreamId);
       res.writeHead(503);
       res.end("Service not found in registry");
+      recordAndLog(503, 0, performance.now() - startTime, method, rule.path, upstreamId, req.headers, clientIp);
       return;
     }
 
@@ -1515,10 +1517,12 @@ async function handleProxyDispatch(
 // worker already owns the accepted client connection.
 // -----------------------------------------------------------------------------
 function wsUpgradeHandler(req: http.IncomingMessage, socket: net.Socket, head: Buffer) {
+  const startTime = performance.now();
   const url = new URL(req.url!, `http://${req.headers.host}`);
   const pathRule = routeMatcher.match(url.pathname, req.method);
   if (!pathRule) {
     socket.destroy();
+    recordAndLog(404, 0, performance.now() - startTime, req.method ?? "GET", url.pathname, "none", req.headers, req.socket.remoteAddress ?? "unknown");
     return;
   }
   const clientIP = resolveClientIp(req, socket, {
@@ -1528,6 +1532,7 @@ function wsUpgradeHandler(req: http.IncomingMessage, socket: net.Socket, head: B
   const selected = selectUpstream(pathRule, req.headers, clientIP, new Set());
   if (!selected) {
     socket.destroy();
+    recordAndLog(503, 0, performance.now() - startTime, req.method ?? "GET", pathRule.path, "none", req.headers, clientIP);
     return;
   }
   const { upstreamId } = selected;
@@ -1535,6 +1540,7 @@ function wsUpgradeHandler(req: http.IncomingMessage, socket: net.Socket, head: B
   if (!serviceInstance) {
     lb.cancelProbe(upstreamId);
     socket.destroy();
+    recordAndLog(503, 0, performance.now() - startTime, req.method ?? "GET", pathRule.path, upstreamId, req.headers, clientIP);
     return;
   }
   const outgoingHeaders = { ...req.headers };
@@ -1546,6 +1552,9 @@ function wsUpgradeHandler(req: http.IncomingMessage, socket: net.Socket, head: B
   metricsRegistry.recordActiveConnection(upstreamId, 1);
   const upstreamStaticConfig = workerConfig.server.upstreams.find((u) => u.id === upstreamId);
   const tlsConfig = socket instanceof tls.TLSSocket ? upstreamStaticConfig?.tls : undefined;
+  // Logged as a 101 (Switching Protocols) the moment the tunnel is accepted -- the only
+  // "response" a WebSocket upgrade ever sends, same convention nginx's own access log uses.
+  recordAndLog(101, 0, performance.now() - startTime, req.method ?? "GET", pathRule.path, upstreamId, req.headers, clientIP);
   tunnelWebSocket(socket, serviceInstance.url, reqFields, head, tlsConfig, () => {
     lb.releaseConnection(upstreamId);
     metricsRegistry.recordActiveConnection(upstreamId, -1);
@@ -1588,7 +1597,9 @@ const proxyRequestHandler = async (req: http.IncomingMessage, res: http.ServerRe
   const pathRule = routeMatcher.match(url.pathname, req.method);
 
   pipelineRunner.use(async (c, next) => {
-    const guard = corsMiddleware(pathRule?.cors ?? {});
+    const guard = corsMiddleware(pathRule?.cors ?? {}, (c2) => {
+      recordAndLog(204, 0, performance.now() - c2.startTime, c2.req.method ?? "OPTIONS", pathRule?.path ?? url.pathname, "cors", c2.req.headers, c2.clientIp);
+    });
     await guard(c, next);
   });
 

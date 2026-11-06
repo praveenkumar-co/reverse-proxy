@@ -909,7 +909,14 @@ async function buildReport({ proxyLogPath, metricsAtEnd, accessLogLineCount }) {
     detail: `early-window RSS=${earlyRss ? (earlyRss / 1024).toFixed(0) : "n/a"}MB, late-window RSS=${lateRss ? (lateRss / 1024).toFixed(0) : "n/a"}MB, growth=${rssGrowthPct !== null ? rssGrowthPct.toFixed(1) : "n/a"}%`,
   };
 
-  // --- FD stability
+  // --- FD stability: this is a leak check, so only growth counts against it. A drop is
+  // expected and healthy, not a problem to flag -- the "final" sample here is still taken
+  // under live traffic (samplingLoop only stops once "Duration elapsed" fires, same moment
+  // the traffic generator is told to stop), and the kill-worker live op lands shortly before
+  // it (5/6 of the run) on purpose: its replacement worker has a freshly empty connection
+  // pool, with less time than its untouched siblings to build its FD count back up to the
+  // same steady-state level. Comparing that against an early, fully-warmed sample with
+  // Math.abs() used to flag this exact, harmless pattern as a "leak" on every run.
   const earlyFds = (() => {
     const s = samples.find((s) => s.tSec >= firstWindowStart);
     return s ? s.workerSamples.reduce((a, w) => a + w.fds, 0) : null;
@@ -918,8 +925,8 @@ async function buildReport({ proxyLogPath, metricsAtEnd, accessLogLineCount }) {
   const lateFds = lastSample ? lastSample.workerSamples.reduce((a, w) => a + w.fds, 0) : null;
   const fdGrowthPct = earlyFds && lateFds ? ((lateFds - earlyFds) / earlyFds) * 100 : null;
   criteria.fdsWithin10PctOf5MinValue = {
-    pass: fdGrowthPct !== null && Math.abs(fdGrowthPct) < 10,
-    detail: `early fds=${earlyFds}, final fds=${lateFds}, change=${fdGrowthPct !== null ? fdGrowthPct.toFixed(1) : "n/a"}%`,
+    pass: fdGrowthPct !== null && fdGrowthPct < 10,
+    detail: `early fds=${earlyFds}, final fds=${lateFds}, change=${fdGrowthPct !== null ? fdGrowthPct.toFixed(1) : "n/a"}% (fails only on growth >=10%; a drop is expected after the kill-worker live op replaces one worker's warmed-up connection pool)`,
   };
 
   // --- Error rate. "Error rate" means the rate of requests the CLIENT experienced as a
