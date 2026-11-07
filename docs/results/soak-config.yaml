@@ -168,3 +168,8 @@ observability:
 admin:
   enabled: true
   token: "soak-admin-secret"
+  # Phase G Item 3: POST /__registry/register now denies loopback/private/link-local/etc
+  # addresses by default. This soak run deliberately registers dynamic-upstream at
+  # 127.0.0.1 (scripts/soak.mjs) to exercise the live register/deregister admin flow, so
+  # that specific loopback address needs an explicit exception here.
+  registrationAllowlist: ["127.0.0.1/32", "::1/128"]

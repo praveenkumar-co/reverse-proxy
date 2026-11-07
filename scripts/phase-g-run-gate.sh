@@ -20,7 +20,7 @@ mkdir -p "$OUT_DIR"
 # Ports no suite should ever find already bound at its own start -- datapath-regression.mjs's
 # full mock-upstream range (the one actually involved in the incident) plus the generic
 # proxy/soak process patterns used elsewhere in this repo's own orphan-check convention.
-PORTS_TO_CHECK="4701 4702 4703 4704 4705 4706 4707 4708 4709 4710 4711 4712 4713 4714 4715 4720 4721 8595 4730 8540 8543 8550 8553 8560 8563 8570 8573"
+PORTS_TO_CHECK="4701 4702 4703 4704 4705 4706 4707 4708 4709 4710 4711 4712 4713 4714 4715 4720 4721 8595 4730 8540 8543 8550 8553 8560 8563 8570 8573 8580 8590 4740 4741 4742"
 ORPHAN_PATTERN="dist/index\.js|redis-server|nginx|wrk|bench/|soak"
 
 check_ports_free() {
@@ -105,6 +105,7 @@ run_suite "full-system-audit" 300 node tests/full-system-audit.mjs
 run_suite "datapath-regression" 300 node tests/datapath-regression.mjs
 run_suite "access-log-integrity" 120 node tests/access-log-integrity.mjs --duration-ms 30000
 run_suite "tls-e2e" 180 node tests/tls-e2e.mjs
+run_suite "ssrf-admin" 120 node tests/ssrf-admin.mjs
 run_suite "production-gates" 300 node tests/production-gates.mjs
 run_suite "production-preflight-check" 300 node tests/production-preflight-check.mjs
 run_suite "chaos-resilience-suite" 300 node tests/chaos-resilience-suite.mjs
