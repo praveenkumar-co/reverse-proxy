@@ -789,6 +789,14 @@ async function performUpstreamCall(
   const isHttps = finalUpstreamUrl.protocol === "https:";
   const transport = isHttps ? https : http;
   const agent = getAgent(isHttps);
+  // Admin-registered (POST /__registry/register) upstreams carry the IP address(es)
+  // admin.handler.ts's assertSafeRegistrationUrl already validated at registration time, in
+  // metadata.pinnedAddress -- connecting to that literal address instead of re-resolving the
+  // hostname here defeats a DNS-rebinding attack where the name resolves to a safe address at
+  // registration but a private one by the time real traffic is dispatched. Config-file
+  // upstreams never have this metadata and are completely unaffected.
+  const pinnedAddress = serviceInstance.metadata?.pinnedAddress;
+  const connectHost = pinnedAddress && net.isIP(pinnedAddress) ? pinnedAddress : finalUpstreamUrl.hostname;
   const upstreamStaticConfig = workerConfig.server.upstreams.find(
     (u) => u.url === finalUpstreamUrl.toString() || new URL(u.url).origin === finalUpstreamUrl.origin,
   );
@@ -833,13 +841,20 @@ async function performUpstreamCall(
   }
 
   const requestOptions: http.RequestOptions = {
-    host: finalUpstreamUrl.hostname,
+    host: connectHost,
     port: finalUpstreamUrl.port || (isHttps ? "443" : "80"),
     path: url,
     method,
     agent,
     headers: forwardHeaders,
-    ...(isHttps && { rejectUnauthorized, ...(caBuffer ? { ca: caBuffer } : {}) }),
+    ...(isHttps && {
+      rejectUnauthorized,
+      ...(caBuffer ? { ca: caBuffer } : {}),
+      // Pinning the TCP target to a literal IP must not also change what the TLS handshake
+      // validates the certificate against -- SNI/hostname verification still uses the
+      // original hostname.
+      ...(connectHost !== finalUpstreamUrl.hostname ? { servername: finalUpstreamUrl.hostname } : {}),
+    }),
   };
 
   return new Promise<AttemptOutcome>((resolveOutcome) => {

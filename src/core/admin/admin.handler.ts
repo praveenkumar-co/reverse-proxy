@@ -58,32 +58,110 @@ function isAuthorizedAdminRequest(req: http.IncomingMessage, config: RootConfigT
 }
 
 /**
- * Link-local and cloud metadata ranges a registered upstream must never resolve to —
- * independent of any registrationAllowlist, since these exist specifically so an allowlist
- * misconfiguration (or a DNS name resolving there) can't still reach them.
- *   169.254.0.0/16  — IPv4 link-local, covers the AWS/GCP/Azure metadata IP 169.254.169.254
- *   fe80::/10       — IPv6 link-local
- *   fd00:ec2::254   — AWS IMDSv2 IPv6 metadata address
+ * Ranges a registered upstream is never allowed to resolve to by default -- loopback,
+ * RFC1918 private, link-local (covers the AWS/GCP/Azure metadata IP 169.254.169.254),
+ * unspecified, multicast, and broadcast, for both IPv4 and IPv6, plus the AWS IMDSv2 IPv6
+ * metadata address. `registrationAllowlist` (CIDRs or hosts, see isAllowlistedAddress below)
+ * is the one way to exempt a specific address from this list -- e.g. a test harness that
+ * legitimately needs to register 127.0.0.1.
  */
-function isLinkLocalOrMetadataAddress(address: string): boolean {
+function ipv4ToInt(ip: string): number {
+  const parts = ip.split(".").map(Number);
+  const [a = 0, b = 0, c = 0, d = 0] = parts;
+  return ((a << 24) | (b << 16) | (c << 8) | d) >>> 0;
+}
+
+function isDisallowedPrivateAddress(address: string): boolean {
   const normalized = address.replace(/^::ffff:/, "");
   if (net.isIP(normalized) === 4) {
     const parts = normalized.split(".").map(Number);
-    return parts[0] === 169 && parts[1] === 254;
+    const [a = 0, b = 0] = parts;
+    if (a === 127) return true; // 127.0.0.0/8 loopback
+    if (a === 10) return true; // 10.0.0.0/8 private
+    if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12 private
+    if (a === 192 && b === 168) return true; // 192.168.0.0/16 private
+    if (a === 169 && b === 254) return true; // 169.254.0.0/16 link-local / cloud metadata
+    if (a === 0) return true; // 0.0.0.0/8 unspecified/"this network"
+    if (a >= 224 && a <= 239) return true; // 224.0.0.0/4 multicast
+    if (normalized === "255.255.255.255") return true; // broadcast
+    return false;
   }
   if (net.isIP(normalized) === 6) {
     const lower = normalized.toLowerCase();
-    return lower.startsWith("fe80:") || lower.startsWith("fe80::") || lower === "fd00:ec2::254";
+    if (lower === "::1") return true; // loopback
+    if (lower === "::") return true; // unspecified
+    if (lower.startsWith("fe80:") || lower.startsWith("fe80::")) return true; // link-local
+    if (lower === "fd00:ec2::254") return true; // AWS IMDSv2 metadata
+    // fc00::/7 unique-local (fc00:: through fdff:...): first byte is 0xfc or 0xfd.
+    const firstGroup = (lower.split(":")[0] ?? "").padStart(4, "0");
+    const firstByte = parseInt(firstGroup.slice(0, 2), 16);
+    if (firstByte === 0xfc || firstByte === 0xfd) return true;
+    if (lower.startsWith("ff")) return true; // ff00::/8 multicast
+    return false;
   }
   return false;
 }
 
-function isAllowlistedHost(hostname: string, allowlist: string[]): boolean {
-  if (allowlist.length === 0) return true;
-  const lower = hostname.toLowerCase();
+/** Parses "a.b.c.d/n" or "ipv6::/n" (or a bare address, treated as a /32 or /128) into a
+ *  {testFn} that checks whether a given address falls inside it. Returns null if `cidr`
+ *  isn't a CIDR/IP literal at all (i.e. it's meant to match as a hostname instead). */
+function parseCidr(cidr: string): ((address: string) => boolean) | null {
+  const [base = "", prefixStr] = cidr.split("/");
+  const kind = net.isIP(base);
+  if (kind === 0) return null;
+  if (kind === 4) {
+    const prefix = prefixStr !== undefined ? Number(prefixStr) : 32;
+    if (!Number.isInteger(prefix) || prefix < 0 || prefix > 32) return null;
+    const baseInt = ipv4ToInt(base);
+    const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+    return (address: string) => {
+      const normalized = address.replace(/^::ffff:/, "");
+      if (net.isIP(normalized) !== 4) return false;
+      return (ipv4ToInt(normalized) & mask) === (baseInt & mask);
+    };
+  }
+  // IPv6: compare the first `prefix` bits of the fully-expanded 128-bit address.
+  const prefix = prefixStr !== undefined ? Number(prefixStr) : 128;
+  if (!Number.isInteger(prefix) || prefix < 0 || prefix > 128) return null;
+  const expand = (addr: string): bigint => {
+    const buf = Buffer.alloc(16);
+    let groups: string[];
+    if (addr.includes("::")) {
+      const left = (addr.split("::")[0] ?? "").split(":").filter(Boolean);
+      const right = (addr.split("::")[1] ?? "").split(":").filter(Boolean);
+      const missing = 8 - left.length - right.length;
+      groups = [...left, ...Array(missing).fill("0"), ...right];
+    } else {
+      groups = addr.split(":");
+    }
+    for (let i = 0; i < 8; i++) {
+      const val = parseInt(groups[i] || "0", 16) || 0;
+      buf.writeUInt16BE(val, i * 2);
+    }
+    return (buf.readBigUInt64BE(0) << 64n) | buf.readBigUInt64BE(8);
+  };
+  const baseBig = expand(base);
+  const maskBig = prefix === 0 ? 0n : (((1n << BigInt(prefix)) - 1n) << BigInt(128 - prefix));
+  return (address: string) => {
+    const normalized = address.replace(/^::ffff:/, "");
+    if (net.isIP(normalized) !== 6) return false;
+    return (expand(normalized) & maskBig) === (baseBig & maskBig);
+  };
+}
+
+/**
+ * A denied (private/loopback/etc) address is still allowed if it's covered by an explicit
+ * registrationAllowlist entry -- a CIDR ("127.0.0.1/32", "10.0.0.0/8") or bare IP matched
+ * against the resolved address, or a hostname/domain-suffix (leading ".") matched against
+ * the original hostname (for an allowlisted internal DNS name rather than a literal IP).
+ */
+function isAllowlistedAddress(address: string, hostname: string, allowlist: string[]): boolean {
+  const lowerHost = hostname.toLowerCase();
   return allowlist.some((entry) => {
+    const matchesCidr = parseCidr(entry);
+    if (matchesCidr) return matchesCidr(address);
     const e = entry.toLowerCase();
-    return e.startsWith(".") ? lower === e.slice(1) || lower.endsWith(e) : lower === e;
+    return e.startsWith(".") ? lowerHost === e.slice(1) || lowerHost.endsWith(e) : lowerHost === e;
   });
 }
 
@@ -93,9 +171,11 @@ function isAllowlistedHost(hostname: string, allowlist: string[]): boolean {
  * letting a tenant point the proxy at an internal-only service or a cloud metadata endpoint
  * (e.g. 169.254.169.254) and read back whatever it returns through the proxy's own response.
  * Resolves the hostname via DNS rather than only pattern-matching the literal string, so a
- * DNS name that resolves to a blocked address can't bypass the check either.
+ * DNS name that resolves to a blocked address can't bypass the check either. Returns the
+ * validated address(es) so the caller can pin the registered upstream to them, defeating a
+ * DNS-rebinding attack where the name resolves safely now but to a private address later.
  */
-async function assertSafeRegistrationUrl(rawUrl: string, allowlist: string[]): Promise<void> {
+async function assertSafeRegistrationUrl(rawUrl: string, allowlist: string[]): Promise<string[]> {
   let parsed: URL;
   try {
     parsed = new URL(rawUrl);
@@ -105,8 +185,14 @@ async function assertSafeRegistrationUrl(rawUrl: string, allowlist: string[]): P
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     throw new Error(`Scheme "${parsed.protocol}" is not allowed — only http/https`);
   }
-  if (!isAllowlistedHost(parsed.hostname, allowlist)) {
-    throw new Error(`Host "${parsed.hostname}" is not in the registration allowlist`);
+  if (parsed.username || parsed.password) {
+    throw new Error("URL must not contain userinfo (username/password)");
+  }
+  if (parsed.port) {
+    const portNum = Number(parsed.port);
+    if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
+      throw new Error(`Port "${parsed.port}" is not a valid port number`);
+    }
   }
   const literalIpKind = net.isIP(parsed.hostname);
   const addresses: string[] = [];
@@ -120,9 +206,14 @@ async function assertSafeRegistrationUrl(rawUrl: string, allowlist: string[]): P
       throw new Error(`Could not resolve host "${parsed.hostname}"`);
     }
   }
-  if (addresses.some((addr) => isLinkLocalOrMetadataAddress(addr))) {
-    throw new Error(`Host "${parsed.hostname}" resolves to a link-local/metadata address, which is never allowed`);
+  for (const addr of addresses) {
+    if (isDisallowedPrivateAddress(addr) && !isAllowlistedAddress(addr, parsed.hostname, allowlist)) {
+      throw new Error(
+        `Host "${parsed.hostname}" resolves to "${addr}", a loopback/private/link-local/unspecified/multicast/broadcast address, which is denied by default — add it to admin.registrationAllowlist to allow it`,
+      );
+    }
   }
+  return addresses;
 }
 
 export interface AdminHandlerOptions {
@@ -340,15 +431,25 @@ export async function handleAdminRequest(options: AdminHandlerOptions): Promise<
           res.end(JSON.stringify({ error: "id and url are required" }));
           return;
         }
+        let validatedAddresses: string[];
         try {
-          await assertSafeRegistrationUrl(serviceUrl, config.admin.registrationAllowlist ?? []);
+          validatedAddresses = await assertSafeRegistrationUrl(serviceUrl, config.admin.registrationAllowlist ?? []);
         } catch (err: any) {
           logger.warn("Admin", `Rejected unsafe upstream registration: ${err.message}`, { id, url: serviceUrl });
           res.writeHead(403, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: err.message }));
           return;
         }
-        const service = await registry.register({ id, url: serviceUrl, metadata });
+        // Pins the upstream to the address(es) validated above (stored in metadata, read by
+        // worker.ts's performUpstreamCall) so a DNS name that resolved safely at registration
+        // time can't later be re-pointed at a private address and have the proxy's own next
+        // real connection follow it there -- the validation above would otherwise only ever
+        // run once, at registration, while every actual request re-resolves the hostname fresh.
+        const service = await registry.register({
+          id,
+          url: serviceUrl,
+          metadata: { ...(metadata ?? {}), pinnedAddress: validatedAddresses[0] },
+        });
         res.writeHead(201, { "Content-Type": "application/json" });
         res.end(
           JSON.stringify({

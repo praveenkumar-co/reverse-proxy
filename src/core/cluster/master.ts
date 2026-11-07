@@ -435,6 +435,15 @@ export async function createServer(config: CreateServerConfig) {
       "Admin endpoints are enabled but no admin.token/ADMIN_SECRET is configured — all /__* requests will be rejected until a token is set",
     );
   }
+  if (ACTIVE_CONFIG.admin.enabled) {
+    const allowlist = ACTIVE_CONFIG.admin.registrationAllowlist ?? [];
+    logger.info(
+      "Admin",
+      `Registration SSRF policy (POST /__registry/register only -- config-file upstreams are unaffected): ` +
+        `deny-by-default for loopback/private/link-local/unspecified/multicast/broadcast/IPv4-mapped-IPv6 addresses` +
+        (allowlist.length > 0 ? `; ${allowlist.length} allowlist exception(s): ${allowlist.join(", ")}` : `; no allowlist exceptions configured`),
+    );
+  }
   if (!cluster.isPrimary) return;
 
   registry.onRegister((service) => {

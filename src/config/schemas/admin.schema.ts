@@ -7,11 +7,15 @@ export const adminSchema = z
     // Shared-secret for /__* control-plane endpoints. Also settable via ADMIN_SECRET env var.
     // When `enabled` is true and no token is configured, admin endpoints fail closed (reject all requests).
     token: z.string().optional(),
-    // Hostnames (exact match) or domain suffixes (leading ".") allowed for
-    // POST /__registry/register. Empty (the default) means no allowlist restriction beyond
-    // the unconditional link-local/cloud-metadata block in admin.handler.ts — set this in any
-    // deployment where tenants can reach the registration endpoint, so they can't point the
-    // proxy at an arbitrary internal service.
+    // Exceptions to the default-deny policy for POST /__registry/register (admin.handler.ts's
+    // assertSafeRegistrationUrl): every registration is rejected by default if it resolves to
+    // a loopback/private/link-local/unspecified/multicast/broadcast/IPv4-mapped-IPv6 address,
+    // regardless of this list. An entry here is either a CIDR or bare IP ("127.0.0.1/32",
+    // "10.0.0.0/8", "::1/128") matched against the resolved address, or a hostname/domain
+    // suffix (leading ".") matched against the URL's hostname — either form exempts that
+    // specific address/host from the deny-by-default policy. A normal, public address is
+    // always allowed and never needs an entry here. Config-file upstreams are never subject
+    // to this check at all; it only gates the admin registration endpoint.
     registrationAllowlist: z.array(z.string()).default([]),
   })
   .default({

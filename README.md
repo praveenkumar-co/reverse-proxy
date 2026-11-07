@@ -458,6 +458,7 @@ All load balancing strategies are dynamically validated using Zod schemas and in
 
 ### 5. Dynamic Service Registry & Health Probes
 * **Dynamic Self-Registration REST API**: Upstreams can self-register, heartbeat, and deregister (`/__registry/register`, `heartbeat`, `deregister`).
+* **SSRF-Safe Registration**: `POST /__registry/register` denies by default any URL that resolves to a loopback, private (RFC1918), link-local, unspecified, multicast, broadcast, or IPv4-mapped-IPv6 address — plus rejects userinfo-in-URL and non-http(s) schemes. `admin.registrationAllowlist` is the one way to exempt a specific CIDR/IP or hostname (e.g. `["127.0.0.1/32", "10.0.0.0/8"]`); a normal public address is always allowed and needs no entry. The validated address is pinned into the registered service (`metadata.pinnedAddress`), so a DNS name that resolves safely at registration time can't be re-pointed at a private address afterward. This check only applies to admin-API registrations — upstreams listed in `config.yaml` are never subject to it.
 * **Disk Snapshot Persistence**: Automatic rehydration of services from `registry.json` snapshot backups on proxy restart.
 * **Dual Health Probes**: Active HTTP ping probes (`checkUpstream`) + Passive background failure monitors.
 
