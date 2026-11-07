@@ -1,655 +1,417 @@
-# 🛡️ Ninja Reverse Proxy
+# Ninja Reverse Proxy
 
-A production-grade, backend-agnostic **Layer 7 Reverse Proxy & Load Balancer** built from scratch in TypeScript and Node.js.
+A Layer 7 reverse proxy and load balancer for Node.js, written in TypeScript. It runs as a multi-process cluster in which every worker accepts connections and streams traffic end to end, and it is built for multi-tenant use: routes are isolated from each other, client IPs are trusted only from declared proxies, and runtime upstream registration is protected against SSRF.
 
-Designed in the same engineering philosophy as **NGINX, Envoy, and HAProxy** — configure it once, point it at any backend, and it handles enterprise-grade traffic distribution, load balancing, rate limiting, multi-tier caching, resilience patterns, and health monitoring automatically.
+![Node](https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white)
+![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)
+![License](https://img.shields.io/badge/license-ISC-blue)
 
----
-
-## 🌟 Verified Polyglot Integrations (Real-World Audits)
-
-Ninja Reverse Proxy has been rigorously verified against real-world production backends across multiple language ecosystems:
-
-| Language / Stack | Application Ecosystem | Master Audit & Guide | Verification Results |
-| :--- | :--- | :--- | :--- |
-| **Node.js / Express** | **PharmaChain** (Supply Chain KYC, Licensing & Crypto Vault) | [PharmaChain Master Guide](./PHARMACHAIN_REVERSE_PROXY_MASTER_GUIDE.md) | **100% Passed** (1000 requests @ 4739 req/s) |
-| **Python / FastAPI** | **Conduit RealWorld** (Async ASGI, PostgreSQL, JWT Auth) | [FastAPI Conduit Master Guide](./FASTAPI_CONDUIT_REVERSE_PROXY_MASTER_GUIDE.md) | **100% Passed** (10/10 automated tests passed) |
-| **Java / Spring Boot** | **QKD Simulation** (BB84 Quantum Key Distribution, 256-bit AES) | [Java QKD Master Guide](./JAVA_SPRINGBOOT_QKD_REVERSE_PROXY_MASTER_GUIDE.md) | **100% Passed** (10/10 automated tests passed, 19k RPS burst) |
-| **Kotlin / Ktor** | **Conduit RealWorld** (Netty Coroutines, Exposed ORM, JWT Auth) | [Kotlin Ktor Master Guide](./KOTLIN_KTOR_REVERSE_PROXY_MASTER_GUIDE.md) | **100% Passed** (10/10 automated tests passed, 15.5k RPS burst) |
-
----
-
-## 🏛️ Master-Worker Architecture Overview
-
-Ninja Reverse Proxy runs on Node's `cluster` module, but the master is **control plane only**: workers each listen on the shared port (the OS/cluster module balances accepted connections across them — no socket or request/response IPC on the datapath) and run the full pipeline themselves — routing, auth, CORS, tracing, rate limiting, cache, load balancing, circuit breaker, retries, WebSocket tunneling — talking to upstreams directly. The master's job is limited to: forking/respawning workers, running active health checks and broadcasting results + the registry roster to workers, owning the canonical service registry (workers forward register/heartbeat/deregister over IPC), hot-reloading config, and aggregating `/metrics` + leasing in-memory rate-limit tokens across workers.
-
-```
-                      +---------------------------+
-                      |       Client (WS/HTTPS)    |
-                      +-------------+--------------+
-                                    |
-                      (shared port — OS/cluster module
-                       balances accepted conns directly
-                       to a worker; no IPC on this path)
-                             |                |
-            +----------------v---+    +-------v-------------+
-            | Worker 1            |    | Worker 2            |
-            | Full HTTP/WS        |    | Full HTTP/WS        |
-            | pipeline, straight  |    | pipeline, straight  |
-            | to upstream         |    | to upstream         |
-            | + L1 In-Memory LRU  |    | + L1 In-Memory LRU  |
-            +-------+-------------+    +--------+------------+
-                    |      ^                    |      ^
-            (TCP/WSS Proxy)|            (TCP/WSS Proxy)|
-                    |      |                    |      |
-                    |      +----- control-plane IPC ----+
-                    |      (health broadcasts, registry    |
-                    |       mutations, config reload,      |
-                    |       metrics, rate-limit leases)     |
-                    |                  |                    |
-                    |          +-------v--------+            |
-                    |          | Master           |<----------+
-                    |          | control plane only:
-                    |          | forks/respawns workers,
-                    |          | owns the service registry,
-                    |          | hot-reloads config,
-                    |          | aggregates /metrics
-                    |          +-----------------+
-                    v
-      +-------------------------------------------+
-      |  Shared Distributed Tier (Redis):          |
-      |  - L2 Response Cache                       |
-      |  - Distributed Rate Limiter State (Lua)    |
-      |  - Dynamic Service Registry snapshot        |
-      |  - Debezium CDC → POST /__cdc/webhook,      |
-      |    explicit per-table invalidation mappings |
-      +------+---------------------------------+---+
-             |                                 |
-             ▼                                 ▼
-      +--------------+                  +--------------+
-      | Upstream A   |                  | Upstream B   |
-      +--------------+                  +--------------+
+```bash
+npm install ninja-reverse-proxy
+npx ninja-reverse-proxy --config config.yaml
 ```
 
 ---
 
-## 📐 Enterprise Design Patterns Implemented
+## Contents
 
-1. **Strategy Pattern (`ILoadBalancerStrategy`, `IRateLimiterAlgorithm`)**: Decouples algorithm selection from proxy execution. All 12 load balancing and 5 rate limiting algorithms implement common interfaces and are swapped at runtime.
-2. **Factory Pattern (`BalancerFactory`)**: Centralized instantiator that parses Zod schemas and generates configured load balancer strategies.
-3. **Dependency Inversion Principle (SOLID)**: Core proxy components depend strictly on abstractions (`ICache`, `IInvalidator`, `IServiceRegistry`), enabling seamless swapping between Memory, Redis, and Hybrid stores.
-4. **Koa/Express Onion Middleware Model**: Declarative pipeline (`RequestContext`, `MiddlewarePipeline`) executing CORS, Authentication, Tracing, Rate Limiting, Cache, and Circuit Breakers in non-blocking order.
-5. **Zero-Copy TCP Socket Tunneling**: Direct bidirectional piping (`clientSocket.pipe(targetSocket)`) for WebSocket and HTTPS connections.
+- [Highlights](#highlights)
+- [Architecture](#architecture)
+- [Features](#features)
+- [Performance](#performance)
+- [Verified behaviour](#verified-behaviour)
+- [Security defaults](#security-defaults)
+- [Testing](#testing)
+- [Quick start](#quick-start)
+- [Configuration](#configuration)
+- [Operations](#operations)
+- [Known limitations and roadmap](#known-limitations-and-roadmap)
+- [Documentation](#documentation)
 
 ---
 
-## 📂 Complete Repository Directory Structure
+## Highlights
 
-The following tree maps every single directory, file, and subsystem in the repository with its functional responsibility:
+- **Streaming datapath.** Request and response bodies are piped with native backpressure and are never held in memory whole. A 100 MB upload passes through with a SHA-256 match while proxy memory grows by about 43 MB.
+- **Every worker serves traffic.** Workers share the listening port and run the full pipeline themselves. The master is control-plane only and uses about 0.3% of total proxy CPU under load.
+- **12 load-balancing strategies**, 5 rate-limiting algorithms, classic and adaptive circuit breakers, retries with budgets and jitter, bulkheads, and an L1/L2 cache with CDC invalidation.
+- **Exactly-once retries for unsafe methods.** Under 1,500 concurrent 64 KB POSTs, the upstream receives every request exactly once.
+- **Operable in production.** Includes hot config reload, graceful shutdown, automatic worker respawn, Prometheus metrics, W3C trace context, readiness and liveness endpoints, and access logs with request IDs.
+- **Tested against the real binary.** Behavioural suites start the built proxy as separate processes with real upstreams and a real Redis. Mocks are not used to produce pass results.
 
-```text
-reverse-proxy/
-├── README.md                                  # Project overview, architecture & operational guide
-├── package.json                               # Dependencies, engine versions & test scripts
-├── pnpm-lock.yaml                             # Deterministic dependency lockfile
-├── tsconfig.json                              # TypeScript base compiler configuration
-├── tsconfig.build.json                        # Production build TS configuration (outputs to dist/)
-├── tsconfig.test.json                         # Test runner TS configuration (outputs to dist-test/)
-├── jest.config.ts                             # Jest testing framework configuration
-├── sonar-project.properties                   # SonarQube code quality & security gate settings
-├── config.yaml                                # Active reverse proxy configuration file
-├── config.example.yaml                        # Annotated reference configuration template
-├── .gitignore                                 # Ignored artifacts, logs & local certificates
-│
-├── deploy/                                    # Deployment & infrastructure manifests
-│   └── monitoring/
-│       ├── docker-compose.monitoring.yml      # Compose stack for Prometheus (:9090) & Grafana (:3000)
-│       ├── prometheus.yml                     # Prometheus scrape configuration for proxy :8443
-│       └── grafana/
-│           ├── dashboards/                    # Pre-provisioned JSON monitoring dashboards
-│           │   ├── cache.json                 # L1/L2 cache hit/miss ratio & eviction dashboard
-│           │   ├── circuit-breaker.json       # Circuit breaker state transitions & drop rates
-│           │   ├── load-balancer.json         # Per-upstream load distribution & active connections
-│           │   ├── proxy-overview.json        # High-level RPS, latency percentiles & error rates
-│           │   └── rate-limit.json            # HTTP 429 throttled requests & burst monitoring
-│           └── provisioning/
-│               ├── dashboards/dashboards.yaml # Dashboard provider mapping config
-│               └── datasources/datasources.yaml# Prometheus datasource connection definition
-│
-├── docs/                                      # 22 Architectural & Technical Deep Dives
-│   ├── 00-index.md                            # Documentation index & architecture map
-│   ├── 01-websocket.md                        # L4 TCP tunneling, HTTP Upgrade & WS sticky sessions
-│   ├── 02-tls-https.md                        # TLS termination, cert loading & HTTP 8080→8443 redirect
-│   ├── 03-load-balancing.md                   # 12 load balancing strategies & NGINX WRR math
-│   ├── 04-health-checks.md                    # Active HTTP ping probe & passive error event bus
-│   ├── 05-rate-limiting.md                    # 5 rate-limiting algorithms & SoftLimit burst policy
-│   ├── 06-circuit-breaker.md                  # Classic 3-state machine & Google SRE adaptive drop math
-│   ├── 07-caching.md                          # Invalidation strategies, Vary headers & Cache-Control
-│   ├── 08-master-worker-architecture.md       # Cluster IPC dispatch, worker restart & SIGTERM guard
-│   ├── 09-service-registry.md                 # Dynamic registration, heartbeat & atomic disk persistence
-│   ├── 10-middleware-pipeline.md              # Onion model, RequestContext & next() chaining
-│   ├── 11-observability.md                    # MetricsRegistry, OpenMetrics exposition & Prometheus
-│   ├── 12-https-request-flow.md               # End-to-end request lifecycle: TLS → Worker → Upstream
-│   ├── 13-config-zod-validation.md            # Zod runtime schema validation & SIGHUP hot-reload
-│   ├── 14-retry-bulkhead.md                   # Bulkhead slot isolation, RetryBudget & 4 jitter backoffs
-│   ├── 15-connection-pool.md                  # Keep-alive agents, maxSockets: 256 & socket reuse
-│   ├── 16-multi-tier-caching.md               # HybridCache: L1 RAM (<0.05ms) + L2 Redis write-through
-│   ├── 17-cdc-cache-invalidation.md           # Debezium CDC via POST /__cdc/webhook, explicit per-table mappings
-│   ├── 18-tracing.md                          # Distributed Tracer, span lifecycle & X-Trace-Id header
-│   ├── 19-readiness-liveness.md               # ReadinessProbe multi-check gate vs Liveness checks
-│   ├── 20-tenant-log-streamer.md              # Asynchronous batched webhook dispatch per tenant
-│   ├── 21-deployment.md                       # Local run, cert generation & Prometheus/Grafana stack
-│   └── 22-testing-strategy.md                 # 5-tier testing pyramid & strict verification philosophy
-│
-│   ├── REMEDIATION_PLAN.md                    # Audit-driven punch list behind the Phase A-F hardening work
-│   ├── diagrams/                              # Architecture diagrams (non-code assets)
-│   └── results/                               # Tiered test verification artifacts
-│       ├── README.md                          # Test reporting index & environment guidelines
-│       ├── unit-tests/
-│       │   └── README.md                      # Level 1: In-memory unit & algorithm audit scope
-│       ├── smoke-tests/
-│       │   └── README.md                      # Level 2: Transport & protocol smoke check specifications
-│       ├── integration-tests/
-│       │   └── README.md                      # Level 3: Strict 10-point real-application E2E suite
-│       ├── chaos-tests/
-│       │   └── README.md                      # Level 4: Fault injection, node kill & failover plans
-│       └── load-tests/
-│           └── README.md                      # Level 5: k6 sustained RPS & P99 latency criteria
-│
-├── logs/                                      # Access log output dir, created at runtime; gitignored
-│
-├── scripts/                                   # Operational & maintenance CLI utilities
-│   ├── README.md                              # Utility catalog & CLI argument reference
-│   ├── benchmark.ts                           # Batch HTTP/HTTPS concurrency benchmarker
-│   ├── generate-certs.sh                      # Self-signed TLS cert generator (cert.pem, key.pem)
-│   ├── interactive-algo-test.ts               # Interactive CLI visualizer for load balancing algorithms
-│   ├── migrate-config.ts                      # Configuration schema upgrade utility
-│   └── verify-all-features.ts                 # Full sequential feature verification utility
-│
-├── src/                                       # Core Reverse Proxy Engine
-│   ├── index.ts                               # CLI entrypoint & bootstrap orchestrator
-│   ├── lib.ts                                 # npm library entry point (createServer, reloadServerConfig, public barrels)
-│   │
-│   ├── balancer/                              # Load Balancing Subsystem
-│   │   ├── index.ts                           # Load balancer module exports
-│   │   ├── contracts/                         # Load balancing interfaces
-│   │   │   ├── balancer.interface.ts          # ILoadBalancer contract definition
-│   │   │   └── strategy.interface.ts          # IStrategy contract definition
-│   │   ├── core/                              # Core load balancer logic
-│   │   │   ├── load-balancer.ts               # LoadBalancer class with pickFiltered()
-│   │   │   └── strategy-registry.ts           # Registry mapping strategy names to instances
-│   │   ├── factory/                           # Strategy factory layer
-│   │   │   └── balancer.factory.ts            # Dynamic strategy instantiation from config
-│   │   └── strategies/                        # 12 Implemented Strategy Algorithms
-│   │       ├── adaptive-wrr.strategy.ts       # Latency EWMA dynamic weight balancing
-│   │       ├── consistent-hashing.strategy.ts # 150-virtual-node Ketama hash ring
-│   │       ├── ip-hash.strategy.ts             # Deterministic FNV-1a IP modulo hash
-│   │       ├── least-connections.strategy.ts  # Minimal active connection routing
-│   │       ├── least-response-time.strategy.ts# EWMA latency-sensitive routing
-│   │       ├── power-of-two.strategy.ts       # O(1) random two-choice selection (P2C)
-│   │       ├── random.strategy.ts             # Uniform random selection fallback
-│   │       ├── resource-based.strategy.ts     # Sidecar CPU/Memory telemetry-aware routing
-│   │       ├── round-robin.strategy.ts        # Classic sequential round-robin
-│   │       ├── sticky-sessions.strategy.ts    # Cookie-based (NINJA_ROUTE) session affinity
-│   │       ├── weighted-least-connections.strategy.ts # Active connections / weight ratio
-│   │       └── weighted-round-robin.strategy.ts       # Interleaved smooth NGINX WRR
-│   │
-│   ├── cache/                                 # Caching Subsystem
-│   │   ├── index.ts                           # Cache module exports
-│   │   ├── cache-manager.ts                   # Facade coordinating L1/L2 and CDC invalidators
-│   │   ├── contracts/                         # Cache contracts & interfaces
-│   │   │   ├── cache.interface.ts             # ICache contract (get, set, del, invalidate)
-│   │   │   ├── cache-config.interface.ts      # Cache configuration types
-│   │   │   └── invalidator.interface.ts       # IInvalidator contract
-│   │   ├── invalidation/                      # Cache invalidation mechanisms
-│   │   │   ├── debezium.invalidator.ts        # Debezium CDC event parser (explicit table→path mappings), fed by POST /__cdc/webhook
-│   │   │   ├── pattern.invalidator.ts         # Wildcard glob pattern cache purger
-│   │   │   └── tag.invalidator.ts             # Entity metadata tag purger
-│   │   ├── policies/                          # Caching policies & parsers
-│   │   │   ├── cache-control.parser.ts        # HTTP Cache-Control header parser
-│   │   │   ├── key-builder.ts                 # Deterministic query-normalized cache key builder
-│   │   │   ├── stale-if-error.ts              # Stale cache delivery on upstream 5xx errors
-│   │   │   └── stale-while-revalidate.ts      # Background revalidation without client stalls
-│   │   └── stores/                            # Cache storage implementations
-│   │       ├── hybrid.cache.ts                # Two-tier orchestrator (L1 Memory + L2 Redis)
-│   │       ├── in-memory-lru.ts               # Synchronous bounded LRU memory store
-│   │       └── redis.cache.ts                 # Distributed Redis client adapter
-│   │
-│   ├── config/                                # Configuration Engine
-│   │   ├── index.ts                           # Config module exports
-│   │   ├── config.loader.ts                   # YAML reader, environment resolver, validateConfig() & SIGHUP reloader
-│   │   └── schemas/                           # Zod Modular Schemas
-│   │       ├── admin.schema.ts                # Admin API configuration schema
-│   │       ├── balancer.schema.ts             # Load balancer options schema
-│   │       ├── cache.schema.ts                # Cache settings schema
-│   │       ├── discovery.schema.ts            # Service discovery & probe schema
-│   │       ├── observability.schema.ts        # Metrics, tracing & logging schema
-│   │       ├── ratelimit.schema.ts            # Rate limiter algorithms & stores schema
-│   │       ├── resilience.schema.ts           # Circuit breaker, retry & bulkhead schema
-│   │       └── server.schema.ts               # Server ports, TLS, workers & timeouts schema
-│   │
-│   ├── core/                                  # Core Cluster & Pipeline Orchestration
-│   │   ├── admin/
-│   │   │   └── admin.handler.ts               # Internal admin API route handler
-│   │   ├── cluster/                           # Master/Worker Cluster
-│   │   │   ├── master.ts                      # Control plane only: forks/respawns workers, owns the
-│   │   │   │                                  # service registry, hot-reloads config, aggregates /metrics
-│   │   │   └── worker.ts                      # Owns the full datapath: listens on the shared port and
-│   │   │                                      # runs the entire pipeline straight through to upstreams
-│   │   ├── pipeline/                          # Middleware Pipeline Execution
-│   │   │   ├── context.ts                     # RequestContext factory (IP, startTime, metadata)
-│   │   │   └── middleware.pipeline.ts         # Onion-model middleware pipeline runner
-│   │   ├── proxy/                             # Network Proxying & Connection Pools
-│   │   │   ├── connection.pool.ts             # Persistent httpAgent & httpsAgent connection pools
-│   │   │   └── websocket.handler.ts           # L4 bidirectional TCP pipe tunnel for WebSockets
-│   │   └── router/                            # Route Matching & Path Rules
-│   │       ├── route.matcher.ts               # First-match router with method guards
-│   │       └── route.types.ts                 # RouteRule definitions & path options
-│   │
-│   ├── discovery/                             # Service Discovery & Health Checking
-│   │   ├── index.ts                           # Discovery module exports
-│   │   ├── contracts/
-│   │   │   └── registry.interface.ts          # IServiceRegistry interface
-│   │   ├── health/                            # Health Probe Implementations
-│   │   │   ├── active.probe.ts                # Periodic active HTTP ping checker (checkUpstream)
-│   │   │   ├── health.manager.ts              # HealthManager tracking consecutive failure state
-│   │   │   └── passive.probe.ts               # Passive traffic error event bus observer
-│   │   └── registry/                          # Service Registries
-│   │       └── dynamic.registry.ts            # Dynamic registry with atomic .tmp disk snapshot
-│   │
-│   ├── middleware/                            # Standalone middleware used by the worker pipeline
-│   │   ├── auth.middleware.ts                 # Bearer token & API key authorization
-│   │   ├── cors.middleware.ts                 # CORS preflight & header injection
-│   │   └── tracing.middleware.ts              # Trace ID extraction & span generation
-│   │
-│   ├── observability/                         # Observability, Telemetry & Tracing
-│   │   ├── index.ts                           # Observability module exports
-│   │   ├── health/
-│   │   │   └── readiness.ts                   # Multi-check ReadinessProbe gating
-│   │   ├── logger/                            # Logging subsystems
-│   │   │   ├── logger.ts                      # Structured JSON console logger
-│   │   │   └── tenant-log.streamer.ts         # Multi-tenant asynchronous webhook log dispatcher
-│   │   ├── metrics/                           # Prometheus metrics
-│   │   │   ├── histogram.registry.ts          # Latency histogram with bucket aggregation
-│   │   │   ├── prometheus.exporter.ts         # MetricsRegistry formatting OpenMetrics exposition
-│   │   │   └── system.metrics.ts              # CPU load, memory RSS & process uptime collector
-│   │   └── tracing/                           # Distributed Tracing
-│   │       ├── tracer.ts                      # In-process Tracer managing span lifecycles
-│   │       └── w3c-trace-context.ts           # W3C traceparent header parsing & propagation
-│   │
-│   ├── ratelimit/                             # Rate Limiting Engine
-│   │   ├── index.ts                           # Rate limit module exports
-│   │   ├── rate-limiter.ts                    # RateLimiter facade — memory/redis/hybrid storage via Lua scripts
-│   │   ├── bounded-store.ts                   # Bounded Map store backing the in-memory algorithms
-│   │   ├── algorithms/                        # 5 Rate Limiting Algorithms
-│   │   │   ├── fixed-window.ts                # Discrete time-slice counter
-│   │   │   ├── leaking-bucket.ts              # Constant-rate queue drain
-│   │   │   ├── sliding-window-counter.ts      # Weighted previous/current window interpolation
-│   │   │   ├── sliding-window-log.ts          # Exact microsecond timestamp log
-│   │   │   └── token-bucket.ts                # Continuous refill token bucket with burst capacity
-│   │   └── policies/                          # Rate limit policies
-│   │       └── soft-limit.policy.ts           # Dynamic burst multiplier below load threshold
-│   │
-│   ├── resilience/                            # Fault Tolerance & Resilience Subsystem
-│   │   ├── index.ts                           # Resilience module exports
-│   │   ├── bulkhead/                          # Concurrency isolation
-│   │   │   └── bulkhead.ts                    # Slot-based concurrency isolation limiter
-│   │   ├── circuit-breaker/                   # Circuit Breakers
-│   │   │   ├── adaptive.circuit-breaker.ts    # Google SRE drop probability breaker
-│   │   │   ├── circuit-breaker.manager.ts     # Singleton manager caching breakers per upstream
-│   │   │   ├── classic.circuit-breaker.ts     # CLOSED → OPEN → HALF_OPEN state machine
-│   │   │   └── contracts/
-│   │   │       └── circuit-breaker.interface.ts # ICircuitBreaker contract
-│   │   └── retry/                             # Retry Engine
-│   │       ├── idempotency.ts                 # isMethodRetrySafe() — blind-retry safety for mutating methods
-│   │       ├── retry-budget.ts                # Capped retry ratio budget (e.g. max 15%)
-│   │       └── backoff/                       # 4 Jitter Backoff Algorithms
-│   │           ├── decorrelated-jitter.backoff.ts # AWS decorrelated sleep growth backoff
-│   │           ├── equal-jitter.backoff.ts        # Base + random jitter backoff
-│   │           ├── exponential.backoff.ts         # Deterministic exponential doubling backoff
-│   │           └── full-jitter.backoff.ts         # Uniform randomized 0..cap full jitter backoff
-│   │
-│   └── types/                                 # Global TypeScript Type Definitions
-│       ├── balancer.types.ts                  # Load balancer types & strategy names
-│       └── upstream.types.ts                  # Upstream definition, health status & metrics types
-│
-└── tests/                                     # 5-Tier Verification Framework
-    ├── README.md                              # Test pyramid documentation & runner commands
-    ├── full-system-audit.mjs                  # Level 1: 183-test in-memory unit audit script
-    ├── live-integration-test.mjs              # Level 2: 6-point protocol smoke test script
-    ├── universal-app-test.mjs                 # Level 3: 10-point strict real-app integration test
-    ├── datapath-regression.mjs                # Binary passthrough, SSE TTFB, concurrency & abort regressions
-    ├── production-gates.mjs                   # Slow-client RSS, large upload, master CPU share & cross-worker rate limit
-    ├── production-preflight-check.mjs         # 10-point pre-deploy readiness check
-    ├── chaos-resilience-suite.mjs              # Circuit breaker, abort leaks, WS errors, JSON crash traps, SIGTERM drain
-    ├── executive-showcase-suite.mjs           # End-to-end pass across all 7 pillars (LB, resilience, cache, DoS, observability)
-    ├── aggressive-fire-test.mjs               # High-concurrency, upstream-kill, cache-thrash & abort-storm fire drill (npm run test:fire)
-    ├── ddia-benchmarks-test.mjs                # Backoff/circuit-breaker math checks against real src/ modules
-    ├── ddia-transactions-suite.mjs            # Idempotency, bulkhead & timeout checks against real src/ modules
-    ├── ddia-chapter8-distributed-troubles-suite.mjs # Real socket timeouts, jitter, clock monotonicity & registry eviction
-    ├── rate-limit-redis-verification.mjs      # Redis-backed rate limit shared across workers, talking to Redis directly
-    ├── adversarial-exploit-harness.mjs        # Fuzzing / exploit-shaped request harness
-    ├── canary-gateway-verification.mjs        # Weighted canary routing verification
-    ├── circuit-breaker-recovery-test.mjs      # CLOSED→OPEN→HALF_OPEN→CLOSED recovery timing
-    ├── e2e-comprehensive-verification.mjs     # Baseline/canary routing, headers, cookies, metrics E2E pass
-    ├── e2e-master-verification.mjs            # Full-stack E2E pass with markdown/JSON report output
-    ├── headers-and-cache-suite.mjs            # Proxy header injection & cache header behavior
-    ├── stress-and-load-suite.mjs              # Sustained concurrency stress pass
-    ├── safe-stress-benchmark.mjs              # Bounded-concurrency benchmark (safe for CI)
-    ├── ultimate-beast-benchmark.mjs           # High-concurrency benchmark pass
-    ├── fastapi-advanced-features.mjs          # Polyglot audit: Python/FastAPI backend
-    ├── fastapi-gateway-verification.mjs       # Polyglot audit: Python/FastAPI backend
-    ├── java-qkd-gateway-verification.mjs      # Polyglot audit: Java/Spring Boot backend
-    ├── kotlin-advanced-gateway-audit.mjs      # Polyglot audit: Kotlin/Ktor backend
-    ├── kotlin-ktor-gateway-verification.mjs   # Polyglot audit: Kotlin/Ktor backend
-    ├── verify-current-updates.mjs             # Ad-hoc regression script for in-progress changes
-    ├── simulations/                           # DDIA concept models — NOT proxy tests, do not count toward
-    │   │                                      # pass totals or list as proxy features (see simulations/README.md)
-    │   ├── README.md
-    │   ├── ddia-transactions-conceptual.mjs   # Lost-update (ETag) & SAGA/2PC rollback — classes local to the file
-    │   ├── ddia-fencing-tokens-conceptual.mjs # Zombie-leader fencing — src/ has no real fencing implementation
-    │   ├── ddia-replication-suite.mjs         # DDIA Ch.5 replication concepts (npm run test:replication)
-    │   └── ddia-replication-extreme-chaos.mjs # DDIA Ch.5 replication concepts (npm run test:replication:extreme)
-    ├── chaos/                                 # Chaos engineering suites
-    │   └── upstream-failure.chaos.ts          # Level 4: Upstream kill & failover chaos test
-    ├── integration/                           # Compiled Integration Tests
-    │   ├── failover.test.ts                   # Circuit breaker failover via load balancer
-    │   ├── hot-reload.test.ts                 # Configuration hot-reload on SIGHUP
-    │   ├── http-proxy.test.ts                 # HTTP upstream request & body routing
-    │   └── websocket.test.ts                  # WebSocket upgrade tunneling
-    ├── load/                                  # Load & stress testing
-    │   ├── config.load.yaml                   # Proxy config used by the k6/load-runner scripts
-    │   ├── load-runner.mjs                     # Node-driven load runner & report writer
-    │   ├── run-k6-benchmark.mjs                # k6 CLI wrapper & result collector
-    │   └── k6/                                # Level 5: k6 Load & Stress Benchmark Scripts
-    │       ├── smoke.js                       # 1 VU, 30s baseline sanity check
-    │       ├── stress.js                      # Ramp 0 to 200 VUs over 9m sustained stress
-    │       ├── spike.js                       # Sudden burst surge to 500 VUs
-    │       ├── cache.js                       # Cache hit/miss ratio under load
-    │       ├── rate-limit.js                  # 429 throttling behavior under burst
-    │       ├── sliding.js                     # Sliding window algorithm accuracy under load
-    │       ├── sticky.js                      # Sticky-session affinity under load
-    │       └── live-benchmark.js              # Grafana-fed live benchmark run
-    ├── mocks/                                 # Test Mock Factories
-    │   └── target-servers.mock.ts             # Ephemeral mock HTTP server test factory
-    └── unit/                                  # Compiled Unit Tests
-        ├── balancer/                          # Load balancer unit tests
-        │   ├── .gitkeep
-        │   ├── balancerAllStrategies.test.ts  # All 12 strategy pick() tests
-        │   ├── loadBalancer.test.ts           # pickFiltered() & connection tracking tests
-        │   └── loadBalancerAdvanced.test.ts   # WRR math, P2C & consistent hash tests
-        ├── cache/                             # Cache unit tests
-        │   ├── .gitkeep
-        │   ├── cache.test.ts                  # InMemoryLRU & HybridCache tests
-        │   └── cacheAllFeatures.test.ts       # KeyBuilder, SWR, StaleIfError & CDC tests
-        ├── discovery/                         # Discovery unit tests
-        │   ├── .gitkeep
-        │   ├── discovery.test.ts              # ServiceRegistry & ActiveProbe tests
-        │   └── discoveryAllFeatures.test.ts   # PassiveProbe & disk snapshot tests
-        ├── observability/                     # Observability unit tests
-        │   └── observabilityAllFeatures.test.ts # Histograms, MetricsRegistry & log streamer tests
-        ├── ratelimit/                         # Rate limit unit tests
-        │   ├── .gitkeep
-        │   ├── rateLimitAllAlgorithms.test.ts # All 5 algorithms & SoftLimitPolicy tests
-        │   └── rateLimiter.test.ts            # RateLimiter facade & memory store tests
-        └── resilience/                        # Resilience unit tests
-            ├── .gitkeep
-            ├── circuitBreaker.test.ts         # ClassicCB & AdaptiveCB tests
-            ├── resilience.test.ts             # Bulkhead & retry handler tests
-            └── resilienceAllFeatures.test.ts  # All 4 jitter backoffs & RetryBudget tests
+---
+
+## Architecture
+
+[![Ninja Reverse Proxy architecture](./docs/diagrams/architecture.svg)](https://excalidraw.com/#json=6b4-iDt2VNYEa5rgLmbhb,2ArESOtYrPS2WS3efvUtIw)
+
+**[Open the interactive diagram in Excalidraw →](https://excalidraw.com/#json=6b4-iDt2VNYEa5rgLmbhb,2ArESOtYrPS2WS3efvUtIw)**
+
+### System view
+
+```mermaid
+flowchart LR
+    subgraph Clients
+        direction TB
+        B["Browsers / apps"]
+        S["Services"]
+        LB["Cloud LB / CDN<br/>(in trustedProxies)"]
+    end
+
+    subgraph Proxy["Ninja Reverse Proxy"]
+        direction TB
+        DP["<b>Data plane</b><br/>N workers on one shared port<br/>───────────<br/>full request pipeline<br/>L1 cache per worker<br/>upstream keep-alive pools<br/>streaming with backpressure"]
+        CP["<b>Control plane</b> (master)<br/>───────────<br/>supervise / respawn workers<br/>active health checks<br/>service registry + snapshot<br/>config validation + rolling reload<br/>CDC fan-out · metrics aggregation<br/>rate-limit token leasing"]
+        CP -. "health, roster,<br/>config, invalidations" .-> DP
+        DP -. "registry writes,<br/>metric snapshots" .-> CP
+    end
+
+    subgraph Upstreams["Upstream pools (per route / tenant)"]
+        direction TB
+        PA["/api → app-a, app-b"]
+        PB["/billing → billing-1..3"]
+        PC["canary → app-v2"]
+    end
+
+    REDIS[("Redis<br/>rate limits (Lua)<br/>L2 cache")]
+    OBS["Prometheus<br/>+ Grafana"]
+    DBZ["Debezium /<br/>Kafka bridge"]
+    OPS["Operators"]
+
+    B & S --> LB --> DP
+    B & S --> DP
+    DP ==>|"streamed, pooled"| Upstreams
+    CP -. "probe /health" .-> Upstreams
+    DP <--> REDIS
+    OBS -->|"scrape /metrics"| DP
+    DBZ -->|"POST /__cdc/webhook"| DP
+    OPS -->|"/__registry, /__admin<br/>(ADMIN_SECRET)"| DP
+```
+
+### Request lifecycle inside a worker
+
+```mermaid
+flowchart LR
+    A["Accept<br/>(TLS terminate)"] --> CTX["Context<br/>request id,<br/>client IP via<br/>trustedProxies"]
+    CTX --> RM["Route match"]
+    RM --> CORS["CORS<br/>(per route)"]
+    CORS --> TR["Tracing<br/>traceparent"]
+    TR --> AUTH["Auth<br/>(per route)"]
+    AUTH --> RL{"Rate limit<br/>global, then route"}
+    RL -- over limit --> R429["429 + Retry-After"]
+    RL -- ok --> CACHE{"Cache<br/>L1 → L2"}
+    CACHE -- "HIT / STALE" --> SERVE["Serve cached<br/>(SWR refresh in background)"]
+    CACHE -- MISS --> BODY{"Body limit<br/>while streaming"}
+    BODY -- too large --> R413["413<br/>upstream gets 0 bytes"]
+    BODY --> PICK["Pick upstream<br/>route-scoped pool,<br/>healthy only,<br/>canary / sticky / strategy"]
+    PICK -- "none healthy" --> R503["503<br/>never borrows<br/>another route's pool"]
+    PICK --> CB{"Circuit breaker<br/>+ bulkhead"}
+    CB -- open --> R503
+    CB --> UP["Pooled upstream call<br/>stream both ways<br/>with backpressure"]
+    UP -- "safe failure,<br/>budget left" --> RETRY["Retry with jitter<br/>(bounded body replay)"]
+    RETRY --> PICK
+    UP --> RESP["Stream response<br/>to client"]
+    R429 & R413 & R503 & SERVE & RESP --> DONE["On res 'close' (exactly once):<br/>access log + metrics + gauge"]
+```
+
+**Data plane (workers).** Every worker accepts connections on the shared port and runs the whole pipeline above. Request and response bodies are streamed with backpressure over pooled keep-alive connections. No request or response data crosses process boundaries, so throughput scales with the number of workers.
+
+**Control plane (master).** The master never touches traffic. It supervises workers (a crashed worker is respawned in well under a second) and runs health checks. It owns the service registry and validates and rolls out new configuration. It also fans CDC cache invalidations out to every worker, aggregates metrics, and leases rate-limit tokens across workers when Redis is not configured.
+
+**Logging and metrics.** Every request, including `429`, `413`, `503`, CORS preflights, cache hits and client aborts, is recorded exactly once. A single `res.once('close')` hook writes the access-log line, the Prometheus sample and the active-connection gauge, so no response path can skip or double-count them.
+
+Design details: [docs/08-master-worker-architecture.md](./docs/08-master-worker-architecture.md) · [docs/10-middleware-pipeline.md](./docs/10-middleware-pipeline.md)
+
+---
+
+## Features
+
+| Area | Capabilities |
+|---|---|
+| **Load balancing** | Round robin, weighted round robin (smooth, nginx-style), least connections, weighted least connections, least response time (EWMA), power of two choices, consistent hashing (virtual nodes), IP hash, sticky sessions, resource-based (live telemetry), adaptive weighted round robin, random. Slow start for new upstreams. |
+| **Traffic management** | Path routing with per-route upstream pools, canary releases (weight, sticky cookie, header override, IP allowlist, capacity guard), route-level sticky cookies, WebSocket tunnelling, server-sent events, optional compression. |
+| **Rate limiting** | Token bucket, leaking bucket, fixed window, sliding-window log, sliding-window counter. Memory, Redis (atomic Lua) or hybrid storage. Per-IP, per-route, per-API-key and per-header dimensions. Soft limits and `X-RateLimit-*` and `Retry-After` headers. |
+| **Resilience** | Classic circuit breaker and adaptive breaker (Google SRE client-side throttling), retries with exponential, full, equal or decorrelated jitter, retry budgets, per-upstream bulkheads, connect and read timeouts. Client aborts are not counted as upstream failures. |
+| **Caching** | L1 in-memory LRU plus L2 Redis. `Cache-Control` parsing, query-parameter normalisation, `Vary`, stale-while-revalidate, stale-if-error, and pattern and tag purges. Debezium CDC invalidation (SQL and MongoDB events) delivered by webhook and applied cluster-wide. |
+| **Service discovery** | Static upstreams plus a runtime registry (register, heartbeat, deregister) with disk snapshots. Active HTTP health probes with healthy and unhealthy thresholds, and passive failure detection. |
+| **Request limits** | Global and per-route body size limits enforced while streaming. Requests over the limit get `413`, and the upstream receives no bytes. |
+| **TLS** | HTTPS termination, optional HTTP to HTTPS redirect, and `X-Forwarded-Proto` propagation. Fails fast on missing or invalid certificates. |
+| **Observability** | Prometheus metrics (latency histograms, RPS, active connections, breaker state, cache operations), W3C `traceparent` propagation, request IDs in every access-log line, per-tenant log streaming to webhooks, and readiness and liveness endpoints. Grafana dashboards are included. |
+| **Operations** | Zod-validated configuration, hot reload without restarts, graceful shutdown that drains connections and flushes logs, automatic worker respawn, Docker images (including distroless), and Kubernetes manifests. |
+
+---
+
+## Performance
+
+Benchmarked against nginx 1.31 on the same machine, with the same upstream and the same number of workers for both. Load was generated with `wrk`: 10 s warm-up, then 30 s per stage.
+
+**Machine:** Apple M5 (10 cores), 16 GB RAM, Node.js 20.20, 4 workers per proxy.
+**Script:** [`scripts/bench-vs-nginx.mjs`](./scripts/bench-vs-nginx.mjs). **Full report:** [`docs/results/bench-vs-nginx.md`](./docs/results/bench-vs-nginx.md).
+
+### Throughput and latency
+
+| Payload | Connections | nginx RPS | Ninja RPS | nginx p99 | Ninja p99 | nginx errors | Ninja errors |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 1 KB | 100 | 44,740 | 18,438 | 8.5 ms | 20.7 ms | 0 | 0 |
+| 1 KB | 500 | 45,691 | 19,650 | 80.0 ms | **71.5 ms** | 25 | **0** |
+| 1 MB | 100 | 1,734 | **1,732** | 90.8 ms | **83.8 ms** | 0 | 0 |
+
+**Summary**
+- **Large payloads (1 MB):** throughput matches nginx, and p99 latency is lower.
+- **Small requests (1 KB) at 500 connections:** zero errors, and p99 latency is lower than nginx's.
+- **Small requests, raw throughput:** about 42% of nginx's. This is the per-request cost of a JavaScript pipeline compared with C. See [limitations](#known-limitations-and-roadmap).
+
+### With every feature enabled
+
+The same benchmark was run with rate limiting (Redis), caching, tracing, access logging and metrics all turned on:
+
+| Payload | Connections | RPS | p50 | p99 | Errors |
+|---|---:|---:|---:|---:|---:|
+| 1 KB | 100 | 34,605 | 2.8 ms | 5.3 ms | 0 |
+| 1 KB | 500 | 33,924 | 13.3 ms | 96.9 ms | 0 |
+| 1 MB | 100 | 1,758 | 54.9 ms | 83.8 ms | 0 |
+
+Cacheable responses are served from the L1 cache without reaching the upstream. That is why throughput with caching on is higher than the plain proxy figure above.
+
+### Resource efficiency
+
+| Property | Measured |
+|---|---|
+| CPU cost per 1,000 proxied requests | 235 ms |
+| Master process share of total CPU under load | about 0.3% |
+| Memory growth while streaming a 100 MB upload | about 43 MB |
+| Memory growth while trickling a 200 MB response to a slow client | under 100 MB (gate) |
+| Memory under sustained large-body load | plateaus with no growth over time (leak gate) |
+
+---
+
+## Verified behaviour
+
+### Production gates
+
+[`tests/production-gates.mjs`](./tests/production-gates.mjs) runs the built proxy as a separate process and fails the build if any of these properties regress:
+
+| Gate | Property enforced |
+|---|---|
+| Slow client | Trickling a 200 MB response to a slow reader keeps proxy memory growth under 100 MB |
+| Large upload | A 100 MB streamed POST arrives intact (SHA-256 match) with bounded memory |
+| Control-plane cost | Master CPU stays under 10% of total proxy CPU across 5,000 requests |
+| CPU budget | CPU per 1,000 requests stays within the recorded per-machine baseline |
+| Cluster rate limit | `maxRequests=100` holds across 4 workers for one client IP (100 ± 10 of 400 allowed) |
+| Connection burst | A sustained burst of 500 concurrent connections keeps the error rate under 1% |
+| No leak | Memory plateaus under sustained large-body load |
+
+### Datapath regression suite
+
+[`tests/datapath-regression.mjs`](./tests/datapath-regression.mjs) has 18 behavioural cases. They include:
+- byte-exact binary passthrough
+- SSE first byte delivered before the stream ends
+- zero duplicate deliveries for 1,500 concurrent POSTs
+- 20 MB responses passing intact
+- client aborts not tripping the breaker
+- route isolation: a route whose upstreams are all down returns `503` and never borrows another route's upstream
+- cache isolation between routes
+- bounded retry buffers
+- exactly-once access logging
+
+### 30-minute mixed-traffic soak with every feature enabled
+
+[`scripts/soak.mjs`](./scripts/soak.mjs) runs the real proxy (4 workers), five upstream processes and Redis for 30 minutes under mixed traffic. The traffic includes GETs, POSTs, uploads, downloads, SSE, WebSockets, CORS preflights, spoofed headers, oversized bodies and client aborts. During the run it also performs live operator actions: runtime upstream registration, a config hot reload, and `kill -9` on a worker.
+
+Every feature check reads the proxy's own metrics, Redis and logs, not the load generator's counters:
+
+| Feature | Evidence from the run |
+|---|---|
+| Rate limiting (Redis) | 70,887 `429` responses enforced; spoofed `X-Forwarded-For` produced no extra keys |
+| Caching and CDC invalidation | 42,887 cache hits; each webhook event caused a cache miss on the next request |
+| Circuit breaker | Opened and closed again 22 times against a flapping upstream |
+| Health checks | The flapping upstream was marked down and back up automatically |
+| Load balancing | Traffic spread across all 3 pool upstreams |
+| Canary | 10.1% of traffic routed to canary (target 10%) |
+| WebSockets and SSE | 2,990 of 2,990 WebSocket messages delivered; SSE streams delivered |
+| CORS | Disallowed origins received the CORS header 0 times |
+| Body limits | 7,575 oversized requests rejected with `413` before reaching the upstream |
+| Retries | Retries observed, and 0 duplicate POST deliveries |
+| Byte integrity | 145,752 SHA-256 checks on uploads and downloads, 0 failures |
+| Worker crash recovery | A worker killed with `kill -9` was respawned in 344 ms; 0 unplanned crashes |
+| Runtime registration and hot reload | A registered upstream received traffic; the reloaded rate limit took effect without a restart |
+
+---
+
+## Security defaults
+
+The proxy is meant to sit in front of several tenants, so its defaults are restrictive:
+
+| Concern | Default behaviour |
+|---|---|
+| Client IP spoofing | `trustProxy` is `false`. When enabled, `trustedProxies` is required, and `X-Forwarded-For` is read from the rightmost untrusted hop. |
+| SSRF through runtime registration | Admin-API registrations that resolve to loopback, RFC 1918, link-local (including cloud metadata `169.254.169.254`), unspecified, multicast or IPv4-mapped addresses are rejected. Alternative IP encodings and userinfo tricks are rejected too, and resolved addresses are pinned against DNS rebinding. Exceptions are explicit through `admin.registrationAllowlist`. Upstreams in the config file are not affected. |
+| CORS | Configured per route. Credentials are sent only for an explicitly matched origin, never with a wildcard. |
+| Cross-route isolation | Upstream selection is scoped to the matched route. A route whose upstreams are all down returns `503` and never borrows another route's upstreams. |
+| Control plane | All `/__*` endpoints require `ADMIN_SECRET`. |
+| Request size | Body limits are enforced while streaming, so the upstream never receives an oversized body. |
+
+---
+
+## Testing
+
+| Suite | Scope | Checks |
+|---|---|---:|
+| `npm test` | Unit and integration tests: algorithms, state machines, schemas, registry, HTTP and WebSocket integration | 116 |
+| `tests/full-system-audit.mjs` | Every subsystem exercised through its public API | 176 |
+| `tests/datapath-regression.mjs` | Streaming, integrity, retries, isolation and logging against the real proxy | 18 |
+| `tests/production-gates.mjs` | Memory, CPU, burst and leak gates against the real proxy | 7 |
+| `tests/tls-e2e.mjs` | HTTPS, WSS, large transfers over TLS, redirects, certificate failures | ✓ |
+| `tests/ssrf-admin.mjs` | Denied ranges, encodings, allowlist scope | ✓ |
+| `tests/access-log-integrity.mjs` | Exactly-once access logging by request ID, flush on shutdown | ✓ |
+| `tests/chaos-resilience-suite.mjs` | Upstream failures, flapping, timeouts, recovery | 12 |
+| `tests/executive-showcase-suite.mjs` | End-to-end feature walkthrough across 7 areas | 19 |
+| `tests/production-preflight-check.mjs` | Startup, configuration and readiness checks | 10 |
+| `tests/rate-limit-redis-verification.mjs` | Redis Lua rate limiting across workers | ✓ |
+| `npm run test:fire` | High-concurrency fire test | 5 |
+| `scripts/check-test-integrity.mjs` | Fails if any suite tests a class defined inside the test itself | ✓ |
+| `npm run audit:arch` | Import-graph dead-code analysis plus behavioural suites | ✓ |
+
+Distributed-systems concept models (replication, fencing tokens, sagas) live separately in [`tests/simulations/`](./tests/simulations/). They are not counted in the totals above.
+
+```bash
+npm run build
+npm test
+node tests/datapath-regression.mjs
+node tests/production-gates.mjs
 ```
 
 ---
 
-## ⚡ Core Systems & Features
+## Quick start
 
-### 1. Advanced Load Balancing Engine (12 Strategies)
-All load balancing strategies are dynamically validated using Zod schemas and instantiated via `BalancerFactory`:
+```bash
+git clone https://github.com/praveenkumar-co/reverse-proxy.git
+cd reverse-proxy
+pnpm install
+npm run build
 
-* **Weighted Round-Robin (WRR)**: Smooth interleaved scheduling (NGINX style) using `currentWeight` adjustments.
-* **Adaptive Weighted Round-Robin**: Automatically modifies weights in real time based on latency EWMA and request error rates.
-* **Power of Two Choices (P2C)**: Pick two random healthy upstreams and route to the one with the lowest active connections ($O(1)$ efficiency).
-* **Least Connections**: Route to the healthy upstream with the fewest active connections.
-* **Weighted Least Connections**: Select using the `activeConnections / weight` ratio.
-* **Least Response Time**: Route using latency EWMA (Exponentially Weighted Moving Average).
-* **Consistent Hashing**: Distributed virtual node (150 replicas) ring mapping client IP to upstreams with minimum cache eviction.
-* **IP Hash**: FNV-1a hash-modulo routing using client IP.
-* **Sticky Sessions**: Cookie-based (`NINJA_ROUTE`) session affinity.
-* **Resource-Based**: Telemetry-aware load routing using live CPU and memory metrics reported by sidecars.
-* **Random Selection**: Fallback randomized distribution.
+cp config.example.yaml config.yaml      # edit upstreams and routes
+ADMIN_SECRET=change-me npm start
+```
 
----
+Docker:
 
-### 2. High-Performance Multi-Tier Caching & Invalidation
-* **L1/L2 Hybrid Caching**: In-memory LRU cache (L1 RAM) backed by Redis (L2 Distributed Store) with automatic L1 warming & background synchronization.
-* **Debezium CDC (Change Data Capture) Invalidation**: Receives events via `POST /__cdc/webhook` (an admin-token-gated endpoint — a Debezium HTTP sink or Kafka consumer bridge posts here, not Redis pub/sub, which was removed for silently dropping events during Redis reconnects). Parses transaction log updates from SQL databases and MongoDB (supporting ObjectId `$oid` conversions) to invalidate cached paths instantly, cluster-wide (every worker's own L1 cache is purged, not just the one that received the webhook):
-  * *SQL Event Map*: `{"op":"u", "source":{"table":"orders"}, "after":{"id":999}}` $\rightarrow$ Invalidates `/api/orders/999`.
-  * *Mongo Event Map*: `{"op":"u", "source":{"collection":"orders"}, "after":{"_id":{"$oid":"60d5ec4b..."}}}` $\rightarrow$ Invalidates matching mapped paths.
-* **Pattern & Tag-Based Invalidation**: Glob pattern matching (`PatternInvalidator`) and metadata grouping (`TagInvalidator`).
-* **Cache Control Directives (`CacheControlParser`)**: Parses standards-compliant HTTP headers (`no-store`, `no-cache`, `max-age`, `s-maxage`, `private`).
-* **Cache Normalization (`KeyBuilder`)**: Strips marketing query parameters (`utm_source`, `fbclid`) and handles `Vary` headers (`Accept-Encoding: gzip`).
-* **Advanced Cache Policies**:
-  * `stale-while-revalidate`: Serves stale cache while triggering concurrent lock-free background revalidation (preventing Thundering Herd / Cache Stampedes).
-  * `stale-if-error`: Serves expired stale cache during upstream 5xx or network outages.
+```bash
+docker build -f deploy/docker/Dockerfile -t ninja-reverse-proxy .
+docker run -p 8080:8080 -e ADMIN_SECRET=change-me \
+  -v $(pwd)/config.yaml:/etc/ninja-proxy/config.yaml ninja-reverse-proxy
+```
+
+Kubernetes manifests (Kustomize base and overlays) are in [`deploy/k8s`](./deploy/k8s). A Prometheus, Grafana and Alertmanager stack is in [`deploy/monitoring`](./deploy/monitoring).
 
 ---
 
-### 3. Distributed Rate Limiting & Throttling
-* **5 Algorithms**: `token-bucket`, `leaking-bucket`, `fixed-window`, `sliding-window-log`, and `sliding-window-counter`.
-* **Atomic Redis Lua Scripts**: Server-side Lua script execution preventing race conditions across distributed proxy nodes.
-* **Soft Limit Warning & Burst Policy**: Dynamically increases burst limit ($1.5\times$ base limit) when current system load is below soft threshold.
-* **Multi-Dimension Rules**: Independent rate limiting rules evaluated per IP, Route, API-Key, and Header combination (`rl:ip:/api/v1:10.0.0.1`).
+## Configuration
 
----
-
-### 4. Advanced Fault Tolerance & Resilience
-* **Classic Circuit Breaker**: Standard state machine (`CLOSED` $\rightarrow$ `OPEN` $\rightarrow$ `HALF_OPEN`) based on consecutive failure thresholds.
-* **Google SRE EWMA Adaptive Circuit Breaker**: Rate-based shedding model using Google SRE probability math:
-  $$P = \frac{\text{requests} - K \times \text{accepts}}{\text{requests} + 1}$$
-* **Bulkhead Pattern**: Concurrency isolation slots preventing slow upstreams from exhausting worker thread pools.
-* **4 Jitter Backoff Algorithms**:
-  * `ExponentialBackoff`: Deterministic doubling.
-  * `FullJitterBackoff`: $Random(0, min(cap, base \times 2^{attempt}))$.
-  * `EqualJitterBackoff`: $\frac{temp}{2} + Random(0, \frac{temp}{2})$.
-  * `DecorrelatedJitterBackoff`: $Random(base, previousSleep \times 3)$.
-* **Retry Budgets**: Capped retry allowance (e.g. max 15% retry budget) to prevent upstream retry storms.
-
----
-
-### 5. Dynamic Service Registry & Health Probes
-* **Dynamic Self-Registration REST API**: Upstreams can self-register, heartbeat, and deregister (`/__registry/register`, `heartbeat`, `deregister`).
-* **SSRF-Safe Registration**: `POST /__registry/register` denies by default any URL that resolves to a loopback, private (RFC1918), link-local, unspecified, multicast, broadcast, or IPv4-mapped-IPv6 address — plus rejects userinfo-in-URL and non-http(s) schemes. `admin.registrationAllowlist` is the one way to exempt a specific CIDR/IP or hostname (e.g. `["127.0.0.1/32", "10.0.0.0/8"]`); a normal public address is always allowed and needs no entry. The validated address is pinned into the registered service (`metadata.pinnedAddress`), so a DNS name that resolves safely at registration time can't be re-pointed at a private address afterward. This check only applies to admin-API registrations — upstreams listed in `config.yaml` are never subject to it.
-* **Disk Snapshot Persistence**: Automatic rehydration of services from `registry.json` snapshot backups on proxy restart.
-* **Dual Health Probes**: Active HTTP ping probes (`checkUpstream`) + Passive background failure monitors.
-
----
-
-### 6. Observability, Telemetry & Multi-Tenant Logging
-* **Prometheus Exposition Endpoint (`/metrics`)**: Exposes latency percentiles (P50, P95, P99), RPS, active connections, and circuit breaker status.
-* **5 Auto-Provisioned Grafana Dashboards**: Visual monitoring dashboards for Proxy Overview, Load Balancers, Cache, Circuit Breakers, and Rate Limiters.
-* **Tenant Log Streamer**: Webhook log streaming engine dispatching structured JSON access logs to tenant HTTP webhooks.
-
----
-
-## 📄 Complete Production `config.yaml` Reference
+Configuration is YAML, validated with Zod at startup. Invalid configuration fails fast with a precise error. The documented example below is abbreviated; the full file is [`config.example.yaml`](./config.example.yaml).
 
 ```yaml
 server:
-  host: "0.0.0.0"
   port: 8080
-  httpsPort: 8443
-  workers: 4
+  workers: 0                       # 0 = one per CPU core
+  trustProxy: true
+  trustedProxies: ["10.0.0.5"]     # exact proxy IPs; required when trustProxy is true
+  maxRequestBodyBytes: 10485760
+
+tls:
+  enabled: true
+  cert: "./certs/cert.pem"
+  key: "./certs/key.pem"
+  redirectHttp: true
 
 upstreams:
-  - id: "app-node-1"
-    url: "http://127.0.0.1:3000"
-    weight: 3
-    maxConnections: 500
-    healthPath: "/health"
-  - id: "app-node-2"
-    url: "http://127.0.0.1:3001"
-    weight: 1
-    maxConnections: 500
-    healthPath: "/health"
+  - { id: app-a, url: "http://10.0.1.10:3000", weight: 3 }
+  - { id: app-b, url: "http://10.0.1.11:3000", weight: 1 }
+
+routes:
+  - path: "/api"
+    upstreams: ["app-a", "app-b"]
+    maxBodyBytes: 1048576
+    cors: { origins: ["https://app.example.com"], credentials: true }
+    rateLimit: { algorithm: token-bucket, storage: redis, windowMs: 60000, maxRequests: 100 }
+    cache: { enabled: true, ttlSeconds: 60 }
+    canary: { enabled: true, canaryUpstream: app-b, baselineUpstream: app-a, weight: 10 }
 
 loadBalancing:
-  strategy: "weighted-round-robin"  # Options: round-robin, least-connections, power-of-two, consistent-hashing, adaptive-wrr, resource-based
-  stickyCookieName: "NINJA_ROUTE"
-
-rateLimit:
-  enabled: true
-  storage: "memory"                 # Options: memory, redis, hybrid
-  algorithm: "token-bucket"         # Options: fixed-window, sliding-window-log, sliding-window-counter, token-bucket, leaking-bucket
-  windowMs: 60000
-  maxRequests: 1000
-  softLimit: true
-  dimensions:
-    - dimension: "ip"
-      maxRequests: 100
-      windowMs: 60000
-    - dimension: "api-key"
-      maxRequests: 500
-      windowMs: 60000
-
-cache:
-  enabled: true
-  ttlSeconds: 60
-  l1MaxSize: 1000
-  staleWhileRevalidate: true
-  staleIfError: true
-  debezium:
-    enabled: true
-    channel: "debezium-cdc-events"  # unused by the webhook path below; kept for a future Kafka/Streams bridge
-    mappings:
-      - table: "orders"
-        pathPattern: "/api/orders/{id}"
-  # Events reach the proxy via POST /__cdc/webhook (admin-token gated), not this channel —
-  # see docs/17-cdc-cache-invalidation.md.
+  strategy: power-of-two
 
 resilience:
-  circuitBreaker:
-    mode: "adaptive"                # Options: classic, adaptive
-    failureThreshold: 3
-    recoveryTimeMs: 10000
-  bulkhead:
-    maxConcurrent: 100
-  retry:
-    maxAttempts: 3
-    backoff: "full-jitter"          # Options: exponential, full-jitter, equal-jitter, decorrelated-jitter
+  retry: { enabled: true, maxAttempts: 3, backoff: full-jitter, budgetPercent: 15 }
+  circuitBreaker: { mode: adaptive, failureThreshold: 3, recoveryTimeMs: 15000 }
 
 observability:
-  metrics:
-    enabled: true
-    path: "/metrics"
+  metrics: { enabled: true, path: "/metrics" }
+  logging: { level: info, accessLog: true }
+
+admin:
+  enabled: true
+  registrationAllowlist: []        # empty = private ranges denied for runtime registration
 ```
 
 ---
 
-## 📚 Complete Technical Documentation
+## Operations
 
-Comprehensive architectural deep-dives with ASCII diagrams, code flows, and configuration references are available in the [`docs/`](./docs/00-index.md) directory:
+| Task | How |
+|---|---|
+| Reload configuration | Edit the config file. The master validates it, starts workers on the new config, and retires the old workers gracefully. The process is never restarted. |
+| Graceful shutdown | `SIGTERM` stops accepting new connections, lets in-flight requests finish and flushes access logs before exit. |
+| Health and readiness | `GET /__health` (liveness) and `GET /__ready` (readiness) |
+| Metrics | `GET /metrics` in Prometheus exposition format |
+| Load-balancer state | `GET /__lb-stats` |
+| Runtime registry | `POST /__registry/register`, `/__registry/heartbeat/:id`, `/__registry/deregister/:id` |
+| Cache control | `POST /__cache/purge/pattern`, `POST /__cache/purge/tag`, `POST /__cdc/webhook` (Debezium events) |
 
-| # | Topic | Document |
+All `/__*` endpoints require the admin secret.
+
+---
+
+## Known limitations and roadmap
+
+| Area | Current state | Plan |
 |---|---|---|
-| **01** | WebSocket Proxying | [01-websocket.md](./docs/01-websocket.md) |
-| **02** | TLS & HTTPS Termination | [02-tls-https.md](./docs/02-tls-https.md) |
-| **03** | 12 Load Balancing Strategies | [03-load-balancing.md](./docs/03-load-balancing.md) |
-| **04** | Active & Passive Health Checks | [04-health-checks.md](./docs/04-health-checks.md) |
-| **05** | 5 Rate Limiting Algorithms | [05-rate-limiting.md](./docs/05-rate-limiting.md) |
-| **06** | Classic & Adaptive Circuit Breakers | [06-circuit-breaker.md](./docs/06-circuit-breaker.md) |
-| **07** | High-Performance Caching & Invalidation | [07-caching.md](./docs/07-caching.md) |
-| **08** | Master-Worker Cluster Architecture | [08-master-worker-architecture.md](./docs/08-master-worker-architecture.md) |
-| **09** | Dynamic Service Registry | [09-service-registry.md](./docs/09-service-registry.md) |
-| **10** | Onion Middleware Pipeline | [10-middleware-pipeline.md](./docs/10-middleware-pipeline.md) |
-| **11** | Observability, Prometheus & Grafana | [11-observability.md](./docs/11-observability.md) |
-| **12** | Complete HTTPS Request Flow | [12-https-request-flow.md](./docs/12-https-request-flow.md) |
-| **13** | Zod Schema Configuration Validation | [13-config-zod-validation.md](./docs/13-config-zod-validation.md) |
-| **14** | Retry Handler, Budget & Bulkhead | [14-retry-bulkhead.md](./docs/14-retry-bulkhead.md) |
-| **15** | Connection Pooling & Socket Reuse | [15-connection-pool.md](./docs/15-connection-pool.md) |
-| **16** | Two-Tier Caching (L1 RAM + L2 Redis) | [16-multi-tier-caching.md](./docs/16-multi-tier-caching.md) |
-| **17** | Event-Driven CDC Invalidation (Debezium) | [17-cdc-cache-invalidation.md](./docs/17-cdc-cache-invalidation.md) |
-| **18** | Distributed Tracing & Correlation IDs | [18-tracing.md](./docs/18-tracing.md) |
-| **19** | Health Gating: Readiness vs Liveness | [19-readiness-liveness.md](./docs/19-readiness-liveness.md) |
-| **20** | Multi-Tenant Log Streaming Webhooks | [20-tenant-log-streamer.md](./docs/20-tenant-log-streamer.md) |
-| **21** | Operations & Deployment Guide | [21-deployment.md](./docs/21-deployment.md) |
-| **22** | Testing Architecture & Strategy | [22-testing-strategy.md](./docs/22-testing-strategy.md) |
+| Small-request throughput | About 42% of nginx on 1 KB requests, because of per-request JavaScript pipeline overhead. Large-payload throughput is on par. | Profile-guided reductions in per-request allocations and middleware work |
+| Memory footprint | About 180–210 MB per worker under load, against nginx's tens of MB, which is typical for a V8-based runtime | Tune the connection pool and buffer sizes per deployment |
+| Protocols | HTTP/1.1, WebSocket and SSE. No HTTP/2 or HTTP/3 to clients yet. | HTTP/2 termination |
+| Circuit-breaker state | Breaker state is kept per worker, the same model Envoy uses. With N workers, up to N half-open probes can reach a recovering upstream at once. | Optional shared breaker state through Redis |
+| Long-duration testing | The 30-minute soak verifies every feature, but it has only been run on a single laptop, where the proxy, upstreams, Redis and load generator share 16 GB of RAM | Multi-hour soak on dedicated Linux hosts |
+| Test coverage | The tenant log streamer and some rate-limit and backoff variants are covered by unit tests but not yet by end-to-end tests | End-to-end suite for every strategy and algorithm |
 
 ---
 
-## 🧪 Testing & Verification Suites
+## Documentation
 
-Ninja Reverse Proxy follows a strict testing pyramid to ensure zero unhandled socket leaks or runtime crashes before load testing:
+| Topic | Document |
+|---|---|
+| Master-worker architecture | [08-master-worker-architecture.md](./docs/08-master-worker-architecture.md) |
+| Load-balancing strategies | [03-load-balancing.md](./docs/03-load-balancing.md) |
+| Rate-limiting algorithms | [05-rate-limiting.md](./docs/05-rate-limiting.md) |
+| Circuit breakers | [06-circuit-breaker.md](./docs/06-circuit-breaker.md) |
+| Retries, budgets and bulkheads | [14-retry-bulkhead.md](./docs/14-retry-bulkhead.md) |
+| Caching and invalidation | [07-caching.md](./docs/07-caching.md), [16-multi-tier-caching.md](./docs/16-multi-tier-caching.md), [17-cdc-cache-invalidation.md](./docs/17-cdc-cache-invalidation.md) |
+| Health checks and readiness | [04-health-checks.md](./docs/04-health-checks.md), [19-readiness-liveness.md](./docs/19-readiness-liveness.md) |
+| Service registry | [09-service-registry.md](./docs/09-service-registry.md) |
+| TLS and the HTTPS request flow | [02-tls-https.md](./docs/02-tls-https.md), [12-https-request-flow.md](./docs/12-https-request-flow.md) |
+| WebSockets | [01-websocket.md](./docs/01-websocket.md) |
+| Connection pooling | [15-connection-pool.md](./docs/15-connection-pool.md) |
+| Middleware pipeline | [10-middleware-pipeline.md](./docs/10-middleware-pipeline.md) |
+| Observability and tracing | [11-observability.md](./docs/11-observability.md), [18-tracing.md](./docs/18-tracing.md), [20-tenant-log-streamer.md](./docs/20-tenant-log-streamer.md) |
+| Configuration validation | [13-config-zod-validation.md](./docs/13-config-zod-validation.md) |
+| Deployment | [21-deployment.md](./docs/21-deployment.md) |
+| Testing strategy | [22-testing-strategy.md](./docs/22-testing-strategy.md) |
+| Performance formulas | [23-production-performance-formulas.md](./docs/23-production-performance-formulas.md) |
+| Test and benchmark reports | [docs/results/](./docs/results/) |
 
-### 1. In-Memory Unit & Subsystem Audit (183 Tests)
-Runs in-memory with zero network overhead. Validates every algorithm, mathematical formula, state machine, and data structure:
-```bash
-npm run test:audit
-```
-
-### 2. Protocol & Network Transport Smoke Test (6 Checks)
-Validates port 8080 $\to$ 8443 auto-redirect, TLS socket negotiation, basic WebSocket 101 upgrade, and live Prometheus scrape:
-```bash
-npm run test:live
-```
-
-### 3. Strict Real-App Integration Suite (10 Checks)
-Zero shortcuts. Tests real HTML delivery, CORS preflight, distributed trace headers, 4-hit sticky session pinning, Socket.IO tunneling, slow backend tolerance (`/slow`), automatic retry on flaky upstreams (`/flake`), and 30-request concurrency burst against live backends:
-```bash
-npm run test:universal
-```
-
-### 4. Hyperscale Load & Stress Benchmark (Up to 1,000 VUs)
-Benchmarked under authentic multi-method traffic (GET catalog queries, POST JSON orders, PUT mutations, Bearer JWT auth, and rate limiter clamping) using **Power of Two Choices (P2C)** across 4 backend nodes:
-
-```bash
-# Run the automated 10-stage hyperscale suite:
-node tests/load/load-runner.mjs
-```
-
-#### 📊 Verified Benchmark Key Results (Apple M5 10-Core, 6 Clustered Workers)
-| Scenario Milestone | Concurrency (VUs) | Workload Profile | Throughput (RPS) | Total Requests | Latency P50 | Latency P99 | Error Rate | Status |
-|---|---|---|---|---|---|---|---|---|
-| **Baseline Overhead** | **100 VUs** | `ecommerce_mix` | **3,913.4 req/s** | 39,305 | `21.19ms` | `92.15ms` | **0.00%** | ✅ PASS |
-| **Production Scale** | **300 VUs** | `ecommerce_mix` | **5,421.7 req/s** | 54,475 | `51.35ms` | `123.12ms` | **0.00%** | ✅ PASS |
-| **High Concurrency** | **500 VUs** | `ecommerce_mix` | **6,650.1 req/s** | 53,389 | `73.65ms` | `135.52ms` | **0.00%** | ✅ PASS |
-| **Peak Hyperscale Ceiling**| **1,000 VUs** | `ecommerce_mix` | **5,992.8 req/s** | 48,176 | `155.08ms` | `327.38ms` | **0.00%** | ✅ PASS |
-| **Sliding Window Defense** | **500 VUs** | `rate_limited_sliding_window` | **17,750.8 req/s** | 142,421 | `20.85ms` | `96.57ms` | **0.00%** | ✅ PASS |
-| **DDoS Saturation Spike** | **1,000 VUs** | `ddos_burst` | **13,685.7 req/s** | 82,641 | `61.02ms` | `223.28ms` | **0.00%** | ✅ PASS |
-
-> **Grand Totals**: **627,212 Requests Processed** | **Peak Throughput: 17,750 req/s** | **Errors: 0.00%** | **Max Memory: 150 MB**
-
-#### 🔬 Local Machine Bottleneck vs Cloud Scaling Capacity:
-- **Current Local Ceiling (~1,500 – 2,000 VUs)**: On a single development machine, the client load generator, the 6 proxy workers, and the 4 backend mock servers all share the same physical CPU and loopback network stack (`127.0.0.1`), competing for OS ephemeral ports and socket buffers.
-- **Distributed Cloud Capacity (10,000 – 50,000+ VUs)**: When deployed in Kubernetes or AWS/GCP with dedicated client nodes and isolated backend pods, the proxy's non-blocking epoll/kqueue event loop can easily handle **tens of thousands of concurrent connections** without local loopback contention.
-
-👉 **[View Official Grafana k6 Binary Live Report (243,642 Reqs @ 1,000 VUs)](./docs/results/load-tests/k6-live-benchmark-report.md)**  
-👉 **[View Full In-Depth Benchmark Report (10 Stages)](./docs/results/load-tests/load-test-report.md)**  
-👉 **[View Subsystem & Algorithm Architecture Trade-Off Guide](./docs/results/load-tests/algorithm-tradeoffs.md)**  
-👉 **[View Raw JSON Telemetry Data](./docs/results/load-tests/load_test_results.json)**
+Integration runs against real applications in other stacks (Express, FastAPI, Spring Boot, Ktor) are in [`docs/results/`](./docs/results/).
 
 ---
 
-## 📦 Build & Run
+## License
 
-```bash
-# 1. Install dependencies
-pnpm install
-
-# 2. Build TypeScript bundle to dist/
-npm run build
-
-# 3. Generate self-signed TLS certificates (dev)
-npm run generate-certs
-
-# 4. Start Proxy in Production Mode
-npm start
-
-# 5. Start Proxy with Watch/Hot-Reload Mode
-npm run dev
-```
-
----
-
-## 📜 License
-
-MIT License © 2026 Praveen Kumar
+ISC
