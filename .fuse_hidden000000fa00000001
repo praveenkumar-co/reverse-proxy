@@ -1,0 +1,86 @@
+{
+  "fast": {
+    "id": "fast",
+    "url": "http://127.0.0.1:4601",
+    "registeredAt": 1794026702038,
+    "lastHeartbeat": 1794026702038,
+    "status": "UP"
+  },
+  "slow": {
+    "id": "slow",
+    "url": "http://127.0.0.1:4602",
+    "registeredAt": 1794026702038,
+    "lastHeartbeat": 1794026702038,
+    "status": "UP"
+  },
+  "canary-candidate": {
+    "id": "canary-candidate",
+    "url": "http://127.0.0.1:4603",
+    "registeredAt": 1794026702038,
+    "lastHeartbeat": 1794026702038,
+    "status": "UP"
+  },
+  "baseline": {
+    "id": "baseline",
+    "url": "http://127.0.0.1:4604",
+    "registeredAt": 1794026702038,
+    "lastHeartbeat": 1794026702038,
+    "status": "UP"
+  },
+  "orders-backend": {
+    "id": "orders-backend",
+    "url": "http://127.0.0.1:4605",
+    "registeredAt": 1794026702039,
+    "lastHeartbeat": 1794026702039,
+    "status": "UP"
+  },
+  "users-backend": {
+    "id": "users-backend",
+    "url": "http://127.0.0.1:4606",
+    "registeredAt": 1794026702039,
+    "lastHeartbeat": 1794026702039,
+    "status": "UP"
+  },
+  "cb-backend": {
+    "id": "cb-backend",
+    "url": "http://127.0.0.1:4607",
+    "registeredAt": 1794026702039,
+    "lastHeartbeat": 1794026702039,
+    "status": "UP"
+  },
+  "cache-tag-backend": {
+    "id": "cache-tag-backend",
+    "url": "http://127.0.0.1:4608",
+    "registeredAt": 1794026702039,
+    "lastHeartbeat": 1794026702039,
+    "status": "UP"
+  },
+  "cdc-backend": {
+    "id": "cdc-backend",
+    "url": "http://127.0.0.1:4612",
+    "registeredAt": 1794026702039,
+    "lastHeartbeat": 1794026702039,
+    "status": "UP"
+  },
+  "stale-error-backend": {
+    "id": "stale-error-backend",
+    "url": "http://127.0.0.1:4609",
+    "registeredAt": 1794026702039,
+    "lastHeartbeat": 1794026702039,
+    "status": "UP"
+  },
+  "stale-swr-backend": {
+    "id": "stale-swr-backend",
+    "url": "http://127.0.0.1:4610",
+    "registeredAt": 1794026702039,
+    "lastHeartbeat": 1794026702039,
+    "status": "UP"
+  },
+  "echo-backend": {
+    "id": "echo-backend",
+    "url": "http://127.0.0.1:4611",
+    "registeredAt": 1794026702039,
+    "lastHeartbeat": 1794026702039,
+    "status": "UP"
+  }
+}
