@@ -42,11 +42,25 @@ export class Logger {
   // multiple worker processes appending to the same path concurrently as the old per-call
   // open/write/close was.
   private logStreams = new Map<string, WriteStream>();
+  // Root cause of the Phase G soak's ~24% access-log loss (confirmed directly: a destroyed
+  // WriteStream's .write() returns false WITHOUT throwing -- the old code never checked that
+  // return value and never evicted the dead stream from this map, so one transient fs error
+  // (EMFILE, ENOSPC, a disk hiccup) on one worker's stream silently dropped every access-log
+  // line that worker ever tried to write for the rest of the process's life, while the
+  // Prometheus counter -- synchronous, in-memory, independent of this stream -- kept counting
+  // normally the whole time. Self-healing here bounds the blast radius to whatever was
+  // in-flight at the exact moment of the one-time error, instead of the rest of the run.
   private getLogStream(fullPath: string): WriteStream {
     let stream = this.logStreams.get(fullPath);
+    if (stream && (stream.destroyed || !stream.writable)) {
+      this.logStreams.delete(fullPath);
+      stream = undefined;
+    }
     if (!stream) {
       stream = createWriteStream(fullPath, { flags: "a" });
-      stream.on("error", () => {}); // a broken stream just means subsequent writes silently no-op
+      stream.on("error", () => {
+        this.logStreams.delete(fullPath);
+      });
       this.logStreams.set(fullPath, stream);
     }
     return stream;
@@ -92,6 +106,17 @@ export class Logger {
     this._emit("ERROR", source, message, meta);
   }
 
+  // A request line is dropped (never queued at all, counted instead of silently lost) once a
+  // single stream's own unwritten buffer exceeds this many bytes -- the bound exists so a
+  // disk that can't keep up turns into a counted, visible drop rate instead of unbounded
+  // process memory growth holding every line that's ever been written since. 8MB is roughly
+  // 50-80k lines at this format's typical length, comfortably more than one sampling
+  // interval's worth of traffic falling behind before it's noticed.
+  private static readonly ACCESS_LOG_MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
+
+  /** Returns true if the line was queued for writing, false if it was dropped because the
+   *  stream's own unwritten buffer already exceeds ACCESS_LOG_MAX_BUFFERED_BYTES -- the
+   *  caller is expected to count a false return in a metric, never to drop it silently. */
   async writeAccessLog(
     logPath: string | undefined,
     clientIp: string,
@@ -101,18 +126,25 @@ export class Logger {
     bytesSent: number,
     latencyMs: number,
     userAgent: string,
-  ): Promise<void> {
-    if (!logPath) return;
+    requestId = "-",
+  ): Promise<boolean> {
+    if (!logPath) return true;
     const timestamp = new Date().toISOString();
     const line =
       `${clientIp} - - [${timestamp}] "${method} ${url} HTTP/1.1" ` +
-      `${statusCode} ${bytesSent} "-" "${userAgent}" ${latencyMs.toFixed(2)}ms\n`;
+      `${statusCode} ${bytesSent} "-" "${userAgent}" ${latencyMs.toFixed(2)}ms rid=${requestId}\n`;
     try {
       const fullPath = path.resolve(logPath);
       await this.ensureLogDir(path.dirname(fullPath));
-      this.getLogStream(fullPath).write(line);
+      const stream = this.getLogStream(fullPath);
+      if (stream.writableLength > Logger.ACCESS_LOG_MAX_BUFFERED_BYTES) {
+        return false;
+      }
+      stream.write(line);
+      return true;
     } catch (err: any){
       this._emit("ERROR", "Logger", `Failed to write access log: ${err.message}`);
+      return false;
     }
   }
 
@@ -163,7 +195,8 @@ export async function writeAccessLog(
   bytesSent: number,
   latencyMs: number,
   userAgent: string,
-): Promise<void> {
+  requestId = "-",
+): Promise<boolean> {
   return logger.writeAccessLog(
     logPath,
     clientIp,
@@ -173,5 +206,6 @@ export async function writeAccessLog(
     bytesSent,
     latencyMs,
     userAgent,
+    requestId,
   );
 }

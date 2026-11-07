@@ -73,7 +73,7 @@ test("Observability 4: Logger.flushAll() guarantees every queued access-log writ
     // Fire every write without awaiting in between (mirrors the real request-handling path,
     // where writeAccessLog is called fire-and-forget on every response) so nothing here gives
     // the stream extra event-loop turns to flush on its own -- only flushAll() should do that.
-    const writes: Promise<void>[] = [];
+    const writes: Promise<boolean>[] = [];
     for (let i = 0; i < LINES; i++) {
       writes.push(logger.writeAccessLog(logPath, "127.0.0.1", "GET", `/line/${i}`, 200, 0, 1.2, "-"));
     }

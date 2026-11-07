@@ -25,6 +25,10 @@ export class MetricsRegistry {
   private requestsTotal = new Map<string, number>();
   private activeConnections = new Map<string, number>();
   private cacheOperations = new Map<string, number>();
+  // Counts an access-log line the logger itself decided to drop rather than queue
+  // unboundedly (see Logger.ACCESS_LOG_MAX_BUFFERED_BYTES) -- a dropped line must always be
+  // counted here, never silently discarded, so a disk falling behind under load is visible.
+  private accessLogDropped = 0;
   private healthyUpstreams: Set<string>;
 
   constructor(healthyUpstreams: Set<string>){
@@ -50,6 +54,9 @@ export class MetricsRegistry {
     const current = this.activeConnections.get(upstreamId) || 0;
     this.activeConnections.set(upstreamId, Math.max(0, current + delta));
   }
+  public recordAccessLogDropped(){
+    this.accessLogDropped++;
+  }
   public recordCacheOp(action: "hit" | "miss"){
     this.cacheOperations.set(
       action,
@@ -61,6 +68,7 @@ export class MetricsRegistry {
       requestsTotal: Array.from(this.requestsTotal.entries()),
       activeConnections: Array.from(this.activeConnections.entries()),
       cacheOperations: Array.from(this.cacheOperations.entries()),
+      accessLogDropped: this.accessLogDropped,
       histograms: histogramRegistry.getSnapshotAll(),
     };
   }
@@ -80,6 +88,9 @@ export class MetricsRegistry {
       for(const [action, count] of snap.cacheOperations){
         this.cacheOperations.set(action, (this.cacheOperations.get(action) || 0) + count);
       }
+    }
+    if(typeof snap.accessLogDropped === "number"){
+      this.accessLogDropped += snap.accessLogDropped;
     }
     if(snap.histograms){
       histogramRegistry.mergeAll(snap.histograms);
@@ -108,6 +119,10 @@ export class MetricsRegistry {
     rawOutput += "# TYPE ninja_cache_operations_total counter\n";
     rawOutput += `ninja_cache_operations_total{action="hit"} ${this.cacheOperations.get("hit") || 0}\n`;
     rawOutput += `ninja_cache_operations_total{action="miss"} ${this.cacheOperations.get("miss") || 0}\n`;
+    rawOutput += "\n";
+    rawOutput += "# HELP ninja_access_log_dropped_total Access-log lines dropped because the write buffer exceeded its bound\n";
+    rawOutput += "# TYPE ninja_access_log_dropped_total counter\n";
+    rawOutput += `ninja_access_log_dropped_total ${this.accessLogDropped}\n`;
     rawOutput += "\n";
     rawOutput += "# HELP ninja_upstream_status Health status of the upstream (1 = UP, 0 = DOWN)\n";
     rawOutput += "# TYPE ninja_upstream_status gauge\n";

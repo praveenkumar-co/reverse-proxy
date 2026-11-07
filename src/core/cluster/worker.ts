@@ -2,6 +2,7 @@ import http from "node:http";
 import https from "node:https";
 import tls from "node:tls";
 import net from "node:net";
+import crypto from "node:crypto";
 import zlib from "node:zlib";
 import { readFileSync, existsSync } from "node:fs";
 import { Transform, Writable } from "node:stream";
@@ -836,24 +837,8 @@ async function performUpstreamCall(
 
   return new Promise<AttemptOutcome>((resolveOutcome) => {
     let connectTimeoutTimer: NodeJS.Timeout;
-    // Read-phase timeout: a socket-level idle timer (armed once upstreamRes exists, covering
-    // both the small buffered error-body path and the streamed success path) rather than a
-    // JS-level clearTimeout()+setTimeout() pair reset by hand on every single chunk. The
-    // socket's own idle timer already resets itself on any read/write activity, so this gets
-    // the identical "abort if nothing happens for readTimeoutMs" behavior without per-chunk
-    // timer churn.
     let idleTimeoutArmed = false;
-    // Deliberately a different name from the response callback's own `upstreamRes` parameter
-    // below — it assigns into this one so onIdleTimeout/clearIdleTimeout (defined before that
-    // callback exists) can still reach it via closure, without the parameter shadowing it.
     let activeUpstreamRes: http.IncomingMessage | undefined;
-    // Captured directly at arm time rather than re-read from activeUpstreamRes.socket later:
-    // Node nulls out IncomingMessage.socket once the message is fully consumed (to avoid the
-    // *caller* holding a stale reference), so by the time a success response finishes writing
-    // to the client and clearIdleTimeout() runs, activeUpstreamRes.socket is already null —
-    // removeListener on it silently no-ops, and the 'timeout' listener this armed (plus the
-    // whole closure scope it keeps alive — upstreamRes/proxyReq/res and every sibling closure
-    // here) leaks for the life of the pooled, keep-alive-reused socket.
     let timeoutSocket: net.Socket | undefined;
     const onIdleTimeout = () => {
       try { proxyReq.destroy(); } catch {}
@@ -884,9 +869,6 @@ async function performUpstreamCall(
         passiveProbe.record({ upstreamId, statusCode: o.statusCode ?? 502, latencyMs });
       }
       upstreamBulkheads.get(upstreamId)?.leave();
-      // The gauge decrement for this attempt happens in the caller (attempt(), right after
-      // this promise resolves) via releaseCurrentUpstream() -- not here. See
-      // markUpstreamActive/markUpstreamInactive above.
       lb.releaseConnection(upstreamId);
       resolveOutcome(o);
     };
@@ -936,7 +918,7 @@ async function performUpstreamCall(
             clearIdleTimeout();
             upstreamRes.destroy();
             proxyReq.destroy();
-            recordAndLog(502, receivedBytes, performance.now() - startTime, method, cleanPath, upstreamId, headers, clientIp);
+            recordAndLog(502, receivedBytes, performance.now() - startTime, method, cleanPath, upstreamId, headers, clientIp, res);
             finishOutcome({ kind: "terminal-error", statusCode: 502, errorMessage: "Upstream response exceeded maximum allowed size" });
             return;
           }
@@ -946,7 +928,7 @@ async function performUpstreamCall(
           if (aborted) return;
           clearIdleTimeout();
           const bodyBuffer = Buffer.concat(chunks);
-          recordAndLog(statusCode, bodyBuffer.length, performance.now() - startTime, method, cleanPath, upstreamId, headers, clientIp);
+          recordAndLog(statusCode, bodyBuffer.length, performance.now() - startTime, method, cleanPath, upstreamId, headers, clientIp, res);
           void finalizeErrorish(statusCode, bodyBuffer).then(finishOutcome);
         });
         upstreamRes.on("error", () => {
@@ -984,13 +966,10 @@ async function performUpstreamCall(
         upstreamRes.resume();
         upstreamRes.destroy();
         proxyReq.destroy();
-        recordAndLog(502, 0, performance.now() - startTime, method, cleanPath, upstreamId, headers, clientIp);
+        recordAndLog(502, 0, performance.now() - startTime, method, cleanPath, upstreamId, headers, clientIp, res);
         finishOutcome({ kind: "terminal-error", statusCode: 502, errorMessage: "Upstream response exceeded maximum allowed size" });
         return;
       }
-      // Gzip recompression changes the byte count the cap is meant to bound (the declared
-      // length describes the upstream's uncompressed body), so the active guard stays in
-      // place whenever shouldGzip is true regardless of what Content-Length declared.
       const skipByteGuard = !shouldGzip && declaredContentLength !== undefined && declaredContentLength <= maxResponseBytes;
 
       const replyHeaders: Record<string, any> = { ...upstreamRes.headers };
@@ -1042,25 +1021,12 @@ async function performUpstreamCall(
         upstreamRes.resume();
         res.end();
         clearIdleTimeout();
-        recordAndLog(statusCode, 0, performance.now() - startTime, method, cleanPath, upstreamId, headers, clientIp);
+        recordAndLog(statusCode, 0, performance.now() - startTime, method, cleanPath, upstreamId, headers, clientIp, res);
         if (isCacheMethod) metricsRegistry.recordCacheOp("miss");
         finishOutcome({ kind: "success", statusCode });
         return;
       }
-
       const cacheChunks: Buffer[] = [];
-
-      // Chained by hand with .pipe() rather than stream.pipeline() — pipeline()'s automatic
-      // per-stream finished()/eos() bookkeeping is real overhead relative to a typical small
-      // JSON response (measured ~30% of this gate's throughput). .pipe() gives the exact same
-      // backpressure guarantee end-to-end; the cost is that *this* code must do the error-
-      // propagation and cleanup pipeline() would otherwise have handled, via destroyAll below.
-      //
-      // The byte-guard Transform is skipped entirely when skipByteGuard is true (declared
-      // Content-Length already proved the body is within maxResponseBytes, see above) — one
-      // fewer stream stage, and one fewer thing counting bytes, for the common case of a
-      // normal-sized, non-chunked response. It's still built for anything whose size isn't
-      // known upfront (chunked transfer-encoding, or no Content-Length at all).
       const liveStreams: Array<{ destroy?: () => void }> = [upstreamRes, res];
       let source: NodeJS.ReadableStream = upstreamRes;
       if (shouldGzip) {
@@ -1095,7 +1061,7 @@ async function performUpstreamCall(
         clearIdleTimeout();
         void (async () => {
           const latencyMs = performance.now() - startTime;
-          recordAndLog(statusCode, 0, latencyMs, method, cleanPath, upstreamId, headers, clientIp);
+          recordAndLog(statusCode, 0, latencyMs, method, cleanPath, upstreamId, headers, clientIp, res);
           if (isCacheMethod) metricsRegistry.recordCacheOp("miss");
           if (isCacheable) {
             const maxAgeSeconds = pathRule?.cache?.ttlSeconds ?? effCache.ttlSeconds;
@@ -1127,12 +1093,7 @@ async function performUpstreamCall(
           return;
         }
         logger.error("Worker", `Upstream response stream aborted: ${err.message}`, { upstreamId });
-        // res.writeHead(statusCode, ...) already ran before this stream existed (see above) --
-        // the client already received that status line, so logging the synthetic 502 this used
-        // to pass here would be a lie, and skipping recordAndLog entirely (as this did until
-        // now) silently dropped every mid-stream upstream failure from both Prometheus and the
-        // access log, unlike every other terminal outcome in this function.
-        recordAndLog(statusCode, 0, performance.now() - startTime, method, cleanPath, upstreamId, headers, clientIp);
+        recordAndLog(statusCode, 0, performance.now() - startTime, method, cleanPath, upstreamId, headers, clientIp, res);
         finishOutcome({ kind: "terminal-error", statusCode, errorMessage: err.message });
       };
       res.on("finish", onStreamDone);
@@ -1140,11 +1101,6 @@ async function performUpstreamCall(
       upstreamRes.on("error", onStreamError);
       byteGuard?.on("error", onStreamError);
     });
-
-    // Covers the connecting phase, before any 'response' event: if the client disconnects
-    // before upstreamRes even exists, this is the only handle available to cancel the
-    // pending connection. Overwritten (to also destroy upstreamRes) once the response
-    // callback above runs.
     abortHandle.destroy = () => {
       try {
         proxyReq.destroy();
@@ -1158,43 +1114,29 @@ async function performUpstreamCall(
       }
       clearIdleTimeout();
       proxyReq.destroy();
-      recordAndLog(504, 0, workerConfig.server.connectTimeoutMs, method, cleanPath, upstreamId, headers, clientIp);
+      recordAndLog(504, 0, workerConfig.server.connectTimeoutMs, method, cleanPath, upstreamId, headers, clientIp, res);
       finishOutcome({ kind: "retryable-error", statusCode: 504, errorMessage: "Connect Timeout" });
     }, workerConfig.server.connectTimeoutMs);
 
     proxyReq.on("error", (err: any) => {
       clearTimeout(connectTimeoutTimer);
       clearIdleTimeout();
-      // proxyReq.destroy() (e.g. the request-body byte-limit guard tearing down an oversized
-      // upload) fires this 'error' event asynchronously, after the outcome it caused has
-      // already been finishOutcome()'d with its own, correct status. finishOutcome() itself
-      // no-ops on a second call, but logger.error/recordAndLog below are not otherwise
-      // guarded — without this check, every request this handler fires for ends up double-
-      // logged: once with its real status, then again moments later as a spurious 502 here.
       if (settled) return;
       if (abortHandle.aborted) {
         finishOutcome({ kind: "aborted" });
         return;
       }
       logger.error(`Worker:${process.pid}`, `proxyReq error: ${err.message} (${err.code})`);
-      recordAndLog(502, 0, performance.now() - startTime, method, cleanPath, upstreamId, headers, clientIp);
+      recordAndLog(502, 0, performance.now() - startTime, method, cleanPath, upstreamId, headers, clientIp, res);
       finishOutcome({ kind: "retryable-error", statusCode: 502, errorMessage: `Upstream connection failed: ${err.message}` });
     });
 
     if (bodySource.mode === "empty") {
-      // The overwhelmingly common case (GET/HEAD, no body) skips stream.pipeline() entirely
-      // — profiling under load showed its internal AbortController/eos() bookkeeping (needed
-      // to replay backpressure/error state between two real streams) costing real CPU even
-      // when there's nothing to stream; a bodyless request has nothing for it to do.
       proxyReq.end();
     } else if (bodySource.mode === "buffered") {
       if (bodySource.buffer.length > 0) proxyReq.write(bodySource.buffer);
       proxyReq.end();
     } else {
-      // A retry-buffer overflow (see handleProxyDispatch) already consumed `prefix` bytes from
-      // `req` before giving up on buffering — write them first, in order, then pipe the rest of
-      // the live stream. The guard's count starts at prefix.length so the combined prefix+stream
-      // total is still held to the same limit, instead of allowing `limit` bytes on top of it.
       if (bodySource.prefix && bodySource.prefix.length > 0) proxyReq.write(bodySource.prefix);
       const guard = createByteLimitGuard(bodySource.limit, undefined, bodySource.prefix?.length ?? 0);
       pipeline(bodySource.req as any, guard as any, proxyReq as any).catch((err: any) => {
@@ -1204,7 +1146,7 @@ async function performUpstreamCall(
             proxyReq.destroy();
           } catch {}
           clearIdleTimeout();
-          recordAndLog(413, 0, performance.now() - startTime, method, cleanPath, upstreamId, headers, clientIp);
+          recordAndLog(413, 0, performance.now() - startTime, method, cleanPath, upstreamId, headers, clientIp, res);
           finishOutcome({ kind: "terminal-error", statusCode: 413, errorMessage: "Payload Too Large" });
         } else {
           // proxyReq's own 'error' handler above already resolves the outcome for a
@@ -1212,6 +1154,59 @@ async function performUpstreamCall(
         }
       });
     }
+  });
+}
+interface PendingAccessLogEntry {
+  statusCode: number;
+  bytesSent: number;
+  latencyMs: number;
+  method: string;
+  routePath: string;
+  upstreamId: string;
+  clientIp: string;
+  userAgent: string;
+  requestId: string;
+}
+const pendingAccessLog = new WeakMap<http.ServerResponse, PendingAccessLogEntry>();
+const accessLogCloseHooked = new WeakSet<http.ServerResponse>();
+
+function resolveAccessLogPath(): string | undefined {
+  return workerConfig.observability?.logging?.accessLog === true
+    ? "logs/access.log"
+    : typeof workerConfig.observability?.logging?.accessLog === "string"
+      ? workerConfig.observability.logging.accessLog
+      : undefined;
+}
+
+async function flushAccessLogEntry(entry: PendingAccessLogEntry): Promise<void> {
+  const logPath = resolveAccessLogPath();
+  if (!logPath) return;
+  const written = await writeAccessLog(
+    logPath,
+    entry.clientIp || "unknown",
+    entry.method,
+    entry.routePath,
+    entry.statusCode,
+    entry.bytesSent,
+    entry.latencyMs,
+    entry.userAgent,
+    entry.requestId,
+  );
+  if (!written) metricsRegistry.recordAccessLogDropped();
+}
+
+function scheduleOrWriteAccessLog(res: http.ServerResponse | undefined, entry: PendingAccessLogEntry): void {
+  if (!res) {
+    void flushAccessLogEntry(entry);
+    return;
+  }
+  pendingAccessLog.set(res, entry);
+  if (accessLogCloseHooked.has(res)) return;
+  accessLogCloseHooked.add(res);
+  res.once("close", () => {
+    const final = pendingAccessLog.get(res);
+    pendingAccessLog.delete(res);
+    if (final) void flushAccessLogEntry(final);
   });
 }
 
@@ -1224,18 +1219,21 @@ function recordAndLog(
   upstreamId: string,
   headers: Record<string, any>,
   clientIp: string,
+  res: http.ServerResponse | undefined,
 ) {
   const tenantId = (headers["x-tenant-id"] as string) ?? "none";
   metricsRegistry.recordRequest(method, routePath, statusCode, upstreamId || "unknown", latencyMs, tenantId);
-  const logPath =
-    workerConfig.observability?.logging?.accessLog === true
-      ? "logs/access.log"
-      : typeof workerConfig.observability?.logging?.accessLog === "string"
-        ? workerConfig.observability.logging.accessLog
-        : undefined;
-  if (logPath) {
-    void writeAccessLog(logPath, clientIp || "unknown", method, routePath, statusCode, bytesSent, latencyMs, (headers["user-agent"] as string) ?? "-");
-  }
+  scheduleOrWriteAccessLog(res, {
+    statusCode,
+    bytesSent,
+    latencyMs,
+    method,
+    routePath,
+    upstreamId,
+    clientIp,
+    userAgent: (headers["user-agent"] as string) ?? "-",
+    requestId: (headers["x-request-id"] as string) ?? "-",
+  });
   if (workerConfig.observability?.tenantDelivery?.mode === "webhook") {
     tenantLogStreamer.queueLog(tenantId, {
       timestamp: new Date().toISOString(),
@@ -1251,17 +1249,8 @@ function recordAndLog(
 }
 
 async function finalizeErrorish(statusCode: number, bodyBuffer: Buffer): Promise<AttemptOutcome> {
-  // lb/bulkhead/connection accounting and passiveProbe recording happen centrally in
-  // performUpstreamCall's finishOutcome() — this just builds the outcome to resolve with.
   return { kind: "retryable-error", statusCode, errorMessage: bodyBuffer.toString("binary") };
 }
-
-// -----------------------------------------------------------------------------
-// Full per-request dispatch: upstream selection (canary/sticky/LB), bulkhead,
-// then the attempt+retry loop. This is a direct port of the old master.ts
-// dispatchToWorker()'s decision logic, with the IPC send replaced by a
-// direct performUpstreamCall().
-// -----------------------------------------------------------------------------
 async function handleProxyDispatch(
   req: http.IncomingMessage,
   res: http.ServerResponse,
@@ -1275,7 +1264,7 @@ async function handleProxyDispatch(
   if (!pathRule) {
     res.writeHead(404, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "Route not found" }));
-    recordAndLog(404, 0, performance.now() - startTime, method, url.split("?")[0] ?? url, "none", req.headers, clientIp);
+    recordAndLog(404, 0, performance.now() - startTime, method, url.split("?")[0] ?? url, "none", req.headers, clientIp, res);
     return;
   }
 
@@ -1316,11 +1305,6 @@ async function handleProxyDispatch(
         }
         chunks.push(chunk);
         if (received > retryBufferLimit) {
-          // Over the retry-buffer limit but still under the hard body-size cap: give up on
-          // buffering (and therefore on retrying this request) rather than hold the rest of
-          // a large body in memory too. Pause the stream — removing our own listeners first —
-          // so performUpstreamCall can later write these already-read bytes, then pipe the
-          // untouched remainder of `req` straight through with no gap or duplication.
           settled = true;
           cleanup();
           req.pause();
@@ -1390,7 +1374,7 @@ async function handleProxyDispatch(
         res.writeHead(503, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "No healthy upstreams available" }));
       }
-      recordAndLog(servedStale ? 200 : 503, 0, performance.now() - startTime, method, rule.path, "none", req.headers, clientIp);
+      recordAndLog(servedStale ? 200 : 503, 0, performance.now() - startTime, method, rule.path, "none", req.headers, clientIp, res);
       return;
     }
     const { upstreamId, routeStage, setCanaryCookieVal } = selected;
@@ -1413,7 +1397,7 @@ async function handleProxyDispatch(
         }
         res.writeHead(503, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Service unavailable — upstream concurrency limit reached" }));
-        recordAndLog(503, 0, performance.now() - startTime, method, rule.path, upstreamId, req.headers, clientIp);
+        recordAndLog(503, 0, performance.now() - startTime, method, rule.path, upstreamId, req.headers, clientIp, res);
         return;
       }
     }
@@ -1428,7 +1412,7 @@ async function handleProxyDispatch(
       lb.cancelProbe(upstreamId);
       res.writeHead(503);
       res.end("Service not found in registry");
-      recordAndLog(503, 0, performance.now() - startTime, method, rule.path, upstreamId, req.headers, clientIp);
+      recordAndLog(503, 0, performance.now() - startTime, method, rule.path, upstreamId, req.headers, clientIp, res);
       return;
     }
 
@@ -1518,11 +1502,13 @@ async function handleProxyDispatch(
 }
 function wsUpgradeHandler(req: http.IncomingMessage, socket: net.Socket, head: Buffer) {
   const startTime = performance.now();
+  const incomingRequestId = req.headers["x-request-id"];
+  req.headers["x-request-id"] = (typeof incomingRequestId === "string" && incomingRequestId) || crypto.randomUUID();
   const url = new URL(req.url!, `http://${req.headers.host}`);
   const pathRule = routeMatcher.match(url.pathname, req.method);
   if (!pathRule) {
     socket.destroy();
-    recordAndLog(404, 0, performance.now() - startTime, req.method ?? "GET", url.pathname, "none", req.headers, req.socket.remoteAddress ?? "unknown");
+    recordAndLog(404, 0, performance.now() - startTime, req.method ?? "GET", url.pathname, "none", req.headers, req.socket.remoteAddress ?? "unknown", undefined);
     return;
   }
   const clientIP = resolveClientIp(req, socket, {
@@ -1532,7 +1518,7 @@ function wsUpgradeHandler(req: http.IncomingMessage, socket: net.Socket, head: B
   const selected = selectUpstream(pathRule, req.headers, clientIP, new Set());
   if (!selected) {
     socket.destroy();
-    recordAndLog(503, 0, performance.now() - startTime, req.method ?? "GET", pathRule.path, "none", req.headers, clientIP);
+    recordAndLog(503, 0, performance.now() - startTime, req.method ?? "GET", pathRule.path, "none", req.headers, clientIP, undefined);
     return;
   }
   const { upstreamId } = selected;
@@ -1540,7 +1526,7 @@ function wsUpgradeHandler(req: http.IncomingMessage, socket: net.Socket, head: B
   if (!serviceInstance) {
     lb.cancelProbe(upstreamId);
     socket.destroy();
-    recordAndLog(503, 0, performance.now() - startTime, req.method ?? "GET", pathRule.path, upstreamId, req.headers, clientIP);
+    recordAndLog(503, 0, performance.now() - startTime, req.method ?? "GET", pathRule.path, upstreamId, req.headers, clientIP, undefined);
     return;
   }
   const outgoingHeaders = { ...req.headers };
@@ -1549,27 +1535,18 @@ function wsUpgradeHandler(req: http.IncomingMessage, socket: net.Socket, head: B
   }
   const reqFields = { method: req.method ?? "GET", url: req.url ?? "/", httpVersion: req.httpVersion, headers: outgoingHeaders };
   lb.incrementConnection(upstreamId);
-  // Tracked on the tunnel's own lifecycle, not a request/response cycle -- markUpstreamActive
-  // now (the upgrade is accepted) and markUpstreamInactive exactly once when the tunnel
-  // closes, via tunnelWebSocket's onClose (itself gated by a once-only flag on both the
-  // client and upstream sockets' close/end/error events, so this always fires exactly once).
   markUpstreamActive(upstreamId);
   const upstreamStaticConfig = workerConfig.server.upstreams.find((u) => u.id === upstreamId);
   const tlsConfig = socket instanceof tls.TLSSocket ? upstreamStaticConfig?.tls : undefined;
-  // Logged as a 101 (Switching Protocols) the moment the tunnel is accepted -- the only
-  // "response" a WebSocket upgrade ever sends, same convention nginx's own access log uses.
-  recordAndLog(101, 0, performance.now() - startTime, req.method ?? "GET", pathRule.path, upstreamId, req.headers, clientIP);
+  recordAndLog(101, 0, performance.now() - startTime, req.method ?? "GET", pathRule.path, upstreamId, req.headers, clientIP, undefined);
   tunnelWebSocket(socket, serviceInstance.url, reqFields, head, tlsConfig, () => {
     lb.releaseConnection(upstreamId);
     markUpstreamInactive(upstreamId);
   });
 }
-
-// -----------------------------------------------------------------------------
-// Main request handler: admin endpoints, then the middleware pipeline (CORS,
-// tracing, auth, rate limit, cache), then dispatch.
-// -----------------------------------------------------------------------------
 const proxyRequestHandler = async (req: http.IncomingMessage, res: http.ServerResponse) => {
+  const incomingRequestId = req.headers["x-request-id"];
+  req.headers["x-request-id"] = (typeof incomingRequestId === "string" && incomingRequestId) || crypto.randomUUID();
   activeRequestCount++;
   res.on("close", () => {
     activeRequestCount--;
@@ -1590,19 +1567,14 @@ const proxyRequestHandler = async (req: http.IncomingMessage, res: http.ServerRe
     broadcastCdcInvalidate: requestCdcInvalidateBroadcast,
   });
   if (isAdmin) return;
-
   const ctx = createContext(req, res, { trustProxy: workerConfig.server.trustProxy, trustedProxies: workerConfig.server.trustedProxies });
   const pipelineRunner = new MiddlewarePipeline();
-
-  // Matched once per request and reused by every stage below (including the final dispatch
-  // stage) — req.url/req.method never change mid-request, so the old pattern of every stage
-  // separately re-parsing the URL and re-running the route matcher was pure repeated cost.
   const url = new URL(req.url!, `https://${req.headers.host}`);
   const pathRule = routeMatcher.match(url.pathname, req.method);
 
   pipelineRunner.use(async (c, next) => {
     const guard = corsMiddleware(pathRule?.cors ?? {}, (c2) => {
-      recordAndLog(204, 0, performance.now() - c2.startTime, c2.req.method ?? "OPTIONS", pathRule?.path ?? url.pathname, "cors", c2.req.headers, c2.clientIp);
+      recordAndLog(204, 0, performance.now() - c2.startTime, c2.req.method ?? "OPTIONS", pathRule?.path ?? url.pathname, "cors", c2.req.headers, c2.clientIp, c2.res);
     });
     await guard(c, next);
   });
@@ -1634,7 +1606,7 @@ const proxyRequestHandler = async (req: http.IncomingMessage, res: http.ServerRe
         "X-RateLimit-Reset": String(globalCheck.resetAt),
         "X-RateLimit-Algorithm": globalCheck.algorithm,
       });
-      recordAndLog(429, 0, 0, c.req.method ?? "GET", pathRule?.path ?? "unmatched", "rate-limiter", c.req.headers, clientIP);
+      recordAndLog(429, 0, 0, c.req.method ?? "GET", pathRule?.path ?? "unmatched", "rate-limiter", c.req.headers, clientIP, c.res);
       c.res.end(
         JSON.stringify({ error: "Too Many Requests", scope: "global", algorithm: globalCheck.algorithm, state: globalCheck.algoState, retryAfter: `${Math.max(0, retryAfter)}s` }),
       );
@@ -1653,7 +1625,7 @@ const proxyRequestHandler = async (req: http.IncomingMessage, res: http.ServerRe
           "X-RateLimit-Reset": String(routeCheck.resetAt),
           "X-RateLimit-Algorithm": routeCheck.algorithm,
         });
-        recordAndLog(429, 0, 0, c.req.method ?? "GET", pathRule?.path ?? "unmatched", "rate-limiter", c.req.headers, clientIP);
+        recordAndLog(429, 0, 0, c.req.method ?? "GET", pathRule?.path ?? "unmatched", "rate-limiter", c.req.headers, clientIP, c.res);
         c.res.end(JSON.stringify({ error: "Too Many Requests", scope: "route", retryAfter: `${Math.max(0, retryAfter)}s`, algorithm: routeCheck.algorithm }));
         return;
       }
