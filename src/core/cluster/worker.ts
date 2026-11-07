@@ -810,7 +810,14 @@ async function performUpstreamCall(
   forwardHeaders["host"] = finalUpstreamUrl.host;
   forwardHeaders["X-Real-IP"] = clientIp || "unknown";
   forwardHeaders["X-Forwarded-For"] = headers["x-forwarded-for"] ? `${headers["x-forwarded-for"]}, ${clientIp}` : clientIp || "unknown";
-  forwardHeaders["X-Forwarded-Proto"] = headers["x-forwarded-proto"] || (isHttps ? "https" : "http");
+  // X-Forwarded-Proto must reflect whether the CLIENT's connection to this proxy was secure,
+  // not whether this hop to the upstream happens to be HTTPS -- those are unrelated (the
+  // overwhelmingly common deployment is an HTTPS edge talking plain HTTP to an internal
+  // upstream, which `isHttps` alone would always, incorrectly, report as "http"). Confirmed
+  // directly: an app behind this proxy using X-Forwarded-Proto for secure-cookie/CSRF logic
+  // would see every HTTPS client request reported as insecure.
+  const clientUsedTls = res.socket instanceof tls.TLSSocket;
+  forwardHeaders["X-Forwarded-Proto"] = headers["x-forwarded-proto"] || (clientUsedTls ? "https" : "http");
   forwardHeaders["X-Forwarded-Host"] = headers["x-forwarded-host"] || headers["host"] || "localhost";
   forwardHeaders["X-Forwarded-Port"] =
     headers["x-forwarded-port"] || String(workerConfig.server.port || workerConfig.server.listen || (isHttps ? 8443 : 8080));

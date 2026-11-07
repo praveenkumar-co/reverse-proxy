@@ -52,6 +52,19 @@ const HEALTHY_UPSTREAMS: Set<string> = new Set();
 let isShuttingDown = false;
 let clusterExitHandlerInstalled = false;
 
+// Crash-loop guard: the exit handler below respawns unconditionally, which is correct for a
+// rare, legitimate crash hours into uptime but would otherwise spin forever on a startup-time
+// failure that hits every worker identically (e.g. tls.enabled with a missing/invalid
+// certificate -- worker.ts throws synchronously during bootstrap, before ever binding a
+// listener). A worker that dies within WORKER_CRASH_LOOP_WINDOW_MS of being forked counts as a
+// "quick death"; enough of those in a row means every respawn is failing the same way, and the
+// right behavior is to fail fast and loudly -- a tight fork loop otherwise burns CPU forever
+// with no listener ever bound and no clear signal to the operator about what's wrong.
+const WORKER_FORK_TIMES = new Map<number, number>();
+let consecutiveQuickDeaths = 0;
+const WORKER_CRASH_LOOP_WINDOW_MS = 3000;
+const WORKER_CRASH_LOOP_THRESHOLD = 6;
+
 // In-memory-storage rate limiters only, keyed by scope ("global" or "route:<path>") — the
 // canonical instance a RL_LEASE_REQUEST draws batches of permits from. Redis/hybrid-storage
 // limiters are never built here; each worker owns its own instance of those directly.
@@ -446,7 +459,23 @@ export async function createServer(config: CreateServerConfig) {
       const idx = WORKER_POOL.indexOf(worker);
       if (idx !== -1) {
         WORKER_POOL.splice(idx, 1);
+        const forkedAt = WORKER_FORK_TIMES.get(worker.id) ?? 0;
+        WORKER_FORK_TIMES.delete(worker.id);
+        const lifetimeMs = Date.now() - forkedAt;
+        if (lifetimeMs < WORKER_CRASH_LOOP_WINDOW_MS) {
+          consecutiveQuickDeaths++;
+        } else {
+          consecutiveQuickDeaths = 0;
+        }
+        if (consecutiveQuickDeaths >= WORKER_CRASH_LOOP_THRESHOLD) {
+          logger.error(
+            "Master",
+            `Worker crash loop detected: ${consecutiveQuickDeaths} consecutive workers exited within ${WORKER_CRASH_LOOP_WINDOW_MS}ms of starting (worker ${worker.id} lived ${lifetimeMs}ms). Refusing to respawn further -- check the startup error above (a bad TLS certificate is the most common cause). Exiting.`,
+          );
+          process.exit(1);
+        }
         const newWorker = cluster.fork({ APP_CONFIG: JSON.stringify(ACTIVE_CONFIG) });
+        WORKER_FORK_TIMES.set(newWorker.id, Date.now());
         setupWorkerMessageHandling(newWorker);
         WORKER_POOL.push(newWorker);
         logger.info("Master", `Worker ${worker.id} exited unexpectedly — respawned as worker ${newWorker.id}`);
@@ -458,6 +487,7 @@ export async function createServer(config: CreateServerConfig) {
   const effectiveWorkerCount = workerCount && workerCount > 0 ? workerCount : os.cpus().length;
   for (let i = 0; i < effectiveWorkerCount; i++) {
     const worker = cluster.fork({ APP_CONFIG: JSON.stringify(ACTIVE_CONFIG) });
+    WORKER_FORK_TIMES.set(worker.id, Date.now());
     setupWorkerMessageHandling(worker);
     WORKER_POOL.push(worker);
   }
